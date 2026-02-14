@@ -44,11 +44,62 @@ Feature flags selected for nmem:
 
 Not needed at launch: `load_extension` (no external extensions), `vtab` (no virtual tables beyond FTS5), `blob` (no large binary storage), `chrono`/`time` (store timestamps as integers).
 
+### Schema
+
+Three tables: sessions, prompts, observations. User prompts are stored separately as intent markers — they frame the "why" for subsequent tool observations. Observations reference their preceding prompt via foreign key.
+
+```sql
+-- 001_initial.sql
+
+CREATE TABLE sessions (
+    id          TEXT PRIMARY KEY,   -- Claude Code session UUID
+    project     TEXT NOT NULL,      -- derived from cwd (e.g. "nmem", "library")
+    started_at  INTEGER NOT NULL,   -- unix timestamp (seconds)
+    ended_at    INTEGER,            -- null until Stop hook
+    signature   TEXT,               -- JSON: event type distribution, computed at session end
+    summary     TEXT                -- session summary from Stop hook
+);
+
+CREATE TABLE prompts (
+    id          INTEGER PRIMARY KEY,
+    session_id  TEXT NOT NULL REFERENCES sessions(id),
+    timestamp   INTEGER NOT NULL,   -- unix timestamp (seconds)
+    content     TEXT NOT NULL        -- user prompt text, truncated to 500 chars
+);
+
+CREATE TABLE observations (
+    id          INTEGER PRIMARY KEY,
+    session_id  TEXT NOT NULL REFERENCES sessions(id),
+    prompt_id   INTEGER REFERENCES prompts(id),  -- most recent user prompt (intent)
+    timestamp   INTEGER NOT NULL,   -- unix timestamp (seconds)
+    obs_type    TEXT NOT NULL,       -- file_read, file_edit, command, search, etc.
+    source_event TEXT NOT NULL,      -- PostToolUse, SessionStart, Stop
+    tool_name   TEXT,                -- Bash, Read, Edit, Write, Grep, etc.
+    file_path   TEXT,                -- normalized absolute path, when applicable
+    content     TEXT NOT NULL,       -- extracted content (command, pattern, description)
+    metadata    TEXT                 -- JSON: flexible extra fields
+);
+
+-- Indexes for dedup and retrieval
+CREATE INDEX idx_obs_dedup ON observations(session_id, obs_type, file_path, timestamp);
+CREATE INDEX idx_obs_session ON observations(session_id, timestamp);
+CREATE INDEX idx_obs_prompt ON observations(prompt_id);
+CREATE INDEX idx_obs_type ON observations(obs_type);
+CREATE INDEX idx_obs_file ON observations(file_path) WHERE file_path IS NOT NULL;
+CREATE INDEX idx_prompts_session ON prompts(session_id, id);
+```
+
+**Design rationale:**
+
+- **Prompts as a separate table.** A user prompt applies to 1-N subsequent tool calls. Storing it once and referencing by ID avoids duplicating the same text across observations. At retrieval, one join reconstructs intent: `SELECT o.*, p.content AS intent FROM observations o LEFT JOIN prompts p ON o.prompt_id = p.id`.
+- **prompt_id is nullable.** SessionStart and early tool calls before the first user prompt have no intent context. Tool calls during autonomous agent work (task_spawn chains) may also lack a direct prompt.
+- **content is the extraction target.** For file operations: the path. For commands: the command string. For searches: the pattern. This is what FTS5 indexes. The `file_path` column duplicates the path for structured queries without parsing content.
+- **metadata as JSON.** Escape hatch for per-obs-type fields that don't warrant columns yet. If a field appears on >30% of observations, promote it to a column in a migration.
+- **Timestamps as integer seconds.** Millisecond precision isn't needed for a memory system. Seconds simplify dedup window math and index comparison.
+
 ### Text Search: FTS5
 
 FTS5 is built into bundled SQLite — zero additional cost. Provides BM25-ranked full-text search sufficient for the expected data volume and query patterns.
-
-Configuration for nmem:
 
 ```sql
 -- External content table: index without duplicating data
@@ -244,3 +295,4 @@ If storage becomes a concern (years of accumulation, or if S4 synthesis is added
 | 2026-02-14 | 2.1 | Refined. Added FTS5 tokenizer choice + sync triggers. Added async access strategy (tokio-rusqlite). Fixed open_db error handling. Corrected WAL file copy backup advice. Removed unnecessary cache_size PRAGMA. Added PRAGMA persistence notes. |
 | 2026-02-14 | 2.2 | Added tokio-rusqlite to deps. Reader vs writer PRAGMA config. WAL checkpoint on shutdown. Database file location. |
 | 2026-02-14 | 2.3 | Updated volume estimates to match ADR-002 Q2 resolution (store everything, dedup handles noise). Write volume, data lifetime, and storage budget revised upward. |
+| 2026-02-14 | 3.0 | Added schema: sessions, prompts, observations tables. Prompts stored separately as intent markers (option B from analysis). Indexes for dedup, retrieval, and intent joins. Derived from capture data analysis (684 events, 7 sessions) showing user prompts as work-unit boundaries. |
