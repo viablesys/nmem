@@ -1,7 +1,7 @@
 # ADR-005: Forgetting Strategy
 
 ## Status
-Accepted
+Accepted — Purge mechanism implemented (v2.0)
 
 ## Framing
 *What gets deleted, when, and how.*
@@ -278,6 +278,50 @@ fn secure_purge(conn: &Connection, criteria: &PurgeCriteria) -> rusqlite::Result
 
 WAL frame persistence is a separate concern. After a secure purge, run `PRAGMA wal_checkpoint(TRUNCATE)` to fold WAL into the main file and delete the WAL, eliminating any copies of the secret in WAL frames. ADR-007 will determine whether this is sufficient or whether encryption at rest is the load-bearing defense.
 
+## Implementation Notes (2026-02-14)
+
+> **[ANNOTATION 2026-02-14, v2.0]:** `nmem purge` shipped. Implementation in `src/purge.rs` (~250 lines), wired through `src/cli.rs` (PurgeArgs), `src/main.rs` (dispatch), `src/lib.rs` (module). Key implementation details:
+
+### What shipped vs. spec
+
+| Spec item | Status | Notes |
+|-----------|--------|-------|
+| `--before DATE` | ✅ | YYYY-MM-DD parsed to UTC epoch via pure arithmetic (no chrono dep) |
+| `--project NAME` | ✅ | Cascades: observations + prompts + _cursor + sessions for project |
+| `--session UUID` | ✅ | Cascades: observations + prompts + _cursor + session row |
+| `--id N` | ✅ | Single observation delete, no cascade |
+| `--type TYPE --older-than DAYS` | ✅ | `requires = "obs_type"` in clap. Cutoff = now+1 - days*86400 |
+| `--search QUERY` | ✅ | FTS5 MATCH on observations_fts |
+| `--confirm` flag | ✅ | Without it: prints count, exits cleanly. No interactive prompt. |
+| Secure delete | ✅ | `PRAGMA secure_delete = ON` for all purge operations |
+| Incremental vacuum | ✅ | `PRAGMA incremental_vacuum` after deletion |
+| FTS5 rebuild | ✅ | Rebuild if >1000 observations deleted |
+| WAL checkpoint | ✅ | `PRAGMA wal_checkpoint(TRUNCATE)` post-purge |
+| Retention sweeps | Deferred | As designed — not activated until needed |
+| Syntheses protection | Deferred | Table doesn't exist yet (ADR-002 Q3) |
+
+### Deviations from spec
+
+1. **No `--dry-run` flag.** The default behavior (without `--confirm`) serves as dry-run — it reports counts and exits. Q2 in Open Questions is effectively answered: count-only, no sample output.
+2. **Date parsing is arithmetic, not `chrono`.** Avoids adding a dependency for a single date-to-timestamp conversion. The calculation handles leap years correctly.
+3. **`days_ago_ts` adds +1 second.** Without this, `--older-than 0` would miss records written in the same second due to `timestamp < now` being false. The +1 ensures `--older-than 0` means "all records regardless of age."
+4. **Orphan cleanup strategy.** For `--session` and `--project`: explicit cascade delete of all related rows. For other modes (`--id`, `--type`, `--search`, `--before`): delete matching observations, then clean up sessions that have no remaining observations or prompts.
+
+### Test coverage
+
+9 integration tests via assert_cmd (CLI-level, tempfile DBs):
+- `purge_by_id` — single observation, others remain
+- `purge_by_session` — full cascade (obs + prompts + session)
+- `purge_by_project` — multi-session cascade by project name
+- `purge_by_search` — FTS match deletion + FTS sync verification
+- `purge_by_type_and_age` — type filter with --older-than
+- `purge_requires_confirm` — dry-run behavior
+- `purge_no_match` — clean exit on zero matches
+- `purge_no_filter_fails` — error without any filter flag
+- `purge_fts_sync` — FTS index consistency after purge
+
+2 unit tests for date parsing (`parse_date_known_epoch`, `parse_date_invalid`).
+
 ## Open Questions
 
 ### Q1: Should retention protect "landmark" observations regardless of type?
@@ -335,3 +379,4 @@ Do **not** enable retention preemptively. The cost of keeping too much data is l
 | 2026-02-14 | 1.1 | Refined. Syntheses table existence guard for retention sweep. Purge subcommand added to ADR-003 clap enum. FTS5 rebuild note after large deletions. |
 | 2026-02-14 | 1.2 | Refined with library topics. PurgeArgs clap derive struct. FTS5 rebuild integrated into secure_purge. References: rusqlite.md, fts5.md, clap.md. |
 | 2026-02-14 | 1.3 | Annotated with live production data. Volume estimates revised to ~585K records/year (~652 MB). Thinking blocks identified as prime retention candidates (84% of content, low reuse). Position C activation timeline shortened to year-1. |
+| 2026-02-14 | 2.0 | **Implemented.** `nmem purge` subcommand shipped in `src/purge.rs`. All 7 filter flags from spec implemented (`--before`, `--project`, `--session`, `--id`, `--type`/`--older-than`, `--search`). Confirmation via `--confirm` flag (no interactive stdin). Secure deletion: `PRAGMA secure_delete = ON`, `incremental_vacuum`, FTS5 rebuild >1000 rows, WAL checkpoint. FK-safe deletion order: observations → prompts → _cursor → sessions. Orphan cleanup for non-session/project modes. 9 integration tests, all passing. |

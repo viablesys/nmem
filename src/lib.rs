@@ -3,6 +3,7 @@ pub mod db;
 pub mod extract;
 pub mod filter;
 pub mod project;
+pub mod purge;
 pub mod record;
 pub mod schema;
 pub mod serve;

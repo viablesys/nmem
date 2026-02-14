@@ -17,6 +17,7 @@ fn run() -> Result<(), NmemError> {
     match cli.command {
         Command::Record => nmem::record::handle_record(&db_path),
         Command::Serve => nmem::serve::handle_serve(&db_path),
+        Command::Purge(args) => nmem::purge::handle_purge(&db_path, &args),
     }
 }
 
