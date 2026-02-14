@@ -187,13 +187,26 @@ Every observation has these fields:
 
 **Project derivation:** `cwd` from hook input, normalized to a project identifier. ADR-004 defines the scoping model — for now, the working directory is the project.
 
-### Q2: How aggressive should filtering be?
-If structured extraction captures every tool call, the volume is manageable (dozens per session) but noisy. Options:
-- **Capture everything, filter at retrieval** — simple extraction, complex queries
-- **Filter at capture** — only store writes, errors, and user prompts; skip reads and successful commands
-- **Configurable** — S5 policy sets capture scope per project
+### Q2: How aggressive should filtering be? — RESOLVED
 
-The "capture everything" approach avoids premature filtering decisions but produces more data. The "filter at capture" approach risks discarding information that later proves relevant (a file read that didn't seem important at the time). claude-mem captured everything and drowned in noise — but the problem was LLM interpretation of noise, not the noise itself.
+**Store everything. Filter at retrieval, not capture.**
+
+At nmem's data volumes, storage is not a constraint. Storing every tool call without capture-time filtering:
+
+| Timeframe | Observations | DB size (with FTS5) |
+|-----------|-------------|---------------------|
+| Per session | 50-250 | 25-125 KB |
+| Per day (3-5 sessions) | 150-1,250 | 75-625 KB |
+| Per month | 4,500-37,500 | 2-19 MB |
+| Per year | 54,000-450,000 | 27-225 MB |
+
+Even the high end (450K rows, 225 MB after a year of heavy use) is trivial for SQLite — indexed queries remain single-digit milliseconds. There is no storage pressure that justifies discarding observations at write time.
+
+**Noise is handled by dedup, not filtering.** ADR-003's dedup logic (same `session_id` + `obs_type` + `file_path` within a time window) collapses the noisiest pattern — repeated reads of the same file. This reduces volume without information loss.
+
+**Signal-to-noise is a retrieval concern.** MCP tools (ADR-006) filter by `obs_type`, `project`, recency, and FTS5 relevance. The consumer chooses what to surface. A `file_read` observation that seems like noise today may be the only record of investigation into a file that was later deleted.
+
+claude-mem drowned in noise because its LLM observer interpreted noise as signal, fabricating significance for mundane tool calls. Structured extraction doesn't have this problem — a `file_read` observation is just a record of a path and timestamp. It's inert until queried.
 
 ### Q3: What schema supports both structured and future synthesis? — RESOLVED
 
@@ -249,14 +262,17 @@ Yes. Each source has its own extractor, but all produce the same observation sch
 | SessionStart | `source` field | `session_start` | Source (startup/resume/compact) |
 | Stop | Session boundary marker | `session_end` | Duration derived from first/last timestamps |
 
-See `claude-code-hooks-events.md` in the library for complete field schemas per event. Filtering heuristics (Q2) determine which of these actually get stored — not every file read is worth an observation.
+See `claude-code-hooks-events.md` in the library for complete field schemas per event. All sources produce observations — Q2 resolved: store everything, dedup handles noise.
 
-### Q5: What volume should we actually design for?
-Rough estimates for active use:
-- 3-5 sessions/day, 20-50 tool calls/session → 60-250 raw events/day
-- After filtering (writes, errors, prompts only): 10-50/day
-- Monthly: 300-1500 observations
-- Annual: 3600-18000 observations
+### Q5: What volume should we actually design for? — RESOLVED
+
+With Q2 resolved (store everything), volume estimates reflect unfiltered capture with dedup:
+
+- 3-5 sessions/day, 50-250 tool calls/session → 150-1,250 raw events/day
+- After dedup (ADR-003, same file/session within window): ~100-1,000/day
+- Monthly: 3,000-30,000 observations
+- Annual: 36,000-360,000 observations
+- Storage: 18-180 MB/year (with FTS5 indexes)
 
 At 18K rows, SQLite doesn't even notice. FTS5 is overkill. Full table scans complete in milliseconds. This is a "small data" problem pretending to be a "big data" problem.
 
@@ -304,3 +320,4 @@ Do **not** add LLM synthesis preemptively. The predecessor proved that premature
 |------|---------|---------|
 | 2026-02-08 | 1.0 | Initial draft. Three positions, adversarial analysis, open questions. |
 | 2026-02-14 | 2.0 | Accepted. Resolved Q1 (observation schema), Q3 (database schema), Q4 (per-source extraction mapping). Promoted Preliminary Direction to Decision. Added library references. |
+| 2026-02-14 | 2.1 | Resolved Q2 (store everything, filter at retrieval) and Q5 (volume estimates updated for unfiltered capture). All open questions now resolved. |

@@ -7,9 +7,9 @@ Accepted
 
 nmem is a local-first, single-user developer tool for cross-session memory. Its storage requirements:
 
-- **Write volume**: Low. Structured observations from tool calls — maybe 10-50 writes per session, a few sessions per day. Hundreds of observations per month, not thousands.
+- **Write volume**: Low-moderate. Structured observations from every tool call — 50-250 writes per session (after dedup), a few sessions per day. Thousands of observations per month. See ADR-002 Q2/Q5.
 - **Read pattern**: Retrieval at session start (recent + relevant observations) and on-demand queries during sessions. Read-heavy relative to writes.
-- **Data lifetime**: Observations accumulate over months. Annual volume at active use: 3,600-18,000 rows. This is a small-data problem.
+- **Data lifetime**: Observations accumulate over months. Annual volume at active use: 36,000-360,000 rows (unfiltered capture, ADR-002 Q2). Still a small-data problem for SQLite.
 - **Reliability**: Data is developer session notes, not business-critical state. Loss costs accumulated context, not money. Corruption resistance matters; disaster recovery does not.
 - **Concurrency**: A daemon or session process writes while MCP queries read. Single writer, multiple readers.
 - **Deployment**: Runs on the developer's machine. No servers, no cloud, no containers.
@@ -197,9 +197,15 @@ This replaces the `bundled` feature — they are mutually exclusive.
 
 ### Storage budget
 
-At expected volumes (300-1,500 observations/month, ~500 bytes average per observation), the database grows at roughly 150 KB-750 KB/month before indexes. With FTS5 indexes, roughly double that. Annual growth: 2-18 MB.
+With unfiltered capture (ADR-002 Q2: store everything, dedup handles noise), volumes are higher than initially estimated:
 
-At this scale, storage budgets are not a day-one concern. `auto_vacuum = INCREMENTAL` handles space reclamation from deletions. A `PRAGMA page_count * PRAGMA page_size` query reports actual database size for monitoring.
+| Timeframe | Observations | DB size (with FTS5) |
+|-----------|-------------|---------------------|
+| Per month | 3,000-30,000 | 1.5-15 MB |
+| Per year | 36,000-360,000 | 18-180 MB |
+| 5-year ceiling | 180,000-1,800,000 | 90-900 MB |
+
+Even the high end is well within SQLite's capabilities — indexed queries at 1M+ rows remain single-digit milliseconds. Storage budgets are not a day-one concern. `auto_vacuum = INCREMENTAL` handles space reclamation from deletions. A `PRAGMA page_count * PRAGMA page_size` query reports actual database size for monitoring.
 
 If storage becomes a concern (years of accumulation, or if S4 synthesis is added later), ADR-005 (Forgetting) addresses retention and compaction strategies.
 
@@ -237,3 +243,4 @@ If storage becomes a concern (years of accumulation, or if S4 synthesis is added
 | 2026-02-14 | 2.0 | Rewritten. Scoped to nmem. Removed Litestream, enterprise framing, DR runbooks. Demoted sqlite-vec to conditional. Added concurrent access model, encryption question, storage budget analysis. Incorporated ADR-002 direction (structured extraction, no vector search at launch). |
 | 2026-02-14 | 2.1 | Refined. Added FTS5 tokenizer choice + sync triggers. Added async access strategy (tokio-rusqlite). Fixed open_db error handling. Corrected WAL file copy backup advice. Removed unnecessary cache_size PRAGMA. Added PRAGMA persistence notes. |
 | 2026-02-14 | 2.2 | Added tokio-rusqlite to deps. Reader vs writer PRAGMA config. WAL checkpoint on shutdown. Database file location. |
+| 2026-02-14 | 2.3 | Updated volume estimates to match ADR-002 Q2 resolution (store everything, dedup handles noise). Write volume, data lifetime, and storage budget revised upward. |
