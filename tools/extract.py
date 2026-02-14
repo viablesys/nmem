@@ -312,8 +312,21 @@ def extract_file_path(name: str, tool_input: dict) -> str | None:
 def handle_session_start(conn, payload: dict):
     session_id = payload["session_id"]
     cwd = payload.get("cwd", "")
+    source = payload.get("source", "startup")
     ts = int(time.time())
     ensure_session(conn, session_id, cwd, ts)
+
+    # Track compaction and resume events as observations
+    if source in ("compact", "resume", "clear"):
+        conn.execute(
+            """INSERT INTO observations
+               (session_id, prompt_id, timestamp, obs_type, source_event,
+                tool_name, file_path, content)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (session_id, get_current_prompt_id(conn, session_id), ts,
+             f"session_{source}", "SessionStart", None, None, source),
+        )
+
     conn.commit()
 
 
