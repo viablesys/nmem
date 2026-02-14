@@ -178,7 +178,7 @@ nmem's session awareness comes from hook events, not from a persistent process:
 
 - **SessionStart**: Record session start. Source field indicates startup/resume/compact.
 - **PostToolUse**: Record observations. The bulk of capture.
-- **Stop**: Record session end. Run `PRAGMA wal_checkpoint(TRUNCATE)` to clean up WAL.
+- **Stop**: Record session end. Compute session signature (event type distribution). Run `PRAGMA wal_checkpoint(TRUNCATE)` to clean up WAL.
 
 No explicit "nmem start" or "nmem stop" — the system activates when Claude Code fires hooks and quiesces when hooks stop firing.
 
@@ -254,6 +254,30 @@ fn should_store(conn: &Connection, obs: &Observation) -> rusqlite::Result<bool> 
 ```
 
 This adds one SELECT per write (~0.5ms with index). The 5-minute dedup window is configurable. Writes and errors are never deduplicated — only reads and searches.
+
+### Session Signatures
+
+Each session produces a characteristic distribution of event types — its *signature*. A refactoring session is dominated by `file_edit` and `file_read`. A build session by `command`. A research session by `user_prompt` and `web_search`. The top-3 event types distinguish session character without reading any content.
+
+Computed at session end in the Stop hook as a `COUNT(*) GROUP BY obs_type` query on the session's observations. Stored as a JSON field on the session summary record:
+
+```rust
+// In Stop hook, after recording session end
+let signature: Vec<(String, i64)> = conn.prepare(
+    "SELECT obs_type, COUNT(*) as n FROM observations
+     WHERE session_id = ?1 GROUP BY obs_type ORDER BY n DESC"
+)?.query_map(params![session_id], |r| {
+    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+})?.collect::<Result<_, _>>()?;
+```
+
+**Uses:**
+
+- **Retrieval filtering.** Classify sessions as `research`, `build`, `refactor`, `debug`, `conversation` from the top event types. "What did I learn while refactoring?" filters to the right sessions without scanning everything.
+- **Dedup tuning.** `file_read`-heavy sessions (refactoring) produce redundant observations — tighter dedup windows. `user_prompt`-heavy sessions (conversation) have unique content per event — looser or no dedup.
+- **Context injection.** On SessionStart, find past sessions with similar signatures on the same project. A refactoring session benefits from past refactoring decisions, not past research context.
+
+**Deferred:** Mid-session signature computation (for live context injection) adds complexity for an unproven use case. The per-event data is already stored — if needed later, signatures can be backcomputed without schema changes.
 
 ## Open Questions
 
@@ -376,3 +400,4 @@ The architecture supports adding a daemon later — the database is the coordina
 | 2026-02-14 | 1.1 | Refined. Fixed hook blocking claim. Added binary startup time to cost estimate. Decided MCP server model (session-scoped stdio). Added deduplication strategy. |
 | 2026-02-14 | 1.2 | Resolved Q1 (clap subcommands) and Q2 (exit codes + stderr). Added payload deserialization strategy (sibling-field dispatch). Added rmcp server skeleton for MCP. Updated references. |
 | 2026-02-14 | 1.3 | Added `Purge` subcommand to clap enum (cross-ref ADR-005). |
+| 2026-02-14 | 1.4 | Added session signatures — event type distribution computed at session end for retrieval filtering, dedup tuning, and context injection. Derived from capture data analysis (684 events, 7 sessions). |
