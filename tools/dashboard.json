@@ -321,7 +321,7 @@
         ]
       },
       {
-        "title": "Observations by Type (schema)",
+        "title": "All Activity by Type (schema)",
         "type": "piechart",
         "gridPos": { "x": 12, "y": 34, "w": 12, "h": 8 },
         "datasource": { "type": "prometheus", "uid": "" },
@@ -330,6 +330,18 @@
             "expr": "nmem_observations_total",
             "legendFormat": "{{obs_type}}",
             "refId": "A",
+            "instant": true
+          },
+          {
+            "expr": "nmem_prompts_total{source=\"agent\"}",
+            "legendFormat": "agent_reasoning",
+            "refId": "B",
+            "instant": true
+          },
+          {
+            "expr": "nmem_prompts_total{source=\"user\"}",
+            "legendFormat": "user_intent",
+            "refId": "C",
             "instant": true
           }
         ],
