@@ -1,6 +1,7 @@
+use crate::config::{load_config, resolve_filter_params};
 use crate::db::open_db;
 use crate::extract::{classify_tool, extract_content, extract_file_path};
-use crate::filter::{FILTER, redact_json_value};
+use crate::filter::{SecretFilter, redact_json_value_with};
 use crate::project::derive_project;
 use crate::transcript::{get_current_prompt_id, scan_transcript};
 use crate::NmemError;
@@ -83,7 +84,11 @@ fn handle_session_start(conn: &Connection, payload: &HookPayload) -> Result<(), 
     Ok(())
 }
 
-fn handle_user_prompt(conn: &Connection, payload: &HookPayload) -> Result<(), NmemError> {
+fn handle_user_prompt(
+    conn: &Connection,
+    payload: &HookPayload,
+    filter: &SecretFilter,
+) -> Result<(), NmemError> {
     let prompt = match payload.prompt.as_deref() {
         Some(p) if !p.is_empty() && !p.starts_with("<system-reminder>") => p,
         _ => return Ok(()),
@@ -96,7 +101,7 @@ fn handle_user_prompt(conn: &Connection, payload: &HookPayload) -> Result<(), Nm
 
     // Truncate and filter secrets
     let truncated: String = prompt.chars().take(500).collect();
-    let (filtered, redacted) = FILTER.redact(&truncated);
+    let (filtered, redacted) = filter.redact(&truncated);
 
     if redacted {
         eprintln!("nmem: redacted potential secret from user_prompt");
@@ -111,7 +116,11 @@ fn handle_user_prompt(conn: &Connection, payload: &HookPayload) -> Result<(), Nm
     Ok(())
 }
 
-fn handle_post_tool_use(conn: &Connection, payload: &HookPayload) -> Result<(), NmemError> {
+fn handle_post_tool_use(
+    conn: &Connection,
+    payload: &HookPayload,
+    filter: &SecretFilter,
+) -> Result<(), NmemError> {
     let tool_name = match payload.tool_name.as_deref() {
         Some(n) => n,
         None => return Ok(()),
@@ -139,7 +148,7 @@ fn handle_post_tool_use(conn: &Connection, payload: &HookPayload) -> Result<(), 
     let file_path = extract_file_path(tool_name, &tool_input);
 
     // Filter secrets from content
-    let (filtered_content, content_redacted) = FILTER.redact(&content);
+    let (filtered_content, content_redacted) = filter.redact(&content);
 
     // Build metadata and filter it
     let mut metadata = serde_json::Value::Null;
@@ -149,7 +158,7 @@ fn handle_post_tool_use(conn: &Connection, payload: &HookPayload) -> Result<(), 
 
     // Filter secrets from metadata if it has content
     if metadata.is_object() {
-        redact_json_value(&mut metadata);
+        redact_json_value_with(&mut metadata, filter);
     }
 
     let metadata_str = if metadata.is_null() {
@@ -235,10 +244,16 @@ pub fn handle_record(db_path: &Path) -> Result<(), NmemError> {
 
     let conn = open_db(db_path)?;
 
+    // Load config and create project-aware filter
+    let config = load_config().unwrap_or_default();
+    let project = derive_project(&payload.cwd);
+    let params = resolve_filter_params(&config, Some(&project));
+    let filter = SecretFilter::with_params(params);
+
     match payload.hook_event_name.as_str() {
         "SessionStart" => handle_session_start(&conn, &payload),
-        "UserPromptSubmit" => handle_user_prompt(&conn, &payload),
-        "PostToolUse" => handle_post_tool_use(&conn, &payload),
+        "UserPromptSubmit" => handle_user_prompt(&conn, &payload, &filter),
+        "PostToolUse" => handle_post_tool_use(&conn, &payload, &filter),
         "Stop" => handle_stop(&conn, &payload),
         _ => Ok(()),
     }

@@ -1,4 +1,4 @@
-use crate::db::open_db_readonly;
+use crate::db::{is_db_encrypted, open_db_readonly};
 use crate::NmemError;
 use std::path::Path;
 
@@ -61,6 +61,12 @@ pub fn handle_status(db_path: &Path) -> Result<(), NmemError> {
         let date = format_epoch_date(ts);
         eprintln!("nmem: last session — {date} (project: {project})");
     }
+
+    let encrypted = is_db_encrypted(db_path);
+    eprintln!(
+        "nmem: encryption — {}",
+        if encrypted { "enabled" } else { "disabled" }
+    );
 
     Ok(())
 }

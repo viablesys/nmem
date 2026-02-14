@@ -219,6 +219,144 @@ fn mcp_tool_classified_correctly() {
     assert_eq!(obs[0][0], "mcp_call");
 }
 
+// --- Encryption tests ---
+
+#[test]
+#[allow(deprecated)]
+fn encrypted_database_works() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+    let test_key = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2";
+
+    // Session start with encryption key
+    let mut cmd = Command::cargo_bin("nmem").unwrap();
+    cmd.env("NMEM_DB", &db)
+        .env("NMEM_KEY", test_key)
+        .arg("record")
+        .write_stdin(
+            r#"{"session_id":"enc-1","cwd":"/home/test/workspace/myproj","hook_event_name":"SessionStart"}"#,
+        )
+        .assert()
+        .success();
+
+    // Record a prompt
+    let mut cmd = Command::cargo_bin("nmem").unwrap();
+    cmd.env("NMEM_DB", &db)
+        .env("NMEM_KEY", test_key)
+        .arg("record")
+        .write_stdin(
+            r#"{"session_id":"enc-1","cwd":"/home/test/workspace/myproj","hook_event_name":"UserPromptSubmit","prompt":"Hello encrypted world"}"#,
+        )
+        .assert()
+        .success();
+
+    // Verify data accessible with key
+    let conn = rusqlite::Connection::open_with_flags(
+        &db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let pragma_value = format!("x'{test_key}'");
+    conn.pragma_update(None, "key", &pragma_value).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT count(*) FROM prompts", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 1);
+
+    // Verify NOT accessible without key
+    let conn2 = rusqlite::Connection::open_with_flags(
+        &db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let result = conn2.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()));
+    assert!(result.is_err(), "should fail without encryption key");
+}
+
+// --- Config tests ---
+
+#[test]
+#[allow(deprecated)]
+fn config_extra_pattern_redacts() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    // Write a config with a custom pattern
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+[filter]
+extra_patterns = ["MYCO-[A-Za-z0-9]{32}"]
+"#,
+    )
+    .unwrap();
+
+    // Start session with NMEM_CONFIG pointing to our config
+    let mut cmd = Command::cargo_bin("nmem").unwrap();
+    cmd.env("NMEM_DB", &db)
+        .env("NMEM_CONFIG", &config_path)
+        .arg("record")
+        .write_stdin(
+            r#"{"session_id":"cfg-1","cwd":"/home/test/workspace/myproj","hook_event_name":"SessionStart"}"#,
+        )
+        .assert()
+        .success();
+
+    // Record a prompt containing the custom pattern
+    let mut cmd = Command::cargo_bin("nmem").unwrap();
+    cmd.env("NMEM_DB", &db)
+        .env("NMEM_CONFIG", &config_path)
+        .arg("record")
+        .write_stdin(
+            r#"{"session_id":"cfg-1","cwd":"/home/test/workspace/myproj","hook_event_name":"UserPromptSubmit","prompt":"Use key MYCO-abcdefghijklmnopqrstuvwxyz012345 in production"}"#,
+        )
+        .assert()
+        .success();
+
+    let prompts = query_db(&db, "SELECT content FROM prompts WHERE session_id = 'cfg-1'");
+    assert_eq!(prompts.len(), 1);
+    assert!(
+        prompts[0][0].contains("[REDACTED]"),
+        "custom pattern should redact"
+    );
+    assert!(
+        !prompts[0][0].contains("MYCO-"),
+        "original token should not be present"
+    );
+}
+
+// --- Entropy tests ---
+
+#[test]
+fn entropy_redaction_in_prompt() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    session_start(&db, "ent-1");
+
+    // Mixed-case hex blob with no regex-detectable prefix — only caught by entropy
+    let hex = "c8EB7Fa171ac826Ca6EfcEe4847BB8CdCcb74Af2134E5FdD2ccDeA8B0F3FB8Ea";
+    nmem_cmd(&db)
+        .arg("record")
+        .write_stdin(format!(
+            r#"{{"session_id":"ent-1","cwd":"/home/test/workspace/myproj","hook_event_name":"UserPromptSubmit","prompt":"Use key {hex} in prod"}}"#
+        ))
+        .assert()
+        .success();
+
+    let prompts = query_db(&db, "SELECT content FROM prompts WHERE session_id = 'ent-1'");
+    assert_eq!(prompts.len(), 1);
+    assert!(
+        prompts[0][0].contains("[REDACTED]"),
+        "entropy should redact high-entropy token"
+    );
+    assert!(
+        !prompts[0][0].contains(hex),
+        "original hex should not be present"
+    );
+}
+
 // --- Purge tests ---
 
 #[test]

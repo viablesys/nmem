@@ -24,6 +24,8 @@ pub enum Command {
     Maintain(MaintainArgs),
     /// Show database health: size, counts, last session
     Status,
+    /// Encrypt the database (migrate from unencrypted to SQLCipher)
+    Encrypt,
 }
 
 #[derive(Parser)]

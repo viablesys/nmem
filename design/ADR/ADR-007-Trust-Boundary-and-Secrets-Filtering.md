@@ -259,25 +259,47 @@ This table is not exhaustive — it's the minimum regression set. Expand as fals
 
 ## Decision: Encryption at Rest
 
-### Resolving ADR-001's Open Question
+### Revised Decision (v2.0)
 
-**Decision: No encryption by default.** Filtering is the primary defense. Encryption is available as optional defense-in-depth.
+**Decision: SQLCipher available, opt-in via key.** The binary is built with `bundled-sqlcipher` (replacing `bundled`). Encryption activates when a key exists (`NMEM_KEY` env var, `~/.nmem/key` file, or config `key_file`). Without a key, the database operates unencrypted — same behavior as before.
 
-Rationale:
+This resolves ADR-001's open encryption question with a practical middle ground: no friction for users who don't need it, full 256-bit AES encryption for those who do.
 
-1. **Filtering is load-bearing.** With structured extraction (no LLM) and a well-defined write path (`nmem record`), the filtering surface is small and deterministic. Secrets are caught before they enter the database. Encryption protects data at rest — but if filtering works, there are no secrets at rest to protect.
+### Key Management
 
-2. **Encryption breaks standard tooling.** SQLCipher replaces the SQLite library. The `sqlite3` CLI cannot open the database. Debugging, manual queries, and data inspection become harder. For a single-developer tool, this friction is significant.
+**Precedence:** `NMEM_KEY` env var > config `[encryption].key_file` > `~/.nmem/key` file > no encryption.
 
-3. **Encryption adds build complexity.** `bundled-sqlcipher` is mutually exclusive with `bundled`. It pulls in OpenSSL or a vendored crypto library. Cross-compilation becomes harder. Binary size increases.
+**Key format:** 64 hex chars (32 bytes). Applied as raw hex (`PRAGMA key = x'...'`) to skip PBKDF2 — critical for CLI per-invocation performance. PBKDF2 at 256000 iterations adds ~50-200ms per open; raw key adds <1ms.
 
-4. **Filesystem encryption exists.** Most developer machines already have filesystem encryption (LUKS on Linux, FileVault on macOS, BitLocker on Windows). `~/.nmem/nmem.db` is protected by whatever filesystem encryption the user has enabled. nmem should not duplicate this.
+**Auto-generation:** `nmem encrypt` generates 32 bytes from `/dev/urandom`, hex-encodes to 64 chars, writes to `~/.nmem/key` with 0600 permissions.
 
-5. **The blast radius is local.** nmem is single-user, single-machine. The database file is under `~/.nmem/` with standard user permissions (0600). An attacker with access to the file already has access to everything else in the user's home directory.
+### Migration from Unencrypted
 
-### When to Reconsider
+Two paths to encryption:
 
-Add SQLCipher if the database is synced to cloud storage (where filesystem encryption doesn't apply), a compliance requirement mandates it, or filtering proves insufficiently reliable. The architecture supports this later — swap `bundled` for `bundled-sqlcipher` in `Cargo.toml`, add key management, no schema changes needed.
+1. **Explicit:** `nmem encrypt` — checks if DB is already encrypted, generates/loads key, runs `sqlcipher_export()` migration, verifies result.
+2. **Automatic:** `open_db()` detects key + unencrypted DB, auto-migrates. The original is saved as `.db-unencrypted-backup` for user verification.
+
+Migration uses `sqlcipher_export()` (copies schema, data, indexes, triggers) via ATTACH DATABASE. Atomic swap: original → backup, encrypted → original. WAL/SHM files from the old DB are cleaned up.
+
+### Build Change
+
+```toml
+# Before
+rusqlite = { version = "0.38", features = ["bundled"] }
+# After
+rusqlite = { version = "0.38", features = ["bundled-sqlcipher"] }
+```
+
+Requires `openssl-devel` (Fedora) or equivalent. Links against system OpenSSL. FTS5, WAL mode, and `rusqlite_migration` all work unchanged with SQLCipher.
+
+### Status Display
+
+`nmem status` reports encryption state: `nmem: encryption — enabled/disabled`. Detection opens the DB without a key and checks if `sqlite_master` is readable.
+
+### Original Rationale (retained for context)
+
+The original decision (v1.0) was "no encryption by default" based on: filtering is load-bearing, encryption breaks standard tooling, adds build complexity, filesystem encryption exists, and blast radius is local. These points remain valid — encryption is opt-in, not default. Users who don't set a key get the same behavior as before.
 
 ### File Permissions
 
@@ -334,32 +356,100 @@ When a secret is written, it exists in **two places**: the main DB file and the 
 
 The WAL file and SHM file inherit the parent database's permissions. `nmem record` should verify this on startup — a WAL file with wrong permissions is a security defect.
 
-## Open Questions
+## Resolved: High-Entropy Detection (formerly Q1)
 
-### Q1: High-Entropy Detection
+**Decision: Implemented.** Shannon entropy analysis runs as a second filtering layer after regex, catching random-looking tokens (hex keys, base64 blobs) that bypass the 12 regex patterns.
 
-Should the filter detect high-entropy strings that don't match known patterns? A 64-character random hex string might be a secret even without a known prefix. Shannon entropy calculation is cheap, but the false positive rate on code content (hashes, UUIDs, encoded data) could be high. Defer until pattern-based filtering proves insufficient.
+### Design
 
-### Q2: User-Controlled Sensitivity
+Phase 2 in `redact()`: tokenize input on whitespace + delimiters (`"'()[]{}`,;`), skip tokens shorter than `entropy_min_length` (default 20) or matching the allowlist, flag remaining tokens with entropy ≥ `entropy_threshold` (default 4.0 bits/char).
 
-Should users be able to mark entire projects as "sensitive" (apply stricter filtering) or "safe" (relax filtering)? This would be an S5 policy concern — per-project configuration in `~/.nmem/config.toml`. The infrastructure exists (project column from ADR-004), but the UX and default behavior need design.
+**Tokenizer preserves** `-_/.:=` within tokens (common in paths, URLs, assignments). Tokens are processed in reverse byte-offset order so replacements don't invalidate subsequent offsets.
+
+**Allowlist** prevents false positives on known high-entropy non-secrets:
+- Git SHAs: exactly 40 hex chars
+- Short git SHAs: 7-12 hex chars
+- UUIDs: 36 chars, 8-4-4-4-12 hex pattern
+- File paths: starts with `/`, `./`, `~/`
+- URLs: starts with `http://`, `https://`, `file://`
+- Already redacted: `[REDACTED]` (10 chars, below min length anyway)
+
+**No re-flagging risk:** `[REDACTED]` is 10 chars, below the 20-char minimum length, so entropy never re-processes regex output.
+
+**Performance:** `shannon_entropy()` uses a stack-allocated `[0u32; 256]` frequency array. ~100-200ns per token. Only runs on the slow path (after regex).
+
+### Threshold Rationale
+
+| Content | Entropy | Length | Flagged? |
+|---------|---------|--------|----------|
+| English prose | 1.5-3.5 | any | No |
+| Code identifiers | 2.5-3.8 | <20 | No (short) |
+| Git SHA (40 hex) | ~4.0 | 40 | No (allowlisted) |
+| UUID | ~3.3 | 36 | No (allowlisted) |
+| Random hex key | ~4.0+ | 64 | Yes |
+| Random base64 | ~4.5-5.7 | 32+ | Yes |
+| Mixed-case hex | ~4.2 | 64 | Yes |
+| File paths | ~3.8 | varies | No (allowlisted) |
+
+Pure lowercase hex (16-char alphabet) at 64 bytes produces entropy near 3.9-4.0 — right at the threshold boundary. Mixed-case hex and base64 (larger alphabets) reliably exceed 4.0. The threshold is conservative: better to miss pure-lowercase hex than over-redact code identifiers.
+
+## Resolved: Per-Project Config File (formerly Q2)
+
+**Decision: Implemented.** `~/.nmem/config.toml` (or `NMEM_CONFIG` env var) supports user-defined patterns, per-project sensitivity levels, and entropy overrides.
+
+### Config Format
+
+```toml
+[filter]
+extra_patterns = ["my-company-[A-Za-z0-9]{32}"]
+entropy_threshold = 3.8        # override default 4.0
+entropy_min_length = 16        # override default 20
+disable_entropy = false
+
+[projects.secret-app]
+sensitivity = "strict"    # threshold=3.5, min_length=16
+
+[projects.open-source-tool]
+sensitivity = "relaxed"   # entropy disabled, regex only
+
+[encryption]
+key_file = "/path/to/custom-key"
+```
+
+### Sensitivity Levels
+
+| Level | Entropy Threshold | Min Length | Entropy Enabled |
+|-------|-------------------|------------|-----------------|
+| `default` | 4.0 | 20 | yes |
+| `strict` | 3.5 | 16 | yes |
+| `relaxed` | (n/a) | (n/a) | no (regex only) |
+
+**Precedence:** Global `[filter]` overrides trump project-level sensitivity defaults. Extra patterns are additive only — user patterns cannot remove built-in patterns. Invalid regex patterns fail at config load time with a clear error message.
+
+### Integration
+
+`handle_record()` loads config once per invocation, derives project from `cwd`, resolves `FilterParams`, and creates a `SecretFilter::with_params()` instance. The global `FILTER` singleton remains for backward-compatible codepaths (serve, purge).
+
+**Dependency:** `toml = "0.8"` added for config deserialization.
 
 ## Consequences
 
 ### Positive
 
 - **Deterministic filtering.** Regex patterns produce consistent, testable results. No LLM judgment in the security path.
-- **Defense in depth.** Three layers: (1) structured extraction discards raw tool output, (2) regex filtering redacts known secret formats, (3) `secure_delete` + purge for recovery when both fail.
-- **Minimal performance cost.** `RegexSet::is_match` checks all 12 patterns in a single pass (~100-200ns on the common no-match path). `replace_all` returns `Cow::Borrowed` on no-match (zero allocation). Total filtering cost is sub-microsecond on the common path, ~1-5us when redaction occurs.
+- **Defense in depth.** Five layers: (1) structured extraction discards raw tool output, (2) regex filtering redacts known secret formats, (3) entropy detection catches format-unknown random tokens, (4) opt-in SQLCipher encryption at rest, (5) `secure_delete` + purge for recovery when all else fails.
+- **Configurable per project.** Sensitive projects get stricter thresholds; open-source projects can relax entropy scanning. User-defined patterns extend the denylist without modifying the binary.
+- **Minimal performance cost.** `RegexSet::is_match` checks all patterns in a single pass (~100-200ns on the common no-match path). Entropy scan adds ~100-200ns per token only on the slow path. Total filtering cost is sub-microsecond on the common path, ~5-15us when both regex and entropy fire.
 - **Auditable.** The `redacted` metadata flag creates a trail of filtering actions without storing the secrets themselves.
-- **No build complexity.** No encryption library dependency. Standard `bundled` SQLite. Standard tooling works.
+- **Encryption available without schema changes.** Same DB format, same queries. Only the on-disk representation changes. Users opt in by creating a key.
 
 ### Negative
 
-- **Denylist is incomplete.** New secret formats are not caught until patterns are added. This is inherent to denylist approaches — known unknowns are not covered.
-- **False positives.** Over-redaction loses non-sensitive context. Developers working on auth-related code will see more redaction in their observations.
-- **No encryption by default.** If filtering fails comprehensively, secrets are in plaintext on disk. Filesystem encryption is the user's responsibility.
+- **Denylist is incomplete.** New secret formats are not caught until patterns are added. Entropy partially mitigates this for random tokens, but structured secrets with low entropy (short passwords, predictable formats) are not caught.
+- **False positives.** Over-redaction loses non-sensitive context. Developers working on auth-related code will see more redaction. Entropy can false-positive on legitimate high-entropy data (compressed content, hashes used as identifiers).
+- **Build dependency.** `bundled-sqlcipher` requires system OpenSSL dev headers. This is a build-time cost even for users who never enable encryption.
 - **Purge is manual.** Discovering that a secret was stored requires the user to notice and run `nmem purge`. No automatic detection of stored secrets post-write.
+- **Config adds a file.** `~/.nmem/config.toml` is another file to manage. Misconfigured extra patterns (invalid regex) fail at load time but could silently degrade if the config file is deleted.
 
 ## References
 
@@ -388,3 +478,4 @@ Should users be able to mark entire projects as "sensitive" (apply stricter filt
 | 2026-02-14 | 1.1 | Refined. Pattern ordering (specific before broad). Connection string scheme whitelist. JSON-aware metadata redaction. regex crate dependency note. Filter test expectations table. |
 | 2026-02-14 | 1.2 | Refined with regex.md. Complete SecretFilter implementation: RegexSet fast rejection, LazyLock singleton, Cow-aware replace_all, matches().into_iter() targeted replacement. Added regex.md and serde-json.md references. Performance numbers from regex.md benchmarks. |
 | 2026-02-14 | 1.3 | Refined with all library topics. File permissions implementation sketch. References: rusqlite.md, fts5.md, sqlcipher.md, claude-code-hooks-events.md, ADR-005. |
+| 2026-02-14 | 2.0 | **Defense-in-depth implementation.** Resolved Q1: Shannon entropy detection as Phase 2 filter (allowlist for SHAs/UUIDs/paths, threshold 4.0 bits/char, min length 20). Resolved Q2: per-project config file (`~/.nmem/config.toml`) with sensitivity levels (default/strict/relaxed), extra patterns, entropy overrides. Revised encryption decision: SQLCipher opt-in via key (`bundled-sqlcipher` feature, raw hex key, auto-migration from unencrypted). Added `nmem encrypt` subcommand. Updated consequences to reflect five-layer defense. |
