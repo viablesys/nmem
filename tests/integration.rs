@@ -551,3 +551,49 @@ fn maintain_fts_integrity() {
         .assert()
         .success();
 }
+
+// --- Status tests ---
+
+#[test]
+fn status_no_db() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("nonexistent.db");
+
+    let out = nmem_cmd(&db).arg("status").assert().success();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr);
+    assert!(stderr.contains("no database"));
+}
+
+#[test]
+fn status_empty_db() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    session_start(&db, "st-empty");
+
+    let out = nmem_cmd(&db).arg("status").assert().success();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr);
+    assert!(stderr.contains("observations"));
+    assert!(stderr.contains("sessions"));
+}
+
+#[test]
+fn status_with_data() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    session_start(&db, "st-data");
+    user_prompt(&db, "st-data", "Check status output");
+    post_tool_use(&db, "st-data", "Read", r#"{"file_path":"/src/a.rs"}"#);
+    post_tool_use(&db, "st-data", "Bash", r#"{"command":"cargo test"}"#);
+    stop(&db, "st-data");
+
+    let out = nmem_cmd(&db).arg("status").assert().success();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr);
+    assert!(stderr.contains("database"));
+    assert!(stderr.contains("observations — 2"));
+    assert!(stderr.contains("prompts — 1"));
+    assert!(stderr.contains("sessions — 1"));
+    assert!(stderr.contains("last session"));
+    assert!(stderr.contains("myproj"));
+}

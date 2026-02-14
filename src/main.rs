@@ -19,6 +19,7 @@ fn run() -> Result<(), NmemError> {
         Command::Serve => nmem::serve::handle_serve(&db_path),
         Command::Purge(args) => nmem::purge::handle_purge(&db_path, &args),
         Command::Maintain(args) => nmem::maintain::handle_maintain(&db_path, &args),
+        Command::Status => nmem::status::handle_status(&db_path),
     }
 }
 

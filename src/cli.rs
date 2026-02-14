@@ -22,6 +22,8 @@ pub enum Command {
     Purge(PurgeArgs),
     /// Run database maintenance (vacuum, WAL checkpoint, FTS integrity)
     Maintain(MaintainArgs),
+    /// Show database health: size, counts, last session
+    Status,
 }
 
 #[derive(Parser)]

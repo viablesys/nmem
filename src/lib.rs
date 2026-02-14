@@ -8,6 +8,7 @@ pub mod purge;
 pub mod record;
 pub mod schema;
 pub mod serve;
+pub mod status;
 pub mod transcript;
 
 #[derive(Debug)]

@@ -404,3 +404,4 @@ The architecture supports adding a daemon later — the database is the coordina
 | 2026-02-14 | 1.3 | Added `Purge` subcommand to clap enum (cross-ref ADR-005). |
 | 2026-02-14 | 1.4 | Added session signatures — event type distribution computed at session end for retrieval filtering, dedup tuning, and context injection. Derived from capture data analysis (684 events, 7 sessions). |
 | 2026-02-14 | 1.5 | Added `Maintain` subcommand to clap enum. Implements explicit trigger for maintenance operations (incremental vacuum, WAL checkpoint, FTS integrity check, optional FTS rebuild via `--rebuild-fts`). Completes the "opportunistic maintenance" story — hooks run maintenance inline, `nmem maintain` provides the manual escape hatch. |
+| 2026-02-14 | 1.6 | Added `Status` subcommand — read-only health check (DB/WAL size, observation/prompt/session counts, top-5 obs_type breakdown, last session). Completes all planned subcommands from Q1. |
