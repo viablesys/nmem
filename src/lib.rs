@@ -2,6 +2,7 @@ pub mod cli;
 pub mod db;
 pub mod extract;
 pub mod filter;
+pub mod maintain;
 pub mod project;
 pub mod purge;
 pub mod record;

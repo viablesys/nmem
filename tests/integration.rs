@@ -470,3 +470,84 @@ fn purge_by_type_and_age() {
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0][0], "command");
 }
+
+// --- Maintain tests ---
+
+#[test]
+fn maintain_on_empty_db() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    // Create the DB by starting a session (so tables exist)
+    session_start(&db, "m-empty");
+
+    nmem_cmd(&db)
+        .arg("maintain")
+        .assert()
+        .success();
+}
+
+#[test]
+fn maintain_after_data() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    session_start(&db, "m-data");
+    user_prompt(&db, "m-data", "Test maintain with data");
+    post_tool_use(&db, "m-data", "Bash", r#"{"command":"cargo build"}"#);
+    post_tool_use(&db, "m-data", "Read", r#"{"file_path":"/src/main.rs"}"#);
+    stop(&db, "m-data");
+
+    nmem_cmd(&db)
+        .arg("maintain")
+        .assert()
+        .success();
+
+    // Verify data intact
+    assert_eq!(query_db(&db, "SELECT COUNT(*) FROM observations")[0][0], "2");
+    assert_eq!(query_db(&db, "SELECT COUNT(*) FROM prompts")[0][0], "1");
+    assert_eq!(query_db(&db, "SELECT COUNT(*) FROM sessions")[0][0], "1");
+}
+
+#[test]
+fn maintain_rebuild_fts() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    session_start(&db, "m-fts");
+    post_tool_use(&db, "m-fts", "Bash", r#"{"command":"cargo test"}"#);
+    user_prompt(&db, "m-fts", "Run the test suite");
+
+    nmem_cmd(&db)
+        .args(["maintain", "--rebuild-fts"])
+        .assert()
+        .success();
+
+    // FTS still works after rebuild
+    let fts = query_db(
+        &db,
+        "SELECT rowid FROM observations_fts WHERE observations_fts MATCH 'cargo'",
+    );
+    assert_eq!(fts.len(), 1);
+
+    let fts_prompts = query_db(
+        &db,
+        "SELECT rowid FROM prompts_fts WHERE prompts_fts MATCH 'suite'",
+    );
+    assert_eq!(fts_prompts.len(), 1);
+}
+
+#[test]
+fn maintain_fts_integrity() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    session_start(&db, "m-int");
+    post_tool_use(&db, "m-int", "Read", r#"{"file_path":"/src/lib.rs"}"#);
+
+    // maintain should succeed (integrity check passes on a healthy DB)
+    nmem_cmd(&db)
+        .arg("maintain")
+        .assert()
+        .success();
+}

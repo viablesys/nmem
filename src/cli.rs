@@ -20,6 +20,8 @@ pub enum Command {
     Serve,
     /// Purge observations, prompts, and sessions
     Purge(PurgeArgs),
+    /// Run database maintenance (vacuum, WAL checkpoint, FTS integrity)
+    Maintain(MaintainArgs),
 }
 
 #[derive(Parser)]
@@ -55,4 +57,11 @@ pub struct PurgeArgs {
     /// Skip confirmation — actually delete
     #[arg(long)]
     pub confirm: bool,
+}
+
+#[derive(Parser)]
+pub struct MaintainArgs {
+    /// Also rebuild FTS5 indexes (rewrites entire index)
+    #[arg(long)]
+    pub rebuild_fts: bool,
 }
