@@ -26,12 +26,18 @@ from pathlib import Path
 DB_PATH = Path.home() / ".nmem" / "nmem.db"
 VLOGS_ENDPOINT = "http://localhost:9428/insert/jsonline"
 
-# Limits for context generation
+# Limits for context generation (startup defaults)
 MAX_INTENTS = 8
 MAX_FILES = 6
 MAX_THREADS = 3
 MAX_INTENT_CHARS = 80
 MAX_THREAD_CHARS = 120
+
+# Expanded limits for compact/clear (agent lost its context window)
+COMPACT_MAX_INTENTS = 12
+COMPACT_MAX_FILES = 10
+COMPACT_MAX_THREADS = 5
+COMPACT_MAX_RECENT_OBS = 15
 
 
 def log_error(error: str, context: dict | None = None):
@@ -71,17 +77,27 @@ def derive_project(cwd: str) -> str:
     return parts[-1]
 
 
-def generate_context(project: str) -> str | None:
+def generate_context(project: str, source: str = "startup") -> str | None:
     import sqlite3
 
     if not DB_PATH.exists():
         return None
 
+    is_recovery = source in ("compact", "clear")
+
+    # Use expanded limits when recovering from context loss
+    max_intents = COMPACT_MAX_INTENTS if is_recovery else MAX_INTENTS
+    max_files = COMPACT_MAX_FILES if is_recovery else MAX_FILES
+    max_threads = COMPACT_MAX_THREADS if is_recovery else MAX_THREADS
+
     conn = sqlite3.connect(str(DB_PATH), timeout=3)
     conn.execute("PRAGMA journal_mode = WAL")
 
     lines = []
-    lines.append(f"# [{project}] nmem context")
+    if is_recovery:
+        lines.append(f"# [{project}] nmem context (post-{source})")
+    else:
+        lines.append(f"# [{project}] nmem context")
     lines.append("")
 
     # Recent user intents for this project
@@ -94,7 +110,7 @@ def generate_context(project: str) -> str | None:
         WHERE s.project = ? AND p.source = 'user'
         ORDER BY p.timestamp DESC
         LIMIT ?
-    """, (project, MAX_INTENTS)).fetchall()
+    """, (project, max_intents)).fetchall()
 
     if rows:
         lines.append("## Recent Intents")
@@ -115,7 +131,7 @@ def generate_context(project: str) -> str | None:
         GROUP BY o.file_path
         ORDER BY access_count DESC
         LIMIT ?
-    """, (project, MAX_FILES)).fetchall()
+    """, (project, max_files)).fetchall()
 
     if rows:
         lines.append("## Key Files")
@@ -165,7 +181,7 @@ def generate_context(project: str) -> str | None:
         WHERE s.project = ? AND p.source = 'agent'
         ORDER BY p.timestamp DESC
         LIMIT ?
-    """, (project, MAX_THREADS)).fetchall()
+    """, (project, max_threads)).fetchall()
 
     if rows:
         lines.append("## Open Threads")
@@ -173,6 +189,27 @@ def generate_context(project: str) -> str | None:
             text = content[:MAX_THREAD_CHARS].replace("\n", " ")
             lines.append(f"- \"{text}...\"")
         lines.append("")
+
+    # On compact/clear: include recent observations from current session
+    # so the agent can reconstruct what it was just doing
+    if is_recovery:
+        rows = conn.execute("""
+            SELECT o.obs_type, o.tool_name, o.content,
+                   datetime(o.timestamp, 'unixepoch', 'localtime') AS ts
+            FROM observations o
+            JOIN sessions s ON s.id = o.session_id
+            WHERE s.project = ?
+            ORDER BY o.timestamp DESC
+            LIMIT ?
+        """, (project, COMPACT_MAX_RECENT_OBS)).fetchall()
+
+        if rows:
+            lines.append("## Recent Actions (this session)")
+            for obs_type, tool_name, content, ts in reversed(rows):
+                tool = tool_name or obs_type
+                text = content[:100].replace("\n", " ")
+                lines.append(f"- [{ts}] {tool}: {text}")
+            lines.append("")
 
     conn.close()
 
@@ -199,9 +236,10 @@ def main():
         return
 
     cwd = payload.get("cwd", "")
+    source = payload.get("source", "startup")
     project = derive_project(cwd)
 
-    context = generate_context(project)
+    context = generate_context(project, source)
     if not context:
         return
 
