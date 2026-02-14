@@ -71,9 +71,9 @@ CREATE TABLE prompts (
 CREATE TABLE observations (
     id          INTEGER PRIMARY KEY,
     session_id  TEXT NOT NULL REFERENCES sessions(id),
-    prompt_id   INTEGER REFERENCES prompts(id),  -- most recent user prompt (intent)
+    prompt_id   INTEGER REFERENCES prompts(id),  -- most recent prompt: user directive or agent reasoning
     timestamp   INTEGER NOT NULL,   -- unix timestamp (seconds)
-    obs_type    TEXT NOT NULL,       -- file_read, file_edit, command, search, etc.
+    obs_type    TEXT NOT NULL,       -- file_read, file_edit, command, search, session_compact, etc.
     source_event TEXT NOT NULL,      -- PostToolUse, SessionStart, Stop
     tool_name   TEXT,                -- Bash, Read, Edit, Write, Grep, etc.
     file_path   TEXT,                -- normalized absolute path, when applicable
@@ -98,6 +98,7 @@ CREATE INDEX idx_prompts_session ON prompts(session_id, id);
 - **content is the extraction target.** For file operations: the path. For commands: the command string. For searches: the pattern. This is what FTS5 indexes. The `file_path` column duplicates the path for structured queries without parsing content.
 - **metadata as JSON.** Escape hatch for per-obs-type fields that don't warrant columns yet. If a field appears on >30% of observations, promote it to a column in a migration.
 - **Timestamps as integer seconds.** Millisecond precision isn't needed for a memory system. Seconds simplify dedup window math and index comparison.
+- **Effort signals as observations.** Context compaction (`session_compact`), resume (`session_resume`), and clear (`session_clear`) events are stored as observations with `source_event = 'SessionStart'`. Compaction count per session is a proxy for context window exhaustion — effort expenditure that's otherwise invisible. A session with 3 compactions consumed ~3x the context of one that stayed in a single window.
 
 ### Text Search: FTS5
 
@@ -129,7 +130,29 @@ CREATE TRIGGER observations_au AFTER UPDATE ON observations BEGIN
 END;
 ```
 
-External content tables keep the FTS index as a derived artifact — rebuildable with `INSERT INTO observations_fts(observations_fts) VALUES('rebuild')`. The porter tokenizer stems English words ("running" matches "run"), which suits observation prose. For exact substring matching on code or file paths, a trigram tokenizer would be needed — defer unless retrieval misses justify it.
+Both tables use external content FTS — the index is a derived artifact, rebuildable with `INSERT INTO <table>_fts(<table>_fts) VALUES('rebuild')`. The porter tokenizer stems English words ("running" matches "run"), which suits observation prose and agent reasoning. For exact substring matching on code or file paths, a trigram tokenizer would be needed — defer unless retrieval misses justify it.
+
+Prompts are also FTS-indexed:
+
+```sql
+CREATE VIRTUAL TABLE prompts_fts USING fts5(
+    content,
+    content='prompts',
+    content_rowid='id',
+    tokenize='porter unicode61'
+);
+
+CREATE TRIGGER prompts_ai AFTER INSERT ON prompts BEGIN
+    INSERT INTO prompts_fts(rowid, content) VALUES (new.id, new.content);
+END;
+
+CREATE TRIGGER prompts_ad AFTER DELETE ON prompts BEGIN
+    INSERT INTO prompts_fts(prompts_fts, rowid, content)
+        VALUES('delete', old.id, old.content);
+END;
+```
+
+FTS on prompts enables decision trail reconstruction: searching for "store everything" across both tables returns the user directive, the agent's interpretation, and the resulting actions — the complete intent-to-action chain.
 
 At nmem's data volume (<20K rows annually), even `LIKE '%term%'` scans complete in milliseconds. FTS5 is an optimization, not a requirement. But it's free and handles boolean queries (`AND`, `OR`, `NOT`), phrase matching, and prefix search — capabilities that LIKE cannot provide.
 
@@ -250,13 +273,15 @@ This replaces the `bundled` feature — they are mutually exclusive.
 
 ### Storage budget
 
-With unfiltered capture (ADR-002 Q2: store everything, dedup handles noise), volumes are higher than initially estimated:
+With unfiltered capture (ADR-002 Q2: store everything, dedup handles noise), volumes are calibrated from real data. The prototype DB loaded 242 sessions (~6 weeks of use) producing 5,353 prompts and 3,571 observations in 5 MB. Extrapolating:
 
-| Timeframe | Observations | DB size (with FTS5) |
-|-----------|-------------|---------------------|
-| Per month | 3,000-30,000 | 1.5-15 MB |
-| Per year | 36,000-360,000 | 18-180 MB |
-| 5-year ceiling | 180,000-1,800,000 | 90-900 MB |
+| Timeframe | Prompts | Observations | DB size (with FTS5) |
+|-----------|---------|-------------|---------------------|
+| Per month | ~3,500 | ~2,400 | ~3 MB |
+| Per year | ~42,000 | ~29,000 | ~36 MB |
+| 5-year ceiling | ~210,000 | ~145,000 | ~180 MB |
+
+These estimates include agent reasoning (35% of prompts by count, 64% by content volume). The 73.9x compression ratio from raw transcripts (358 MB → 5 MB) validates that structured extraction captures sufficient signal at low storage cost.
 
 Even the high end is well within SQLite's capabilities — indexed queries at 1M+ rows remain single-digit milliseconds. Storage budgets are not a day-one concern. `auto_vacuum = INCREMENTAL` handles space reclamation from deletions. A `PRAGMA page_count * PRAGMA page_size` query reports actual database size for monitoring.
 
@@ -299,3 +324,4 @@ If storage becomes a concern (years of accumulation, or if S4 synthesis is added
 | 2026-02-14 | 2.3 | Updated volume estimates to match ADR-002 Q2 resolution (store everything, dedup handles noise). Write volume, data lifetime, and storage budget revised upward. |
 | 2026-02-14 | 3.0 | Added schema: sessions, prompts, observations tables. Prompts stored separately as intent markers (option B from analysis). Indexes for dedup, retrieval, and intent joins. Derived from capture data analysis (684 events, 7 sessions) showing user prompts as work-unit boundaries. |
 | 2026-02-14 | 3.1 | Unified reasoning (thinking blocks) and user prompts as first-class intents. Added `source` column ("user"/"agent") to prompts table. Both are FTS-indexed and searchable. Validated against 5,353 prompts across 97 sessions. |
+| 2026-02-14 | 3.2 | Added FTS5 on prompts table (was implemented but undocumented). Added effort signal obs_types (session_compact/resume/clear). Updated volume estimates from real prototype data (73.9x compression, ~5 MB for 6 weeks). Fixed prompt_id semantics. Validated with live v2 extractor producing real hook data. |
