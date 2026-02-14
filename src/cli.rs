@@ -16,4 +16,6 @@ pub struct Cli {
 pub enum Command {
     /// Record a hook event from stdin
     Record,
+    /// Start MCP query server on stdio
+    Serve,
 }

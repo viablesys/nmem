@@ -2,6 +2,7 @@ use assert_cmd::Command;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
+#[allow(deprecated)]
 fn nmem_cmd(db_path: &PathBuf) -> Command {
     let mut cmd = Command::cargo_bin("nmem").unwrap();
     cmd.env("NMEM_DB", db_path);

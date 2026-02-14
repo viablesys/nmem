@@ -28,6 +28,26 @@ fn ensure_secure_permissions(db_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+pub fn open_db_readonly(db_path: &Path) -> Result<Connection, NmemError> {
+    if !db_path.exists() {
+        return Err(NmemError::Config(format!(
+            "database not found: {}",
+            db_path.display()
+        )));
+    }
+
+    let conn = Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "busy_timeout", 5000)?;
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
+
+    Ok(conn)
+}
+
 pub fn open_db(db_path: &Path) -> Result<Connection, NmemError> {
     ensure_secure_permissions(db_path)?;
 
