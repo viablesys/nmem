@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS prompts (
     id          INTEGER PRIMARY KEY,
     session_id  TEXT NOT NULL REFERENCES sessions(id),
     timestamp   INTEGER NOT NULL,
+    source      TEXT NOT NULL,      -- "user" or "agent"
     content     TEXT NOT NULL
 );
 
@@ -81,6 +82,22 @@ CREATE TRIGGER IF NOT EXISTS observations_au AFTER UPDATE ON observations BEGIN
     INSERT INTO observations_fts(observations_fts, rowid, content)
         VALUES('delete', old.id, old.content);
     INSERT INTO observations_fts(rowid, content) VALUES (new.id, new.content);
+END;
+
+CREATE VIRTUAL TABLE IF NOT EXISTS prompts_fts USING fts5(
+    content,
+    content='prompts',
+    content_rowid='id',
+    tokenize='porter unicode61'
+);
+
+CREATE TRIGGER IF NOT EXISTS prompts_ai AFTER INSERT ON prompts BEGIN
+    INSERT INTO prompts_fts(rowid, content) VALUES (new.id, new.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS prompts_ad AFTER DELETE ON prompts BEGIN
+    INSERT INTO prompts_fts(prompts_fts, rowid, content)
+        VALUES('delete', old.id, old.content);
 END;
 """
 
@@ -270,8 +287,8 @@ def load_transcript(conn: sqlite3.Connection, path: Path) -> dict:
             prompt_text = prompt_text[:500]
 
             cursor = conn.execute(
-                "INSERT INTO prompts (session_id, timestamp, content) VALUES (?, ?, ?)",
-                (session_id, ts, prompt_text),
+                "INSERT INTO prompts (session_id, timestamp, source, content) VALUES (?, ?, ?, ?)",
+                (session_id, ts, "user", prompt_text),
             )
             current_prompt_id = cursor.lastrowid
             prompt_count += 1
@@ -281,25 +298,33 @@ def load_transcript(conn: sqlite3.Connection, path: Path) -> dict:
             content_blocks = message.get("content", [])
 
             for block in content_blocks:
-                if block.get("type") != "tool_use":
-                    continue
+                if block.get("type") == "thinking":
+                    thinking_text = block.get("thinking", "").strip()
+                    if thinking_text:
+                        cursor = conn.execute(
+                            "INSERT INTO prompts (session_id, timestamp, source, content) VALUES (?, ?, ?, ?)",
+                            (session_id, ts, "agent", thinking_text[:2000]),
+                        )
+                        current_prompt_id = cursor.lastrowid
+                        prompt_count += 1
 
-                tool_name = block.get("name", "")
-                tool_input = block.get("input", {})
+                elif block.get("type") == "tool_use":
+                    tool_name = block.get("name", "")
+                    tool_input = block.get("input", {})
 
-                obs_type = classify_tool(tool_name)
-                content = extract_content(tool_name, tool_input)
-                file_path = extract_file_path(tool_name, tool_input)
+                    obs_type = classify_tool(tool_name)
+                    content = extract_content(tool_name, tool_input)
+                    file_path = extract_file_path(tool_name, tool_input)
 
-                conn.execute(
-                    """INSERT INTO observations
-                       (session_id, prompt_id, timestamp, obs_type, source_event,
-                        tool_name, file_path, content)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (session_id, current_prompt_id, ts, obs_type, "PostToolUse",
-                     tool_name, file_path, content),
-                )
-                obs_count += 1
+                    conn.execute(
+                        """INSERT INTO observations
+                           (session_id, prompt_id, timestamp, obs_type, source_event,
+                            tool_name, file_path, content)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (session_id, current_prompt_id, ts, obs_type, "PostToolUse",
+                         tool_name, file_path, content),
+                    )
+                    obs_count += 1
 
     # Compute session signature
     rows = conn.execute(
@@ -343,8 +368,13 @@ def cmd_stats(conn: sqlite3.Connection):
     linked = conn.execute("SELECT COUNT(*) FROM observations WHERE prompt_id IS NOT NULL").fetchone()[0]
     unlinked = observations - linked
 
+    user_prompts = conn.execute("SELECT COUNT(*) FROM prompts WHERE source = 'user'").fetchone()[0]
+    agent_prompts = conn.execute("SELECT COUNT(*) FROM prompts WHERE source = 'agent'").fetchone()[0]
+
     print(f"Sessions:     {sessions}")
     print(f"Prompts:      {prompts}")
+    print(f"  user:         {user_prompts}")
+    print(f"  agent:        {agent_prompts}")
     print(f"Observations: {observations}")
     print(f"  with intent:  {linked} ({100*linked//observations if observations else 0}%)")
     print(f"  no intent:    {unlinked} ({100*unlinked//observations if observations else 0}%)")
@@ -377,9 +407,35 @@ def cmd_stats(conn: sqlite3.Connection):
 
 def cmd_query(conn: sqlite3.Connection, term: str):
     """FTS5 search with intent context."""
+    # Search both prompts and observations
+    print(f"Results for '{term}':\n")
+    found = False
+
+    # Search prompts (user intent + agent reasoning)
     rows = conn.execute("""
-        SELECT o.id, o.obs_type, o.tool_name, o.content, o.file_path,
-               p.content AS intent, s.project,
+        SELECT p.source, p.content, s.project,
+               datetime(p.timestamp, 'unixepoch', 'localtime') AS ts,
+               (SELECT COUNT(*) FROM observations WHERE prompt_id = p.id) as obs_count
+        FROM prompts_fts f
+        JOIN prompts p ON p.id = f.rowid
+        JOIN sessions s ON p.session_id = s.id
+        WHERE prompts_fts MATCH ?
+        ORDER BY rank
+        LIMIT 10
+    """, (term,)).fetchall()
+    if rows:
+        found = True
+        print(f"  --- Intents ({len(rows)} matches) ---\n")
+        for source, content, project, ts, obs_count in rows:
+            label = "user" if source == "user" else "agent"
+            print(f"  [{ts}] {label} ({project}, {obs_count} obs)")
+            print(f"    \"{content[:150]}\"")
+            print()
+
+    # Search observations
+    rows = conn.execute("""
+        SELECT o.obs_type, o.tool_name, o.content, o.file_path,
+               p.content AS intent, p.source AS intent_source, s.project,
                datetime(o.timestamp, 'unixepoch', 'localtime') AS ts
         FROM observations_fts f
         JOIN observations o ON o.id = f.rowid
@@ -387,45 +443,65 @@ def cmd_query(conn: sqlite3.Connection, term: str):
         JOIN sessions s ON o.session_id = s.id
         WHERE observations_fts MATCH ?
         ORDER BY rank
-        LIMIT 20
+        LIMIT 10
     """, (term,)).fetchall()
+    if rows:
+        found = True
+        print(f"  --- Observations ({len(rows)} matches) ---\n")
+        for obs_type, tool, content, fpath, intent, intent_source, project, ts in rows:
+            print(f"  [{ts}] {obs_type} ({tool}) in {project}")
+            if fpath:
+                print(f"    file: {fpath}")
+            print(f"    content: {content[:120]}")
+            if intent:
+                src = "user" if intent_source == "user" else "agent"
+                print(f"    intent ({src}): \"{intent[:100]}\"")
+            print()
 
-    if not rows:
-        print(f"No results for '{term}'")
-        return
-
-    print(f"Results for '{term}':\n")
-    for r in rows:
-        oid, obs_type, tool, content, fpath, intent, project, ts = r
-        print(f"  [{ts}] {obs_type} ({tool}) in {project}")
-        if fpath:
-            print(f"    file: {fpath}")
-        print(f"    content: {content[:120]}")
-        if intent:
-            print(f"    intent: \"{intent[:100]}\"")
-        print()
+    if not found:
+        print(f"  No results for '{term}'")
 
 
 def cmd_intent(conn: sqlite3.Connection):
     """Show prompt→observation groupings."""
     rows = conn.execute("""
-        SELECT p.id, p.content, p.session_id,
+        SELECT p.id, p.content, p.source, p.session_id,
                datetime(p.timestamp, 'unixepoch', 'localtime') AS ts,
                COUNT(o.id) as obs_count
         FROM prompts p
         LEFT JOIN observations o ON o.prompt_id = p.id
+        WHERE p.source = 'user'
         GROUP BY p.id
         ORDER BY p.timestamp DESC
-        LIMIT 30
+        LIMIT 20
     """).fetchall()
 
-    for pid, content, sid, ts, obs_count in rows:
+    for pid, content, source, sid, ts, obs_count in rows:
         print(f"[{ts}] ({obs_count} obs) \"{content[:80]}\"")
-        # Show the observations under this prompt
+        # Show agent reasoning and observations under this prompt
+        # Find agent prompts that follow this user prompt (before next user prompt)
+        agent_intents = conn.execute("""
+            SELECT content FROM prompts
+            WHERE session_id = ? AND source = 'agent' AND id > ?
+              AND id < COALESCE(
+                  (SELECT MIN(id) FROM prompts WHERE session_id = ? AND source = 'user' AND id > ?),
+                  999999999)
+            ORDER BY id LIMIT 2
+        """, (sid, pid, sid, pid)).fetchall()
+        for (ai_content,) in agent_intents:
+            print(f"  {'reasoning':15s} {'':10s} \"{ai_content[:70]}\"")
+
         obs = conn.execute("""
             SELECT obs_type, tool_name, file_path, content
-            FROM observations WHERE prompt_id = ? ORDER BY timestamp
-        """, (pid,)).fetchall()
+            FROM observations WHERE prompt_id IN (
+                SELECT id FROM prompts
+                WHERE session_id = ? AND id >= ?
+                  AND id < COALESCE(
+                      (SELECT MIN(id) FROM prompts WHERE session_id = ? AND source = 'user' AND id > ?),
+                      999999999)
+            )
+            ORDER BY timestamp
+        """, (sid, pid, sid, pid)).fetchall()
         for obs_type, tool, fpath, ocontent in obs:
             label = fpath.split("/")[-1] if fpath else ocontent[:60]
             print(f"  {obs_type:15s} {tool or '':10s} {label}")
