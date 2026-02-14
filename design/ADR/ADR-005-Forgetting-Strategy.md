@@ -20,6 +20,8 @@ ADR-003 (Daemon Lifecycle) — forgetting may require background processing.
 
 ADR-002 established the data volumes: 300-1,500 observations/month, 3,600-18,000 rows/year. ADR-001 established the storage cost: 2-18 MB/year at expected volume (observations + FTS5 indexes). ADR-001 also set `auto_vacuum = INCREMENTAL`, which means DELETE reclaims space via periodic `PRAGMA incremental_vacuum(N)` calls — the mechanism works.
 
+> **[ANNOTATION 2026-02-14, v1.3]:** Live production data shows significantly higher volumes than the original estimates: ~585K records/year, ~652 MB (see ADR-001 v3.3). The increase is driven by agent thinking blocks (2.9x per user prompt, 84% of content volume at avg 987 bytes). At 652 MB/year, the "never forget" position (A) remains viable for 1-2 years but storage crosses 1 GB within 2 years. Position C (type-aware retention) should be considered a year-1 activation rather than a distant contingency. Thinking blocks are prime candidates for aggressive retention — they're high-volume, low-reuse content that loses relevance quickly. A 30-day retention on agent prompts would cut ~60% of annual storage growth.
+
 ADR-002 chose pure structured extraction over LLM synthesis. This means observations are typed rows with predictable columns (timestamp, session_id, project, obs_type, content, file_path, metadata). DELETE on these tables works normally. FTS5 external content tables sync deletions via triggers (ADR-001 defines the `observations_ad` trigger). sqlite-vec is deferred — its broken DELETE is not nmem's problem.
 
 ADR-003 chose no daemon with opportunistic maintenance. There is no background process to run retention sweeps. Any forgetting must be triggered either by hook invocations, explicit CLI commands, or the user.
@@ -332,3 +334,4 @@ Do **not** enable retention preemptively. The cost of keeping too much data is l
 | 2026-02-14 | 1.0 | Full ADR. Three positions, adversarial analysis. Decision: never forget at launch, type-aware retention designed and ready. Purge command day-one. Secure deletion strategy. |
 | 2026-02-14 | 1.1 | Refined. Syntheses table existence guard for retention sweep. Purge subcommand added to ADR-003 clap enum. FTS5 rebuild note after large deletions. |
 | 2026-02-14 | 1.2 | Refined with library topics. PurgeArgs clap derive struct. FTS5 rebuild integrated into secure_purge. References: rusqlite.md, fts5.md, clap.md. |
+| 2026-02-14 | 1.3 | Annotated with live production data. Volume estimates revised to ~585K records/year (~652 MB). Thinking blocks identified as prime retention candidates (84% of content, low reuse). Position C activation timeline shortened to year-1. |

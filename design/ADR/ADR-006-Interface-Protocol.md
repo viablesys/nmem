@@ -217,7 +217,10 @@ The SessionStart hook pushes context proactively. `nmem record` handles SessionS
 | Format | Markdown table, compact, scannable |
 | Max lines | ~50 lines (~350-500 tokens, varies by content length). Competes with CLAUDE.md for context window. |
 | Timing | SessionStart only (`source` in `startup`, `resume`, `clear`, `compact`) |
+| Recovery mode | On `compact`/`clear`: expanded limits (more intents, files, threads) + recent actions trail. Agent lost its context window — inject more to compensate. |
 | Selection | 20 project-local + up to 10 cross-project backfill |
+
+> **[ANNOTATION 2026-02-14, v1.2]:** Live data shows 56% of user intents trigger zero tool actions (conversational turns: "yes", "i do", questions). Context injection should weight intents-with-actions higher than bare conversational turns. The prototype context generator already shows action counts per intent (`→ N actions`) but doesn't filter or sort by them. Consider promoting high-action intents and demoting zero-action turns in the selection logic.
 
 ## Harness Independence
 
@@ -286,3 +289,4 @@ Some projects may want more or fewer injected observations, or suppress cross-pr
 | 2026-02-14 | 1.0 | Full ADR. Protocol choice, ingestion contract, four MCP tools with parameters and return shapes, context injection format, harness independence analysis. |
 | 2026-02-14 | 1.1 | Refined. FTS5 rank ordering clarified. recent_context dedup scoped to non-NULL file_path. Token budget noted as approximate. MCP error handling table added. Timeline missing-anchor behavior specified. |
 | 2026-02-14 | 1.2 | Refined with library topics. Q1 recency weighting linked to sqlite-retrieval-patterns.md composite scoring. SQL sketch references to fts5.md. References: rusqlite.md, fts5.md, sqlite-retrieval-patterns.md, serde-json.md, ADR-004. |
+| 2026-02-14 | 1.3 | Annotated with live data. Added recovery mode to injection contract (compact/clear get expanded limits). Noted that 56% of user intents are zero-action conversational turns — context injection should weight intents-with-actions higher. |

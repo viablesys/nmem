@@ -48,6 +48,8 @@ Every observation is derived from deterministic parsing of tool calls and their 
 - Inferred decisions ("chose library X over Y because...")
 - Summarization across sessions ("this week was mostly debugging auth")
 
+> **[ANNOTATION 2026-02-14, v2.2]:** Live data partially closes this gap. Thinking blocks (agent reasoning, captured from the transcript) provide inline intent and decision context without an LLM extraction layer. In production: 2.9 thinking blocks per user prompt, 84% of content volume. Examples from actual blocks: "The user wants the context generator to also be triggered on compact events", "Let me analyze what's changed since these were built." These are exactly the "why" and "connections" listed as losses — and they're captured structurally (transcript parsing), not via LLM extraction. The losses that remain genuine: cross-session summarization and connections spanning multiple sessions. These are still S4 territory.
+
 **The hard question:** Do we actually need what's lost? The temporal structure (action A happened before action B in the same session, in response to user prompt C) provides implicit causality. A human reviewing the structured log can reconstruct the "why" — can an LLM at retrieval time do the same without needing it pre-extracted?
 
 **Schema implications:** Predictable, typed columns. FTS5 on text fields is sufficient for search. No vector embeddings needed. sqlite-vec is not required.
@@ -200,6 +202,8 @@ At nmem's data volumes, storage is not a constraint. Storing every tool call wit
 | Per month | 4,500-37,500 | 2-19 MB |
 | Per year | 54,000-450,000 | 27-225 MB |
 
+> **[ANNOTATION 2026-02-14, v2.2]:** Live production data shows higher rates than these estimates because they exclude prompts (user + agent thinking blocks). Real rate: ~293 records/hour (observations + prompts combined), projecting to ~585K records/year and ~652 MB. Thinking blocks are 84% of content volume. The conclusion still holds — "no storage pressure" — but the per-year estimate should be ~652 MB, not 27-225 MB. See ADR-001 v3.3 for revised storage budget.
+
 Even the high end (450K rows, 225 MB after a year of heavy use) is trivial for SQLite — indexed queries remain single-digit milliseconds. There is no storage pressure that justifies discarding observations at write time.
 
 **Noise is handled by dedup, not filtering.** ADR-003's dedup logic (same `session_id` + `obs_type` + `file_path` within a time window) collapses the noisiest pattern — repeated reads of the same file. This reduces volume without information loss.
@@ -321,3 +325,4 @@ Do **not** add LLM synthesis preemptively. The predecessor proved that premature
 | 2026-02-08 | 1.0 | Initial draft. Three positions, adversarial analysis, open questions. |
 | 2026-02-14 | 2.0 | Accepted. Resolved Q1 (observation schema), Q3 (database schema), Q4 (per-source extraction mapping). Promoted Preliminary Direction to Decision. Added library references. |
 | 2026-02-14 | 2.1 | Resolved Q2 (store everything, filter at retrieval) and Q5 (volume estimates updated for unfiltered capture). All open questions now resolved. |
+| 2026-02-14 | 2.2 | Annotated with live production data. Thinking blocks partially close the "What is lost" gap for Position A — agent reasoning provides inline intent/decision capture without LLM extraction. Volume estimates annotated: real rate is ~585K records/year (~652 MB) due to thinking block density (2.9x per user prompt, 84% of content volume). |

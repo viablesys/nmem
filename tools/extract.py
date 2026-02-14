@@ -128,14 +128,12 @@ def get_db():
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
-    # FTS tables: ignore errors if triggers already exist
-    for stmt in FTS_SCHEMA.split(";"):
-        stmt = stmt.strip()
-        if stmt:
-            try:
-                conn.execute(stmt)
-            except sqlite3.OperationalError:
-                pass
+    # FTS tables and triggers — use executescript to handle
+    # multi-statement triggers (trigger bodies contain semicolons)
+    try:
+        conn.executescript(FTS_SCHEMA)
+    except sqlite3.OperationalError:
+        pass
     return conn
 
 

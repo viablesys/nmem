@@ -7,9 +7,9 @@ Accepted
 
 nmem is a local-first, single-user developer tool for cross-session memory. Its storage requirements:
 
-- **Write volume**: Low-moderate. Structured observations from every tool call — 50-250 writes per session (after dedup), a few sessions per day. Thousands of observations per month. See ADR-002 Q2/Q5.
-- **Read pattern**: Retrieval at session start (recent + relevant observations) and on-demand queries during sessions. Read-heavy relative to writes.
-- **Data lifetime**: Observations accumulate over months. Annual volume at active use: 36,000-360,000 rows (unfiltered capture, ADR-002 Q2). Still a small-data problem for SQLite.
+- **Write volume**: Moderate. ~293 records/hour during active sessions (observations + prompts including agent thinking blocks). Single active session produces ~190 records in 38 minutes. Burst pattern: 46% of events arrive 2-10s apart, median gap 8s, no concurrent writes. See ADR-002 Q2/Q5.
+- **Read pattern**: Retrieval at session start (recent + relevant observations) and on-demand queries during sessions. Context re-injection on compact/clear events. Read-heavy relative to writes.
+- **Data lifetime**: Observations accumulate over months. Annual volume at active use (8h/day, 250 days): ~585,000 records, ~652 MB. Still within SQLite's capabilities but forgetting (ADR-005) becomes relevant within 2-3 years.
 - **Reliability**: Data is developer session notes, not business-critical state. Loss costs accumulated context, not money. Corruption resistance matters; disaster recovery does not.
 - **Concurrency**: A daemon or session process writes while MCP queries read. Single writer, multiple readers.
 - **Deployment**: Runs on the developer's machine. No servers, no cloud, no containers.
@@ -99,6 +99,8 @@ CREATE INDEX idx_prompts_session ON prompts(session_id, id);
 - **metadata as JSON.** Escape hatch for per-obs-type fields that don't warrant columns yet. If a field appears on >30% of observations, promote it to a column in a migration.
 - **Timestamps as integer seconds.** Millisecond precision isn't needed for a memory system. Seconds simplify dedup window math and index comparison.
 - **Effort signals as observations.** Context compaction (`session_compact`), resume (`session_resume`), and clear (`session_clear`) events are stored as observations with `source_event = 'SessionStart'`. Compaction count per session is a proxy for context window exhaustion — effort expenditure that's otherwise invisible. A session with 3 compactions consumed ~3x the context of one that stayed in a single window.
+- **Thinking blocks dominate storage.** Agent reasoning (source="agent" prompts) is 84% of content by volume in production data — avg 987 bytes vs 170 bytes for observations. 12% of thinking blocks are truncated at the 2000-char limit. This makes prompts, not observations, the primary storage driver. The 2000-char limit preserves 88% of blocks fully; whether tail truncation degrades retrieval quality is unknown and should be monitored.
+- **Prompt-observation linking is sparse but correct.** 100% of observations link to a prompt_id, but only 25% of prompts have observations attributed to them. The remaining 75% (mostly thinking blocks) exist as reasoning context without direct actions. 56% of user intents trigger zero tool actions (conversational turns: questions, confirmations, acknowledgments). Context injection should weight intents-with-actions higher than bare conversational turns.
 
 ### Text Search: FTS5
 
@@ -131,6 +133,8 @@ END;
 ```
 
 Both tables use external content FTS — the index is a derived artifact, rebuildable with `INSERT INTO <table>_fts(<table>_fts) VALUES('rebuild')`. The porter tokenizer stems English words ("running" matches "run"), which suits observation prose and agent reasoning. For exact substring matching on code or file paths, a trigram tokenizer would be needed — defer unless retrieval misses justify it.
+
+**Implementation pitfall (validated):** External content FTS requires sync triggers whose bodies contain semicolons (`INSERT INTO ... VALUES (...);`). Naively splitting DDL on `;` fragments these triggers, causing silent creation failure. Use `executescript()` for the entire FTS+trigger block, or parse statements respecting `BEGIN...END` boundaries. If triggers are missing, the FTS tables accumulate rows (from content table sync) but the index stays empty — all `MATCH` queries return zero results with no error. Always verify trigger existence after schema setup: `SELECT name FROM sqlite_master WHERE type='trigger'`.
 
 Prompts are also FTS-indexed:
 
@@ -273,19 +277,27 @@ This replaces the `bundled` feature — they are mutually exclusive.
 
 ### Storage budget
 
-With unfiltered capture (ADR-002 Q2: store everything, dedup handles noise), volumes are calibrated from real data. The prototype DB loaded 242 sessions (~6 weeks of use) producing 5,353 prompts and 3,571 observations in 5 MB. Extrapolating:
+With unfiltered capture (ADR-002 Q2: store everything, dedup handles noise), volumes are calibrated from two data sources:
 
-| Timeframe | Prompts | Observations | DB size (with FTS5) |
-|-----------|---------|-------------|---------------------|
-| Per month | ~3,500 | ~2,400 | ~3 MB |
-| Per year | ~42,000 | ~29,000 | ~36 MB |
-| 5-year ceiling | ~210,000 | ~145,000 | ~180 MB |
+**Prototype DB** (transcript backfill): 242 sessions (~6 weeks), 5,353 prompts, 3,571 observations in 5 MB. 73.9x compression from raw transcripts (358 MB → 5 MB).
 
-These estimates include agent reasoning (35% of prompts by count, 64% by content volume). The 73.9x compression ratio from raw transcripts (358 MB → 5 MB) validates that structured extraction captures sufficient signal at low storage cost.
+**Live production data** (v2 extractor, real-time hooks): 2 sessions, 38 minutes active, 104 prompts (27 user, 77 agent), 89 observations in 216 KB. Rate: ~293 records/hour, ~4.9 records/minute.
 
-Even the high end is well within SQLite's capabilities — indexed queries at 1M+ rows remain single-digit milliseconds. Storage budgets are not a day-one concern. `auto_vacuum = INCREMENTAL` handles space reclamation from deletions. A `PRAGMA page_count * PRAGMA page_size` query reports actual database size for monitoring.
+The prototype underestimates because transcript backfill misses many events that real-time hooks capture (every thinking block, every tool call). Live rates are the authoritative source:
 
-If storage becomes a concern (years of accumulation, or if S4 synthesis is added later), ADR-005 (Forgetting) addresses retention and compaction strategies.
+| Timeframe | Records | Content | DB size (2.4x overhead) |
+|-----------|---------|---------|-------------------------|
+| Per hour (active) | ~293 | ~100 KB | ~240 KB |
+| Per day (8h active) | ~2,340 | ~800 KB | ~1.9 MB |
+| Per month (20 days) | ~47,000 | ~16 MB | ~38 MB |
+| Per year (250 days) | ~585,000 | ~272 MB | ~652 MB |
+| 5-year ceiling | ~2.9M | ~1.4 GB | ~3.3 GB |
+
+The 2.4x storage overhead (216 KB DB for 88 KB content) includes indexes, FTS5 tables, page alignment, and SQLite internal structures. Thinking blocks are the dominant content class: 84% of content volume at avg 987 bytes/record vs 170 bytes for observations.
+
+The 5-year ceiling pushes into territory where forgetting matters. SQLite handles multi-GB databases without issue (indexed queries remain single-digit milliseconds at 1M+ rows), but retrieval quality degrades when stale observations dominate. ADR-005's Position C (type-aware retention) should activate within 1-2 years of active use, not "someday."
+
+`auto_vacuum = INCREMENTAL` handles space reclamation from deletions. A `PRAGMA page_count * PRAGMA page_size` query reports actual database size for monitoring.
 
 ## Consequences
 
@@ -325,3 +337,4 @@ If storage becomes a concern (years of accumulation, or if S4 synthesis is added
 | 2026-02-14 | 3.0 | Added schema: sessions, prompts, observations tables. Prompts stored separately as intent markers (option B from analysis). Indexes for dedup, retrieval, and intent joins. Derived from capture data analysis (684 events, 7 sessions) showing user prompts as work-unit boundaries. |
 | 2026-02-14 | 3.1 | Unified reasoning (thinking blocks) and user prompts as first-class intents. Added `source` column ("user"/"agent") to prompts table. Both are FTS-indexed and searchable. Validated against 5,353 prompts across 97 sessions. |
 | 2026-02-14 | 3.2 | Added FTS5 on prompts table (was implemented but undocumented). Added effort signal obs_types (session_compact/resume/clear). Updated volume estimates from real prototype data (73.9x compression, ~5 MB for 6 weeks). Fixed prompt_id semantics. Validated with live v2 extractor producing real hook data. |
+| 2026-02-14 | 3.3 | Data-driven revision from live production analysis. Revised volume estimates upward (~585K records/year, ~652 MB) based on real-time hook rates (293 records/hour). Documented FTS5 trigger creation pitfall (semicolons in trigger bodies). Added thinking block storage dominance finding (84% of content volume). Added prompt-observation linking analysis (100% linked but 75% of prompts have no direct actions). Noted 2.4x storage overhead. Cross-referenced ADR-005 forgetting timeline (1-2 years, not indefinite). |
