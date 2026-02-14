@@ -1,0 +1,230 @@
+{
+  "dashboard": {
+    "title": "nmem — Event Capture Analysis",
+    "tags": ["nmem"],
+    "timezone": "browser",
+    "refresh": "",
+    "time": {
+      "from": "now-48h",
+      "to": "now"
+    },
+    "panels": [
+      {
+        "title": "Events Over Time (by type)",
+        "type": "timeseries",
+        "gridPos": { "x": 0, "y": 0, "w": 16, "h": 8 },
+        "datasource": { "type": "prometheus", "uid": "" },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "bars",
+              "stacking": { "mode": "normal" },
+              "fillOpacity": 80,
+              "lineWidth": 0
+            },
+            "unit": "short"
+          },
+          "overrides": []
+        },
+        "targets": [
+          {
+            "expr": "sum by (obs_type) (count_over_time(nmem_event_bytes[30m]))",
+            "legendFormat": "{{obs_type}}",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "title": "Event Count by Type",
+        "type": "piechart",
+        "gridPos": { "x": 16, "y": 0, "w": 8, "h": 8 },
+        "datasource": { "type": "prometheus", "uid": "" },
+        "targets": [
+          {
+            "expr": "sum by (obs_type) (count_over_time(nmem_event_bytes[48h]))",
+            "legendFormat": "{{obs_type}}",
+            "refId": "A",
+            "instant": true
+          }
+        ],
+        "options": {
+          "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] },
+          "pieType": "donut",
+          "reduceOptions": { "calcs": ["lastNotNull"] }
+        }
+      },
+      {
+        "title": "Observation Size Over Time",
+        "type": "timeseries",
+        "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+        "datasource": { "type": "prometheus", "uid": "" },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "decbytes",
+            "custom": {
+              "drawStyle": "points",
+              "pointSize": 3,
+              "fillOpacity": 0,
+              "showPoints": "always"
+            }
+          },
+          "overrides": []
+        },
+        "targets": [
+          {
+            "expr": "avg by (obs_type) (avg_over_time(nmem_event_bytes[15m]))",
+            "legendFormat": "{{obs_type}}",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "title": "Avg Observation Size by Type",
+        "type": "barchart",
+        "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+        "datasource": { "type": "prometheus", "uid": "" },
+        "fieldConfig": {
+          "defaults": { "unit": "decbytes" },
+          "overrides": []
+        },
+        "targets": [
+          {
+            "expr": "avg by (obs_type) (avg_over_time(nmem_event_bytes[48h]))",
+            "legendFormat": "{{obs_type}}",
+            "refId": "A",
+            "instant": true
+          }
+        ],
+        "options": {
+          "orientation": "horizontal",
+          "xTickLabelRotation": 0,
+          "showValue": "always"
+        }
+      },
+      {
+        "title": "Tool Usage Distribution",
+        "type": "piechart",
+        "gridPos": { "x": 0, "y": 16, "w": 8, "h": 8 },
+        "datasource": { "type": "prometheus", "uid": "" },
+        "targets": [
+          {
+            "expr": "sum by (tool_name) (count_over_time(nmem_event_bytes{tool_name!=\"none\"}[48h]))",
+            "legendFormat": "{{tool_name}}",
+            "refId": "A",
+            "instant": true
+          }
+        ],
+        "options": {
+          "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] },
+          "pieType": "donut",
+          "reduceOptions": { "calcs": ["lastNotNull"] }
+        }
+      },
+      {
+        "title": "Extraction Efficiency (raw vs stored)",
+        "type": "timeseries",
+        "gridPos": { "x": 8, "y": 16, "w": 8, "h": 8 },
+        "datasource": { "type": "prometheus", "uid": "" },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "decbytes",
+            "custom": { "fillOpacity": 20 }
+          },
+          "overrides": []
+        },
+        "targets": [
+          {
+            "expr": "avg(avg_over_time(nmem_raw_bytes[30m]))",
+            "legendFormat": "raw payload (avg)",
+            "refId": "A"
+          },
+          {
+            "expr": "avg(avg_over_time(nmem_event_bytes[30m]))",
+            "legendFormat": "stored observation (avg)",
+            "refId": "B"
+          },
+          {
+            "expr": "avg(avg_over_time(nmem_content_bytes[30m]))",
+            "legendFormat": "content only (avg)",
+            "refId": "C"
+          }
+        ]
+      },
+      {
+        "title": "Per-Session Event Count",
+        "type": "barchart",
+        "gridPos": { "x": 16, "y": 16, "w": 8, "h": 8 },
+        "datasource": { "type": "prometheus", "uid": "" },
+        "fieldConfig": {
+          "defaults": { "unit": "short" },
+          "overrides": []
+        },
+        "targets": [
+          {
+            "expr": "sum by (session) (count_over_time(nmem_event_bytes[48h]))",
+            "legendFormat": "{{session}}",
+            "refId": "A",
+            "instant": true
+          }
+        ],
+        "options": {
+          "orientation": "horizontal",
+          "showValue": "always"
+        }
+      },
+      {
+        "title": "Volume Stats",
+        "type": "stat",
+        "gridPos": { "x": 0, "y": 24, "w": 24, "h": 4 },
+        "datasource": { "type": "prometheus", "uid": "" },
+        "targets": [
+          {
+            "expr": "count(sum by (session) (count_over_time(nmem_event_bytes[48h])))",
+            "legendFormat": "Sessions",
+            "refId": "A",
+            "instant": true
+          },
+          {
+            "expr": "sum(count_over_time(nmem_event_bytes[48h]))",
+            "legendFormat": "Total Events",
+            "refId": "B",
+            "instant": true
+          },
+          {
+            "expr": "sum(count_over_time(nmem_event_bytes[48h])) / count(sum by (session) (count_over_time(nmem_event_bytes[48h])))",
+            "legendFormat": "Avg Events/Session",
+            "refId": "C",
+            "instant": true
+          },
+          {
+            "expr": "avg(avg_over_time(nmem_event_bytes[48h]))",
+            "legendFormat": "Avg Observation Size",
+            "refId": "D",
+            "instant": true
+          },
+          {
+            "expr": "sum(sum_over_time(nmem_event_bytes[48h])) * 12 * 2",
+            "legendFormat": "Est. Annual Storage (w/ FTS5)",
+            "refId": "E",
+            "instant": true
+          }
+        ],
+        "options": {
+          "reduceOptions": { "calcs": ["lastNotNull"] },
+          "textMode": "auto",
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "auto"
+        },
+        "fieldConfig": {
+          "defaults": { "unit": "short" },
+          "overrides": [
+            { "matcher": { "id": "byName", "options": "Avg Observation Size" }, "properties": [{ "id": "unit", "value": "decbytes" }] },
+            { "matcher": { "id": "byName", "options": "Est. Annual Storage (w/ FTS5)" }, "properties": [{ "id": "unit", "value": "decbytes" }] }
+          ]
+        }
+      }
+    ]
+  },
+  "overwrite": true
+}
