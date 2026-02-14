@@ -64,7 +64,8 @@ CREATE TABLE prompts (
     id          INTEGER PRIMARY KEY,
     session_id  TEXT NOT NULL REFERENCES sessions(id),
     timestamp   INTEGER NOT NULL,   -- unix timestamp (seconds)
-    content     TEXT NOT NULL        -- user prompt text, truncated to 500 chars
+    source      TEXT NOT NULL,       -- "user" (directive) or "agent" (reasoning)
+    content     TEXT NOT NULL        -- prompt text or thinking block, truncated
 );
 
 CREATE TABLE observations (
@@ -91,7 +92,8 @@ CREATE INDEX idx_prompts_session ON prompts(session_id, id);
 
 **Design rationale:**
 
-- **Prompts as a separate table.** A user prompt applies to 1-N subsequent tool calls. Storing it once and referencing by ID avoids duplicating the same text across observations. At retrieval, one join reconstructs intent: `SELECT o.*, p.content AS intent FROM observations o LEFT JOIN prompts p ON o.prompt_id = p.id`.
+- **Prompts as a separate table.** Both user directives and agent reasoning are intent markers that frame subsequent tool calls. Storing them once and referencing by ID avoids duplication. At retrieval, one join reconstructs intent: `SELECT o.*, p.content AS intent, p.source FROM observations o LEFT JOIN prompts p ON o.prompt_id = p.id`.
+- **source distinguishes origin, not importance.** User prompts ("fix the bug") and agent reasoning ("The user wants me to...") are peers. `source = 'user'` filters to directives; `source = 'agent'` filters to reasoning. Both are FTS-indexed and searchable.
 - **prompt_id is nullable.** SessionStart and early tool calls before the first user prompt have no intent context. Tool calls during autonomous agent work (task_spawn chains) may also lack a direct prompt.
 - **content is the extraction target.** For file operations: the path. For commands: the command string. For searches: the pattern. This is what FTS5 indexes. The `file_path` column duplicates the path for structured queries without parsing content.
 - **metadata as JSON.** Escape hatch for per-obs-type fields that don't warrant columns yet. If a field appears on >30% of observations, promote it to a column in a migration.
@@ -296,3 +298,4 @@ If storage becomes a concern (years of accumulation, or if S4 synthesis is added
 | 2026-02-14 | 2.2 | Added tokio-rusqlite to deps. Reader vs writer PRAGMA config. WAL checkpoint on shutdown. Database file location. |
 | 2026-02-14 | 2.3 | Updated volume estimates to match ADR-002 Q2 resolution (store everything, dedup handles noise). Write volume, data lifetime, and storage budget revised upward. |
 | 2026-02-14 | 3.0 | Added schema: sessions, prompts, observations tables. Prompts stored separately as intent markers (option B from analysis). Indexes for dedup, retrieval, and intent joins. Derived from capture data analysis (684 events, 7 sessions) showing user prompts as work-unit boundaries. |
+| 2026-02-14 | 3.1 | Unified reasoning (thinking blocks) and user prompts as first-class intents. Added `source` column ("user"/"agent") to prompts table. Both are FTS-indexed and searchable. Validated against 5,353 prompts across 97 sessions. |
