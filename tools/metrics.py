@@ -1,27 +1,38 @@
 #!/usr/bin/env python3
-"""Push nmem capture data to VictoriaMetrics as time-series metrics.
+"""Push nmem metrics to VictoriaMetrics.
 
-Reads ~/.nmem/capture.jsonl and pushes per-event metrics with original
-timestamps. Idempotent — re-running overwrites the same data points.
+Two data sources:
+  1. ~/.nmem/capture.jsonl  — per-event volume metrics (timestamped)
+  2. ~/.nmem/nmem.db        — schema aggregate gauges (current state)
 
 Usage:
   python3 ~/workspace/nmem/tools/metrics.py           # push all
   python3 ~/workspace/nmem/tools/metrics.py --live     # push only new (since last run)
 
-Metrics pushed:
-  nmem_event_bytes       — observation size per event (labels: obs_type, tool_name, session)
-  nmem_raw_bytes         — raw payload size per event
-  nmem_content_bytes     — extracted content size per event
+Capture metrics (per-event, timestamped):
+  nmem_event_bytes         — observation size per event
+  nmem_raw_bytes           — raw payload size per event
+  nmem_content_bytes       — extracted content size per event
   nmem_tool_response_bytes — tool_response size (discarded by extraction)
+
+Schema metrics (gauges, current state):
+  nmem_db_size_bytes       — database file size
+  nmem_prompts_total       — prompt count by source and project
+  nmem_observations_total  — observation count by obs_type and project
+  nmem_sessions_total      — session count by project
+  nmem_compactions_total   — compaction events by project
+  nmem_active_sessions     — sessions without ended_at by project
 """
 
 import json
 import sys
+import time
 import urllib.request
 from pathlib import Path
 from collections import defaultdict
 
 CAPTURE_FILE = Path.home() / ".nmem" / "capture.jsonl"
+DB_PATH = Path.home() / ".nmem" / "nmem.db"
 WATERMARK_FILE = Path.home() / ".nmem" / ".metrics_watermark"
 VM_IMPORT = "http://localhost:8428/api/v1/import/prometheus"
 BATCH_SIZE = 500
@@ -62,8 +73,10 @@ def make_lines(records: list[dict]) -> list[str]:
         tool = sanitize_label(r.get("tool_name") or "none")
         session = sanitize_label(r.get("session_id", "")[:12])
         event = sanitize_label(r.get("event", "unknown"))
+        project = sanitize_label(r.get("project", "unknown"))
+        source = sanitize_label(r.get("source", ""))
 
-        labels = f'obs_type="{obs_type}",tool_name="{tool}",session="{session}",event="{event}"'
+        labels = f'obs_type="{obs_type}",tool_name="{tool}",session="{session}",event="{event}",project="{project}",source="{source}"'
 
         lines.append(f'nmem_event_bytes{{{labels}}} {r.get("observation_bytes", 0)} {ts_ms}')
         lines.append(f'nmem_raw_bytes{{{labels}}} {r.get("raw_payload_bytes", 0)} {ts_ms}')
@@ -100,37 +113,109 @@ def write_watermark(ts: float):
     WATERMARK_FILE.write_text(str(ts))
 
 
+def make_schema_lines() -> list[str]:
+    """Generate gauge metrics from nmem.db current state."""
+    import sqlite3
+    import os
+
+    if not DB_PATH.exists():
+        return []
+
+    lines = []
+    ts_ms = int(time.time() * 1000)
+
+    # DB file size
+    db_bytes = os.path.getsize(DB_PATH)
+    lines.append(f'nmem_db_size_bytes {db_bytes} {ts_ms}')
+
+    conn = sqlite3.connect(str(DB_PATH), timeout=3)
+    conn.execute("PRAGMA journal_mode = WAL")
+
+    # Prompts by source and project
+    for source, project, count in conn.execute("""
+        SELECT p.source, s.project, COUNT(*)
+        FROM prompts p JOIN sessions s ON s.id = p.session_id
+        GROUP BY p.source, s.project
+    """):
+        s = sanitize_label(source)
+        p = sanitize_label(project)
+        lines.append(f'nmem_prompts_total{{source="{s}",project="{p}"}} {count} {ts_ms}')
+
+    # Observations by obs_type and project
+    for obs_type, project, count in conn.execute("""
+        SELECT o.obs_type, s.project, COUNT(*)
+        FROM observations o JOIN sessions s ON s.id = o.session_id
+        GROUP BY o.obs_type, s.project
+    """):
+        t = sanitize_label(obs_type)
+        p = sanitize_label(project)
+        lines.append(f'nmem_observations_total{{obs_type="{t}",project="{p}"}} {count} {ts_ms}')
+
+    # Sessions by project
+    for project, count in conn.execute("""
+        SELECT project, COUNT(*) FROM sessions GROUP BY project
+    """):
+        p = sanitize_label(project)
+        lines.append(f'nmem_sessions_total{{project="{p}"}} {count} {ts_ms}')
+
+    # Active sessions (no ended_at)
+    for project, count in conn.execute("""
+        SELECT project, COUNT(*) FROM sessions
+        WHERE ended_at IS NULL GROUP BY project
+    """):
+        p = sanitize_label(project)
+        lines.append(f'nmem_active_sessions{{project="{p}"}} {count} {ts_ms}')
+
+    # Compactions by project
+    for project, count in conn.execute("""
+        SELECT s.project, COUNT(*)
+        FROM observations o JOIN sessions s ON s.id = o.session_id
+        WHERE o.obs_type = 'session_compact'
+        GROUP BY s.project
+    """):
+        p = sanitize_label(project)
+        lines.append(f'nmem_compactions_total{{project="{p}"}} {count} {ts_ms}')
+
+    conn.close()
+    return lines
+
+
 def main():
     live_mode = "--live" in sys.argv
 
+    # Push capture-based metrics
     since = read_watermark() if live_mode else 0
     records = load_records(since_ts=since)
+    capture_pushed = 0
 
-    if not records:
-        print("No new records to push.")
-        return
+    if records:
+        lines = make_lines(records)
+        for i in range(0, len(lines), BATCH_SIZE):
+            batch = lines[i:i + BATCH_SIZE]
+            if push_batch(batch):
+                capture_pushed += len(batch)
 
-    lines = make_lines(records)
-    total = len(lines)
-    pushed = 0
+        max_ts = max(r["ts"] for r in records)
+        write_watermark(max_ts)
 
-    for i in range(0, total, BATCH_SIZE):
-        batch = lines[i:i + BATCH_SIZE]
-        if push_batch(batch):
-            pushed += len(batch)
+    # Push schema-based metrics
+    schema_lines = make_schema_lines()
+    schema_pushed = 0
+    if schema_lines:
+        if push_batch(schema_lines):
+            schema_pushed = len(schema_lines)
 
-    max_ts = max(r["ts"] for r in records)
-    write_watermark(max_ts)
-
+    # Report
     events = len(records)
-    print(f"Pushed {events} events ({pushed} metric lines) to VictoriaMetrics")
+    print(f"Capture: {events} events ({capture_pushed} lines)")
+    print(f"Schema:  {schema_pushed} gauge lines from nmem.db")
 
-    # Summary
-    by_type = defaultdict(int)
-    for r in records:
-        by_type[r.get("obs_type", "unknown")] += 1
-    for t, n in sorted(by_type.items(), key=lambda x: -x[1]):
-        print(f"  {t}: {n}")
+    if records:
+        by_type = defaultdict(int)
+        for r in records:
+            by_type[r.get("obs_type", "unknown")] += 1
+        for t, n in sorted(by_type.items(), key=lambda x: -x[1]):
+            print(f"  {t}: {n}")
 
 
 if __name__ == "__main__":

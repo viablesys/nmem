@@ -1,6 +1,6 @@
 {
   "dashboard": {
-    "title": "nmem — Event Capture Analysis",
+    "title": "nmem — Memory Pipeline",
     "tags": ["nmem"],
     "timezone": "browser",
     "refresh": "",
@@ -10,9 +10,15 @@
     },
     "panels": [
       {
+        "title": "— Capture Volume —",
+        "type": "row",
+        "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 },
+        "collapsed": false
+      },
+      {
         "title": "Events Over Time (by type)",
         "type": "timeseries",
-        "gridPos": { "x": 0, "y": 0, "w": 16, "h": 8 },
+        "gridPos": { "x": 0, "y": 1, "w": 16, "h": 8 },
         "datasource": { "type": "prometheus", "uid": "" },
         "fieldConfig": {
           "defaults": {
@@ -37,7 +43,7 @@
       {
         "title": "Event Count by Type",
         "type": "piechart",
-        "gridPos": { "x": 16, "y": 0, "w": 8, "h": 8 },
+        "gridPos": { "x": 16, "y": 1, "w": 8, "h": 8 },
         "datasource": { "type": "prometheus", "uid": "" },
         "targets": [
           {
@@ -56,7 +62,7 @@
       {
         "title": "Observation Size Over Time",
         "type": "timeseries",
-        "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+        "gridPos": { "x": 0, "y": 9, "w": 12, "h": 8 },
         "datasource": { "type": "prometheus", "uid": "" },
         "fieldConfig": {
           "defaults": {
@@ -81,7 +87,7 @@
       {
         "title": "Avg Observation Size by Type",
         "type": "barchart",
-        "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+        "gridPos": { "x": 12, "y": 9, "w": 12, "h": 8 },
         "datasource": { "type": "prometheus", "uid": "" },
         "fieldConfig": {
           "defaults": { "unit": "decbytes" },
@@ -104,7 +110,7 @@
       {
         "title": "Tool Usage Distribution",
         "type": "piechart",
-        "gridPos": { "x": 0, "y": 16, "w": 8, "h": 8 },
+        "gridPos": { "x": 0, "y": 17, "w": 8, "h": 8 },
         "datasource": { "type": "prometheus", "uid": "" },
         "targets": [
           {
@@ -123,7 +129,7 @@
       {
         "title": "Extraction Efficiency (raw vs stored)",
         "type": "timeseries",
-        "gridPos": { "x": 8, "y": 16, "w": 8, "h": 8 },
+        "gridPos": { "x": 8, "y": 17, "w": 8, "h": 8 },
         "datasource": { "type": "prometheus", "uid": "" },
         "fieldConfig": {
           "defaults": {
@@ -153,7 +159,7 @@
       {
         "title": "Per-Session Event Count",
         "type": "barchart",
-        "gridPos": { "x": 16, "y": 16, "w": 8, "h": 8 },
+        "gridPos": { "x": 16, "y": 17, "w": 8, "h": 8 },
         "datasource": { "type": "prometheus", "uid": "" },
         "fieldConfig": {
           "defaults": { "unit": "short" },
@@ -175,7 +181,7 @@
       {
         "title": "Volume Stats",
         "type": "stat",
-        "gridPos": { "x": 0, "y": 24, "w": 24, "h": 4 },
+        "gridPos": { "x": 0, "y": 25, "w": 24, "h": 4 },
         "datasource": { "type": "prometheus", "uid": "" },
         "targets": [
           {
@@ -223,6 +229,254 @@
             { "matcher": { "id": "byName", "options": "Est. Annual Storage (w/ FTS5)" }, "properties": [{ "id": "unit", "value": "decbytes" }] }
           ]
         }
+      },
+      {
+        "title": "— Schema Health —",
+        "type": "row",
+        "gridPos": { "x": 0, "y": 29, "w": 24, "h": 1 },
+        "collapsed": false
+      },
+      {
+        "title": "Schema Stats",
+        "type": "stat",
+        "gridPos": { "x": 0, "y": 30, "w": 24, "h": 4 },
+        "datasource": { "type": "prometheus", "uid": "" },
+        "targets": [
+          {
+            "expr": "nmem_db_size_bytes",
+            "legendFormat": "DB Size",
+            "refId": "A",
+            "instant": true
+          },
+          {
+            "expr": "sum(nmem_sessions_total)",
+            "legendFormat": "Sessions",
+            "refId": "B",
+            "instant": true
+          },
+          {
+            "expr": "sum(nmem_active_sessions)",
+            "legendFormat": "Active Sessions",
+            "refId": "C",
+            "instant": true
+          },
+          {
+            "expr": "sum(nmem_prompts_total)",
+            "legendFormat": "Total Prompts",
+            "refId": "D",
+            "instant": true
+          },
+          {
+            "expr": "sum(nmem_observations_total)",
+            "legendFormat": "Total Observations",
+            "refId": "E",
+            "instant": true
+          },
+          {
+            "expr": "sum(nmem_compactions_total)",
+            "legendFormat": "Compactions",
+            "refId": "F",
+            "instant": true
+          }
+        ],
+        "options": {
+          "reduceOptions": { "calcs": ["lastNotNull"] },
+          "textMode": "auto",
+          "colorMode": "value",
+          "graphMode": "area",
+          "justifyMode": "auto"
+        },
+        "fieldConfig": {
+          "defaults": { "unit": "short" },
+          "overrides": [
+            { "matcher": { "id": "byName", "options": "DB Size" }, "properties": [{ "id": "unit", "value": "decbytes" }] }
+          ]
+        }
+      },
+      {
+        "title": "Prompts: User vs Agent (thinking)",
+        "type": "timeseries",
+        "gridPos": { "x": 0, "y": 34, "w": 12, "h": 8 },
+        "datasource": { "type": "prometheus", "uid": "" },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "line",
+              "fillOpacity": 30,
+              "stacking": { "mode": "normal" }
+            },
+            "unit": "short"
+          },
+          "overrides": [
+            { "matcher": { "id": "byName", "options": "agent" }, "properties": [{ "id": "color", "value": { "fixedColor": "purple", "mode": "fixed" } }] },
+            { "matcher": { "id": "byName", "options": "user" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] }
+          ]
+        },
+        "targets": [
+          {
+            "expr": "nmem_prompts_total",
+            "legendFormat": "{{source}}",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "title": "Observations by Type (schema)",
+        "type": "piechart",
+        "gridPos": { "x": 12, "y": 34, "w": 12, "h": 8 },
+        "datasource": { "type": "prometheus", "uid": "" },
+        "targets": [
+          {
+            "expr": "nmem_observations_total",
+            "legendFormat": "{{obs_type}}",
+            "refId": "A",
+            "instant": true
+          }
+        ],
+        "options": {
+          "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] },
+          "pieType": "donut",
+          "reduceOptions": { "calcs": ["lastNotNull"] }
+        }
+      },
+      {
+        "title": "DB Size Over Time",
+        "type": "timeseries",
+        "gridPos": { "x": 0, "y": 42, "w": 12, "h": 8 },
+        "datasource": { "type": "prometheus", "uid": "" },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "decbytes",
+            "custom": { "fillOpacity": 15 }
+          },
+          "overrides": []
+        },
+        "targets": [
+          {
+            "expr": "nmem_db_size_bytes",
+            "legendFormat": "nmem.db",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "title": "Compactions Over Time",
+        "type": "timeseries",
+        "gridPos": { "x": 12, "y": 42, "w": 12, "h": 8 },
+        "datasource": { "type": "prometheus", "uid": "" },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "line",
+              "fillOpacity": 20
+            },
+            "unit": "short"
+          },
+          "overrides": []
+        },
+        "targets": [
+          {
+            "expr": "nmem_compactions_total",
+            "legendFormat": "{{project}}",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "title": "— Event Pipeline —",
+        "type": "row",
+        "gridPos": { "x": 0, "y": 50, "w": 24, "h": 1 },
+        "collapsed": false
+      },
+      {
+        "title": "Events by Project",
+        "type": "timeseries",
+        "gridPos": { "x": 0, "y": 51, "w": 12, "h": 8 },
+        "datasource": { "type": "prometheus", "uid": "" },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "bars",
+              "stacking": { "mode": "normal" },
+              "fillOpacity": 80,
+              "lineWidth": 0
+            },
+            "unit": "short"
+          },
+          "overrides": []
+        },
+        "targets": [
+          {
+            "expr": "sum by (project) (count_over_time(nmem_event_bytes{project!=\"\"}[30m]))",
+            "legendFormat": "{{project}}",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "title": "SessionStart Sources",
+        "type": "piechart",
+        "gridPos": { "x": 12, "y": 51, "w": 12, "h": 8 },
+        "datasource": { "type": "prometheus", "uid": "" },
+        "targets": [
+          {
+            "expr": "sum by (source) (count_over_time(nmem_event_bytes{event=\"SessionStart\",source!=\"\"}[48h]))",
+            "legendFormat": "{{source}}",
+            "refId": "A",
+            "instant": true
+          }
+        ],
+        "options": {
+          "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] },
+          "pieType": "donut",
+          "reduceOptions": { "calcs": ["lastNotNull"] }
+        }
+      },
+      {
+        "title": "Thinking Block Ratio (agent / user prompts)",
+        "type": "timeseries",
+        "gridPos": { "x": 0, "y": 59, "w": 12, "h": 8 },
+        "datasource": { "type": "prometheus", "uid": "" },
+        "fieldConfig": {
+          "defaults": {
+            "custom": { "fillOpacity": 10 },
+            "unit": "short",
+            "decimals": 1
+          },
+          "overrides": []
+        },
+        "targets": [
+          {
+            "expr": "sum(nmem_prompts_total{source=\"agent\"}) / sum(nmem_prompts_total{source=\"user\"})",
+            "legendFormat": "agent/user ratio",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "title": "Recovery Events (compact/clear/resume)",
+        "type": "timeseries",
+        "gridPos": { "x": 12, "y": 59, "w": 12, "h": 8 },
+        "datasource": { "type": "prometheus", "uid": "" },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "bars",
+              "fillOpacity": 80,
+              "lineWidth": 0,
+              "stacking": { "mode": "normal" }
+            },
+            "unit": "short"
+          },
+          "overrides": []
+        },
+        "targets": [
+          {
+            "expr": "sum by (source) (count_over_time(nmem_event_bytes{source=~\"compact|clear|resume\"}[30m]))",
+            "legendFormat": "{{source}}",
+            "refId": "A"
+          }
+        ]
       }
     ]
   },

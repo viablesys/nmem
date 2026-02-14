@@ -21,6 +21,26 @@ CAPTURE_FILE = Path.home() / ".nmem" / "capture.jsonl"
 VLOGS_ENDPOINT = "http://localhost:9428/insert/jsonline"
 
 
+def derive_project(cwd: str) -> str:
+    """Derive project name from working directory."""
+    if not cwd:
+        return "unknown"
+    p = Path(cwd)
+    home = Path.home()
+    try:
+        rel = p.relative_to(home)
+    except ValueError:
+        return p.name or "unknown"
+    parts = rel.parts
+    if not parts:
+        return "home"
+    skip = {"workspace", "dev", "viablesys", "forge"}
+    for part in parts:
+        if part not in skip:
+            return part
+    return parts[-1]
+
+
 def log_error(error: str, context: dict | None = None):
     """Push error to VictoriaLogs via native jsonline ingestion."""
     record = {
@@ -147,6 +167,8 @@ def main():
     tool_name = payload.get("tool_name")
     session_id = payload.get("session_id") or ""
     cwd = payload.get("cwd") or ""
+    project = derive_project(cwd)
+    source = payload.get("source") or ""
 
     # Sizes of key fields
     tool_input = payload.get("tool_input") or {}
@@ -179,6 +201,8 @@ def main():
         "tool_name": tool_name,
         "obs_type": obs_type,
         "session_id": session_id,
+        "project": project,
+        "source": source,
         "raw_payload_bytes": raw_size,
         "tool_input_bytes": tool_input_size,
         "tool_response_bytes": tool_response_size,
