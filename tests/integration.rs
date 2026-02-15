@@ -1226,6 +1226,64 @@ fn search_invalid_order_by_fails() {
         .failure();
 }
 
+// --- Context injection intent tests ---
+
+#[test]
+fn context_injection_shows_intents() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    // Seed session with prompt + tool uses
+    session_start(&db, "int-seed");
+    user_prompt(&db, "int-seed", "Fix the login bug");
+    post_tool_use(&db, "int-seed", "Read", r#"{"file_path":"/src/auth.rs"}"#);
+    post_tool_use(&db, "int-seed", "Edit", r#"{"file_path":"/src/auth.rs"}"#);
+    post_tool_use(&db, "int-seed", "Bash", r#"{"command":"cargo test"}"#);
+    stop(&db, "int-seed");
+
+    // New session — should see intents
+    let out = nmem_cmd(&db)
+        .arg("record")
+        .write_stdin(
+            r#"{"session_id":"int-new","cwd":"/home/test/workspace/myproj","hook_event_name":"SessionStart"}"#,
+        )
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    assert!(stdout.contains("## Recent Intents"), "should contain intents section");
+    assert!(stdout.contains("Fix the login bug"), "should show the user prompt");
+    assert!(stdout.contains("3 actions"), "should show action count");
+}
+
+#[test]
+fn context_injection_filters_zero_action_intents() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    // Seed session: one prompt with actions, one without
+    session_start(&db, "int-zero");
+    user_prompt(&db, "int-zero", "Do the real work");
+    post_tool_use(&db, "int-zero", "Bash", r#"{"command":"cargo build"}"#);
+
+    // Second prompt with no tool calls following it
+    user_prompt(&db, "int-zero", "yes");
+    stop(&db, "int-zero");
+
+    // New session
+    let out = nmem_cmd(&db)
+        .arg("record")
+        .write_stdin(
+            r#"{"session_id":"int-zero2","cwd":"/home/test/workspace/myproj","hook_event_name":"SessionStart"}"#,
+        )
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    assert!(stdout.contains("Do the real work"), "prompt with actions should appear");
+    assert!(!stdout.contains("\"yes\""), "zero-action prompt should be filtered out");
+}
+
 // --- Context config tests ---
 
 #[test]

@@ -12,6 +12,61 @@ struct ContextRow {
     project: Option<String>,
 }
 
+const INTENTS_SQL: &str = "
+SELECT p.id, p.timestamp, p.content,
+       COUNT(o.id) AS action_count
+FROM prompts p
+LEFT JOIN observations o ON o.prompt_id = p.id
+JOIN sessions s ON p.session_id = s.id
+WHERE p.source = 'user'
+  AND s.project = ?1
+GROUP BY p.id
+HAVING COUNT(o.id) > 0
+ORDER BY p.timestamp DESC
+LIMIT ?2";
+
+struct IntentRow {
+    timestamp: i64,
+    content: String,
+    action_count: i64,
+}
+
+fn query_intents(conn: &Connection, project: &str, limit: i64) -> Result<Vec<IntentRow>, NmemError> {
+    let mut stmt = conn.prepare(INTENTS_SQL)?;
+    let rows = stmt.query_map(params![project, limit], |row| {
+        Ok(IntentRow {
+            timestamp: row.get(1)?,
+            content: row.get(2)?,
+            action_count: row.get(3)?,
+        })
+    })?
+    .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+fn format_intents(rows: &[IntentRow]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::from("## Recent Intents\n");
+    for row in rows {
+        let time = format_relative_time(row.timestamp);
+        let truncated: String = row.content.chars().take(60).collect();
+        let display = if row.content.chars().count() > 60 {
+            format!("{truncated}...")
+        } else {
+            truncated
+        };
+        let noun = if row.action_count == 1 { "action" } else { "actions" };
+        out.push_str(&format!(
+            "- [{time}] \"{display}\" → {} {noun}\n",
+            row.action_count
+        ));
+    }
+    out
+}
+
 const PROJECT_LOCAL_SQL: &str = "
 WITH scored AS (
     SELECT o.id, o.timestamp, o.obs_type, o.file_path, o.content, o.is_pinned,
@@ -195,14 +250,22 @@ fn format_table(rows: &[ContextRow], header: &str) -> String {
 pub fn generate_context(conn: &Connection, project: &str, local_limit: i64, cross_limit: i64) -> Result<String, NmemError> {
     register_udfs(conn)?;
 
+    let intent_rows = query_intents(conn, project, 10)?;
     let local_rows = query_rows(conn, PROJECT_LOCAL_SQL, project, local_limit)?;
     let cross_rows = query_rows(conn, CROSS_PROJECT_SQL, project, cross_limit)?;
 
-    if local_rows.is_empty() && cross_rows.is_empty() {
+    if intent_rows.is_empty() && local_rows.is_empty() && cross_rows.is_empty() {
         return Ok(String::new());
     }
 
     let mut out = String::from("# nmem context\n\n");
+
+    let intents = format_intents(&intent_rows);
+    if !intents.is_empty() {
+        out.push_str(&intents);
+        out.push('\n');
+    }
+
     out.push_str(&format_table(&local_rows, &format!("## {project}")));
 
     if !cross_rows.is_empty() {
@@ -284,6 +347,46 @@ mod tests {
         let title = title_for_row(&row);
         assert!(title.ends_with("..."));
         assert!(title.len() <= 64); // 60 chars + "..."
+    }
+
+    #[test]
+    fn format_intents_empty() {
+        assert_eq!(format_intents(&[]), "");
+    }
+
+    #[test]
+    fn format_intents_basic() {
+        let rows = vec![
+            IntentRow {
+                timestamp: mock_ts(2),
+                content: "commit this".into(),
+                action_count: 4,
+            },
+            IntentRow {
+                timestamp: mock_ts(5),
+                content: "a".repeat(80),
+                action_count: 2,
+            },
+        ];
+        let result = format_intents(&rows);
+        assert!(result.contains("## Recent Intents"));
+        assert!(result.contains("\"commit this\""));
+        assert!(result.contains("4 actions"));
+        // Truncated content ends with "..."
+        assert!(result.contains("...\""));
+        assert!(result.contains("2 actions"));
+    }
+
+    #[test]
+    fn format_intents_singular_action() {
+        let rows = vec![IntentRow {
+            timestamp: mock_ts(1),
+            content: "push it".into(),
+            action_count: 1,
+        }];
+        let result = format_intents(&rows);
+        assert!(result.contains("1 action\n"), "should use singular 'action', got: {result}");
+        assert!(!result.contains("1 actions"), "should not use plural for count=1");
     }
 
     #[test]
