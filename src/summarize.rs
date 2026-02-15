@@ -123,8 +123,8 @@ fn strip_fences(text: &str) -> &str {
     t
 }
 
-/// Call LM Studio endpoint, with optional fallback.
-fn call_lm_studio(config: &SummarizationConfig, payload: &str) -> Result<SessionSummary, NmemError> {
+/// Call OpenAI-compatible chat completions endpoint, with optional fallback.
+fn call_completion(config: &SummarizationConfig, payload: &str) -> Result<SessionSummary, NmemError> {
     let user_content = USER_PROMPT_TEMPLATE.replace("{PAYLOAD}", payload);
     let body = serde_json::json!({
         "model": config.model,
@@ -197,7 +197,7 @@ pub fn summarize_session(
         None => return Ok(()),
     };
 
-    let summary = call_lm_studio(config, &payload)?;
+    let summary = call_completion(config, &payload)?;
     let summary_json = serde_json::to_string(&summary)?;
 
     conn.execute(

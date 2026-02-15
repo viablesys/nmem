@@ -4,33 +4,15 @@ Missing features, why they're missing, and what triggers implementation.
 
 ## Parity gap (was in claude-mem, missing in nmem)
 
-### S1's S4: session summarization (rolling + end-of-session)
-S1 is itself a viable system (VSM recursion). Its S4 — operational intelligence about what was captured — is missing entirely. claude-mem produced structured summaries at every prompt turn and at session end. Each summary had: `request`, `investigated`, `learned`, `completed`, `next_steps`, `files_read`, `files_edited`, `notes`. These were FTS5-indexed and surfaced in context injection.
+### S1's S4: session summarization — v1 implemented, gaps remain
+End-of-session summarization via local LLM (granite-4-h-tiny on LM Studio) is implemented. Stop hook calls OpenAI-compatible chat completions endpoint, stores structured JSON in `sessions.summary`, surfaces in context injection and `session_summaries` MCP tool.
 
-nmem has none of this. `sessions.summary` column exists but is never populated. No rolling summaries, no PreCompact snapshots, no structured narrative.
-
-This is the biggest functional gap. Without S1's S4:
-- Context injection surfaces raw observations but no narrative of what was accomplished
-- Long sessions lose signal when Claude Code compacts context (PreCompact fires, nmem ignores it)
-- Cross-session retrieval finds file paths and commands but not intent or outcomes
-- The outer S4 (cross-session synthesis) has no summaries to work with
-
-**Schema reference** (claude-mem's `session_summaries` table):
-- Per-prompt rows keyed by `(memory_session_id, prompt_number)`
-- Structured fields: request, investigated, learned, completed, next_steps, files_read, files_edited, notes
-- FTS5 on text fields for retrieval
-- `discovery_tokens` tracked LLM cost per summary
-
-**What needs to happen**:
-1. Add a `summaries` table with structured fields (not a single TEXT blob)
-2. Hook into PreCompact to snapshot rolling session state before compaction
-3. Generate summaries at Stop for session-end narrative
-4. Decide on LLM strategy: local model, API call, or structured template from observations
-5. Surface summaries in context injection and MCP search
-
-**Why it was missing**: ADR-002 chose no-LLM for observation extraction to avoid hallucination. But summarization is compression of existing facts, not extraction of new ones — different function, different risk profile. Framing it as S1's S4 (operational intelligence within capture) rather than the outer S4 (cross-session pattern detection) makes the scope tractable: compress what happened in this session, don't synthesize across sessions.
-
-**Design question**: Can S1's S4 be deterministic? Structured templates computed from observations (file lists, command outcomes, prompt intents) might produce a useful balance sheet without LLM. The question is whether deterministic compression captures enough signal or whether narrative coherence requires language generation. Try templates first.
+**Remaining gaps**:
+- **PreCompact summarization**: Long sessions lose signal when Claude Code compacts context. PreCompact hook fires but nmem ignores it. Adding summarization there would delay context injection by ~7.6s while the user is waiting — needs async/background approach.
+- **Rolling summaries**: claude-mem summarized at every prompt turn. nmem only summarizes at session end. For long sessions, the end-of-session summary compresses too much.
+- **FTS5 indexing of summaries**: Summary content is stored as JSON in `sessions.summary` but not FTS5-indexed. Search via `session_summaries` MCP tool queries by project only, not by content.
+- **Engine abstraction**: `summarize.rs` speaks the OpenAI chat completions protocol, which covers LM Studio, Ollama, vLLM, llama.cpp, and OpenAI itself. But the engine is hardcoded — no trait boundary for swapping to non-OpenAI protocols (Anthropic API, in-process model, deterministic template). Abstract when a second engine is needed (rule of three).
+- **Dedicated summaries table**: v1 stores in `sessions.summary` column. If rolling/per-prompt summaries are added, a dedicated table with structured fields and FTS5 will be needed.
 
 ## Deferred by design
 
