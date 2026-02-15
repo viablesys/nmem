@@ -6,6 +6,17 @@ Current state of each VSM system. Update as capabilities mature.
 
 Capture, store, retrieve. **Functional but incomplete.**
 
+S1 is itself a viable system (VSM recursion). Its internal subsystems:
+
+| S1's... | Function | State |
+|---------|----------|-------|
+| S1 | Raw capture (observations, prompts) | Functional |
+| S2 | Dedup, ordering, prompt-observation linking | Functional |
+| S3 | Content limits, truncation, what to capture | Partial |
+| **S4** | **Summarization — compress what was captured** | **Missing** |
+| S5 | Capture policy (config, sensitivity, filtering) | Functional |
+
+What works:
 - Hooks record observations on SessionStart, PostToolUse, UserPromptSubmit, Stop
 - Structured extraction classifies tool calls into obs_types without LLM
 - FTS5 indexes observations and prompts with porter stemming
@@ -13,12 +24,17 @@ Capture, store, retrieve. **Functional but incomplete.**
 - Context injection pushes relevant history at session start
 - Secret filtering redacts before storage
 
-**Critical gap: session summarization.** claude-mem produced structured LLM summaries at every prompt turn (rolling) and at session end, with fields: request, investigated, learned, completed, next_steps, files_read, files_edited, notes. nmem has no equivalent. This means:
+**Critical gap: S1's S4 (session summarization).** claude-mem produced structured summaries at every prompt turn (rolling) and at session end, with fields: request, investigated, learned, completed, next_steps, files_read, files_edited, notes. nmem has no equivalent. This means:
 - Context injection surfaces raw facts but no narrative
 - PreCompact events are ignored — long sessions lose signal when context is compacted
 - Cross-session retrieval finds file paths and commands but not intent or outcomes
 
-This is not S4 (cross-session intelligence) — it's core S1. A memory system that captures observations but can't summarize what happened is missing a fundamental operation. Summarization is compression of existing facts, not extraction of new ones.
+Framing this as S1's missing S4 (not the outer S4) keeps the design coherent:
+- S1's S4 compresses what happened *within a session* — bounded, operational, simple
+- The outer S4 synthesizes *across sessions* — unbounded, adaptive, complex
+- The outer S4 depends on S1's S4 having done its job first
+
+S1's S4 may not require an LLM — structured templates computed from existing observations (file lists, command outcomes, prompt intents) could produce a useful balance sheet from the ledger. The question is whether deterministic compression captures enough signal or whether narrative coherence requires language generation.
 
 Incremental gaps: extraction coverage could expand (SendMessage, Skill invocations not captured).
 
@@ -117,7 +133,7 @@ A mature S5 would:
 
 | System | State | Gap |
 |--------|-------|-----|
-| S1 Operations | Incomplete | **No session summarization** (rolling or end-of-session) |
+| S1 Operations | Incomplete | S1's S4 missing — no session summarization |
 | S2 Coordination | Functional | Multi-agent would stress this |
 | S3 Control | Manual | Needs autonomous triggers |
 | S3* Audit | Minimal | Needs functional integrity checks |
@@ -128,7 +144,7 @@ S1 captures facts but can't summarize them. S2 coordinates. S3 exists but doesn'
 
 ## What closes the loop
 
-1. **S1 session summarization** — highest priority. Add structured rolling summaries (per-prompt) and end-of-session summaries. This is the parity gap with claude-mem and the foundation for everything else. Requires LLM or structured template generation. Hook into PreCompact to preserve signal before context compaction.
+1. **S1's S4 (session summarization)** — highest priority. Complete S1's internal viability by adding its missing intelligence layer. Rolling summaries (per-prompt) and end-of-session summaries, computed from existing observations. May be achievable with structured templates (deterministic) before resorting to LLM (generative). Hook into PreCompact to preserve signal before context compaction. This is the parity gap with claude-mem and the foundation for everything above it.
 2. **S3 autonomy** — post-session hook or timer that checks storage and runs sweeps. The logic exists; wire a trigger.
 3. **S3* functional audits** — track extraction success rate, retrieval hit rate, filter accuracy. Surface in `nmem status`.
 4. **S4 retrieval feedback** — instrument whether context-injected observations appear in the agent's subsequent tool calls. This is the minimum viable learning signal.
