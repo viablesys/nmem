@@ -20,6 +20,7 @@ fn run() -> Result<(), NmemError> {
         Command::Purge(args) => nmem::purge::handle_purge(&db_path, &args),
         Command::Maintain(args) => nmem::maintain::handle_maintain(&db_path, &args),
         Command::Status => nmem::status::handle_status(&db_path),
+        Command::Search(args) => nmem::search::handle_search(&db_path, &args),
         Command::Encrypt => nmem::db::handle_encrypt(&db_path),
     }
 }

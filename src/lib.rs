@@ -8,6 +8,7 @@ pub mod project;
 pub mod purge;
 pub mod record;
 pub mod schema;
+pub mod search;
 pub mod serve;
 pub mod sweep;
 pub mod status;

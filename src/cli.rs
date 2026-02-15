@@ -24,6 +24,8 @@ pub enum Command {
     Maintain(MaintainArgs),
     /// Show database health: size, counts, last session
     Status,
+    /// Search observations by full-text query
+    Search(SearchArgs),
     /// Encrypt the database (migrate from unencrypted to SQLCipher)
     Encrypt,
 }
@@ -61,6 +63,32 @@ pub struct PurgeArgs {
     /// Skip confirmation — actually delete
     #[arg(long)]
     pub confirm: bool,
+}
+
+#[derive(Parser)]
+pub struct SearchArgs {
+    /// FTS5 search query (supports AND/OR/NOT, "phrases", prefix*)
+    pub query: String,
+
+    /// Filter by project name
+    #[arg(long)]
+    pub project: Option<String>,
+
+    /// Filter by observation type (e.g. file_read, command, file_edit)
+    #[arg(long = "type")]
+    pub obs_type: Option<String>,
+
+    /// Maximum results (default 20, max 100)
+    #[arg(long, default_value = "20")]
+    pub limit: i64,
+
+    /// Fetch full observation details (not just index)
+    #[arg(long)]
+    pub full: bool,
+
+    /// Output observation IDs only (one per line)
+    #[arg(long)]
+    pub ids: bool,
 }
 
 #[derive(Parser)]

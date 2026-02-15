@@ -803,6 +803,148 @@ fn maintain_fts_integrity() {
         .success();
 }
 
+// --- Search tests ---
+
+#[test]
+fn search_basic() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    session_start(&db, "srch-1");
+    post_tool_use(&db, "srch-1", "Bash", r#"{"command":"cargo test"}"#);
+    post_tool_use(&db, "srch-1", "Read", r#"{"file_path":"/src/main.rs"}"#);
+
+    let out = nmem_cmd(&db)
+        .args(["search", "cargo"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    let results: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["obs_type"], "command");
+    assert!(results[0]["content_preview"].as_str().unwrap().contains("cargo test"));
+    assert!(results[0]["id"].is_number());
+    assert!(results[0]["timestamp"].is_number());
+    assert!(results[0]["session_id"].is_string());
+
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr);
+    assert!(stderr.contains("1 results"));
+}
+
+#[test]
+fn search_with_project_filter() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    session_start_project(&db, "srch-p1", "alpha");
+    post_tool_use(&db, "srch-p1", "Bash", r#"{"command":"cargo build"}"#);
+
+    session_start_project(&db, "srch-p2", "beta");
+    post_tool_use(&db, "srch-p2", "Bash", r#"{"command":"cargo test"}"#);
+
+    let out = nmem_cmd(&db)
+        .args(["search", "cargo", "--project", "alpha"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    let results: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(results.len(), 1);
+    assert!(results[0]["content_preview"].as_str().unwrap().contains("cargo build"));
+}
+
+#[test]
+fn search_with_type_filter() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    session_start(&db, "srch-t1");
+    post_tool_use(&db, "srch-t1", "Bash", r#"{"command":"cargo test"}"#);
+    post_tool_use(&db, "srch-t1", "Read", r#"{"file_path":"/src/cargo.toml"}"#);
+
+    let out = nmem_cmd(&db)
+        .args(["search", "cargo", "--type", "command"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    let results: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["obs_type"], "command");
+}
+
+#[test]
+fn search_ids_mode() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    session_start(&db, "srch-ids");
+    post_tool_use(&db, "srch-ids", "Bash", r#"{"command":"cargo test"}"#);
+    post_tool_use(&db, "srch-ids", "Bash", r#"{"command":"cargo build"}"#);
+
+    let out = nmem_cmd(&db)
+        .args(["search", "cargo", "--ids"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines.len(), 2);
+    // Each line should be a numeric ID
+    for line in &lines {
+        assert!(line.parse::<i64>().is_ok(), "expected numeric ID, got: {line}");
+    }
+}
+
+#[test]
+fn search_full_mode() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    session_start(&db, "srch-full");
+    post_tool_use(&db, "srch-full", "Bash", r#"{"command":"cargo test"}"#);
+
+    let out = nmem_cmd(&db)
+        .args(["search", "cargo", "--full"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    let results: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(results.len(), 1);
+    // Full mode includes extra fields
+    assert!(results[0]["source_event"].is_string());
+    assert!(results[0]["content"].is_string());
+    assert_eq!(results[0]["content"], "cargo test");
+}
+
+#[test]
+fn search_no_results() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    session_start(&db, "srch-empty");
+    post_tool_use(&db, "srch-empty", "Bash", r#"{"command":"cargo test"}"#);
+
+    let out = nmem_cmd(&db)
+        .args(["search", "nonexistent_xyz_zzz"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    let results: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
+    assert!(results.is_empty());
+
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr);
+    assert!(stderr.contains("0 results"));
+}
+
+#[test]
+fn search_no_db() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("nonexistent.db");
+
+    nmem_cmd(&db)
+        .args(["search", "anything"])
+        .assert()
+        .failure();
+}
+
 // --- Status tests ---
 
 #[test]

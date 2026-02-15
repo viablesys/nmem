@@ -199,6 +199,47 @@ MCP tools return errors via the standard MCP error response format. Specific cas
 
 Database errors (connection failure, corruption) return MCP internal errors with the SQLite error message. These should not expose file paths or internal state beyond what SQLite reports.
 
+## CLI Query Interface
+
+`nmem search` exposes the same FTS5 search available via MCP, without requiring an MCP harness. Intended for scripts, terminal debugging, and harness-independent access.
+
+### Usage
+
+```
+nmem search <query> [--project <name>] [--type <obs_type>] [--limit <n>] [--full] [--ids]
+```
+
+### Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `<query>` | positional | required | FTS5 query (supports AND/OR/NOT, "phrases", prefix*) |
+| `--project` | string | none | Filter by project name |
+| `--type` | string | none | Filter by observation type |
+| `--limit` | integer | 20 | Max results, clamped to [1, 100] |
+| `--full` | flag | off | Include all observation fields |
+| `--ids` | flag | off | Output IDs only, one per line |
+
+### Output Modes
+
+**Default** — JSON array of index entries to stdout:
+```json
+[{"id": 42, "timestamp": 1707400000, "obs_type": "command",
+  "content_preview": "cargo test", "file_path": null, "session_id": "abc-..."}]
+```
+
+**`--full`** — JSON array with complete observation fields (adds `source_event`, `tool_name`, `content`, `metadata`).
+
+**`--ids`** — One numeric ID per line. Designed for piping: `nmem search "stale" --ids | xargs -I{} nmem purge --id {} --confirm`.
+
+All modes print `nmem: N results for "query"` to stderr.
+
+### Design Decisions
+
+- **Inline SQL, not shared with serve.rs.** The MCP server returns `CallToolResult` with MCP-specific error types. The CLI returns `NmemError`. Sharing the SQL query but not the execution/error-handling code avoids coupling the CLI to MCP types while keeping the queries trivially auditable as identical.
+- **Separate serde structs.** `search::SearchResult` and `search::FullObservation` mirror but don't import `serve::SearchResult`. Same JSON shape, independent compilation units. No coupling.
+- **Read-only connection.** Uses `open_db_readonly` — same as the MCP server. Encryption keys resolved via the same `load_key` path.
+
 ## Context Injection (Push Model)
 
 The SessionStart hook pushes context proactively. `nmem record` handles SessionStart differently: it stores the `session_start` observation *and* emits context on stdout.
@@ -240,7 +281,7 @@ The adversarial question: what if Claude Code disappears tomorrow?
 - **Data.** SQLite at `~/.nmem/nmem.db`. Standard tooling works. No proprietary format.
 - **Ingestion.** Any program piping JSON to `nmem record` can store observations. The contract is simple enough for `jq`.
 - **MCP queries.** MCP is an open protocol. Any MCP client connects to `nmem serve`.
-- **CLI fallback.** The query logic is protocol-independent. `nmem search "auth error"` wraps the same SQL as the MCP `search` tool. Not at launch, but zero additional storage work.
+- **CLI fallback.** `nmem search "auth error"` wraps the same FTS5 SQL as the MCP `search` tool. No MCP harness required — works from any terminal or script.
 
 **What doesn't survive:**
 - Hook wiring (`.claude/hooks.json` is Claude Code-specific).
@@ -303,3 +344,4 @@ Some projects may want more or fewer injected observations, or suppress cross-pr
 | 2026-02-14 | 1.2 | Refined with library topics. Q1 recency weighting linked to sqlite-retrieval-patterns.md composite scoring. SQL sketch references to fts5.md. References: rusqlite.md, fts5.md, sqlite-retrieval-patterns.md, serde-json.md, ADR-004. |
 | 2026-02-14 | 1.3 | Annotated with live data. Added recovery mode to injection contract (compact/clear get expanded limits). Noted that 56% of user intents are zero-action conversational turns — context injection should weight intents-with-actions higher. |
 | 2026-02-14 | 2.0 | **Composite scoring for `recent_context`.** Replaced `ORDER BY timestamp DESC` with multi-signal scoring: recency decay (7d half-life via `exp_decay` UDF), type weight (file_edit > command > session_compact > mcp_call > file_read), project match (boost, not filter). Dedup now keeps highest-scored per file_path. Response adds `score` field (`ScoredObservation`). Added `functions` feature to rusqlite. 5 new integration tests. |
+| 2026-02-14 | 2.1 | **CLI query interface.** Added `nmem search` subcommand wrapping the same FTS5 query as MCP `search`. Three output modes: default JSON index, `--full` for complete observations, `--ids` for pipe-friendly ID lists. Filters: `--project`, `--type`, `--limit`. New module `src/search.rs` with inline SQL (decoupled from serve.rs MCP types). 7 integration tests. Harness independence section updated from aspirational to implemented. |
