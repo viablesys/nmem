@@ -1,68 +1,119 @@
-# nmem — CLAUDE.md
+# nmem — Project CLAUDE.md
 
-> **Source**: Copied from `~/CLAUDE.md` (workspace root).
-> This is the shared project config that applies across all workspace projects.
-> Edit the original at `~/CLAUDE.md` — this copy is for reference within the nmem repo.
+Cross-session memory for Claude Code. Captures observations (file reads, edits, commands, errors) via hooks, stores in encrypted SQLite, retrieves via MCP server and CLI search.
 
-## Hard Rules
-- **Always use Context7** — look up library docs before implementing
-- **PRIVATE REPOS ONLY** — never create public repos
-- Commit directly to main — no PRs, no feature branches
-- Org: `github.com/viablesys`
+## Build & Test
 
-## Environment
-Fedora 43 • Zsh • `HSA_OVERRIDE_GFX_VERSION=11.0.0` (AMD GPU)
-
-## Stack
-Rust 1.92 • Go 1.25 • Python 3.13 • Node 22 • Android (WearOS)
-
-## Preferences
-- Concise code, descriptive names
-- Handle errors at call sites
-- Minimize dependencies
-- Delay abstractions (rule of three)
-- External config over code
-- Breaking changes over legacy hacks
-
-## Key Paths
-```
-~/workspace/         
-~/dev/viablesys/     — github repos
-~/Android/Sdk/       — Android SDK + adb
-~/Applications/      — AppImages (Cursor, LM Studio)
+```bash
+cargo build                    # debug
+cargo build --release          # optimized (opt-level=z, LTO, stripped)
+cargo test                     # all tests
+NMEM_DB=/tmp/test.db nmem status   # test against throwaway DB
 ```
 
-## Reference Docs
-When relevant, read these for detail:
-- `~/.claude/docs/philosophy.md` — development principles
-- `~/.claude/docs/context-management.md` — session and token strategies
-- `~/.claude/docs/hardware-notes.md` — Framework 13 AI quirks
-- `~/.claude/docs/power-management.md` — suspend/hibernate issues
+## Architecture
 
-## Library (`~/workspace/library/`)
-Read the relevant doc before using a library. **Update this index when adding/removing docs.**
+No daemon. Three process modes:
 
-| File | Covers |
-|------|--------|
-| `rust.md` | Lifecycle roles, design patterns, error handling, async/concurrency, DevOps/Docker, security, pitfalls |
-| `axum.md` | Axum 0.8 — routing, handlers, extractors, state, middleware (tower-http), WebSocket, SSE, testing, graceful shutdown, REST patterns |
-| `rusqlite.md` | rusqlite — connections, WAL, transactions, FTS5, JSON, migrations, hooks, vector search, r2d2 pooling, async wrappers |
-| `askama.md` | Askama 0.15 — compile-time templates, filters, inheritance, macros, whitespace, axum integration, htmx partials |
-| `htmx.md` | htmx 2.0 — attributes, swap strategies, triggers, events, headers, extensions (SSE/WS/json-enc), patterns, axum-htmx |
-| `tailwindcss.md` | Tailwind CSS v4 — utilities, layout/flex/grid, spacing, typography, responsive, dark mode, @theme/@utility/@variant, v3→v4 migration |
-| `litestream.md` | Litestream — SQLite WAL streaming to S3/R2/GCS, Docker/K8s patterns, restore, monitoring, Rust integration |
-| `claude-code-plugins.md` | Claude Code plugins — hooks, MCP servers (rmcp), commands, skills, agents, data storage, communication patterns |
-| `rmcp.md` | rmcp 0.15 — MCP server in Rust, #[tool] macro, stdio transport, server state, Parameters/Json wrappers, error handling, testing, Claude Code integration |
-| `css-doodle.md` | `<css-doodle>` — CSS art/patterns, grid, selectors, @shape, @svg, @shaders |
-| `claude-code-hooks-events.md` | Claude Code hook event schemas — per-event payload fields, tool_input/tool_response by tool type, extraction patterns for structured observation capture |
-| `claude-code-telemetry.md` | Claude Code telemetry — services (Statsig/Sentry/OTel), env vars, data collection, privacy controls, network endpoints |
-| `rusqlite-migration.md` | rusqlite_migration 2.3 — schema versioning via user_version, inline/file/directory migrations, hooks, validation, async, evolution patterns, testing |
-| `serde-json.md` | serde + serde_json — derive macros, attributes, enum representations, Value, custom serialization, error handling, SQLite+JSON patterns |
-| `fts5.md` | FTS5 advanced — tokenizers, external content, column config, query syntax, maintenance, JSON indexing, input sanitization, pitfalls |
-| `sqlcipher.md` | SQLCipher + rusqlite — encryption setup, PRAGMAs, key management, encrypting existing DBs, compatibility, performance, secure delete, pitfalls |
-| `tokio-rusqlite.md` | tokio-rusqlite 0.6 — async SQLite, `.call()` pattern, reader/writer split, transactions, error handling, write batching, daemon patterns |
-| `sqlite-retrieval-patterns.md` | SQLite multi-signal retrieval — FTS5+WHERE composition, recency weighting, composite scoring, file-based queries, BM25 at small scale, Rust patterns |
-| `clap.md` | clap 4.5 — derive API, subcommands, stdin/stdout patterns, exit codes, error handling, fast startup, env vars, testing (assert_cmd), Cargo release profile |
-| `regex.md` | regex 1.11 — Regex/RegexSet, compilation caching (LazyLock), replace_all (Cow), multi-pattern fast rejection, closure replacement, pattern syntax, testing, regex-lite |
-| `victoria-logging.md` | VictoriaLogs — jsonline ingestion (Python stdlib + Rust reqwest), LogsQL queries, field conventions, hook error pattern, batch ingestion |
-| `meta-cognition.md` | Meta-cognition in agent systems — cognitive loop, observation levels (reactive→anticipatory), intent hierarchy, self-referential observation, forgetting as compression, cross-session identity, retrieval as cognition |
+1. **Hook handler** (`nmem record`) — standalone process per hook event, reads JSON from stdin
+2. **MCP server** (`nmem serve`) — session-scoped subprocess on stdio, read-only queries
+3. **CLI** — manual search, maintenance, purge, pin/unpin
+
+### Hook event flow
+
+```
+SessionStart → create session row, inject context into stdout
+PostToolUse  → extract observation from tool_input/tool_response, dedup, write
+Stop         → mark session ended, compute signature, WAL checkpoint
+```
+
+### Module map
+
+| Module | Role |
+|--------|------|
+| `main.rs` | CLI dispatch, `run()` entry point |
+| `cli.rs` | clap derive definitions only |
+| `record.rs` | Hook stdin → JSON → observation extraction + storage |
+| `serve.rs` | MCP server (`NmemServer`), tools: `search`, `get_observations`, `recent_context` |
+| `search.rs` | CLI search with BM25 + recency blended ranking |
+| `extract.rs` | `classify_tool()`, `extract_content()`, `extract_file_path()` |
+| `filter.rs` | `SecretFilter` — regex patterns + Shannon entropy redaction |
+| `context.rs` | SessionStart context injection (intents + local/cross-project obs) |
+| `db.rs` | `open_db()`, SQLCipher key management, PRAGMAs |
+| `schema.rs` | `rusqlite_migration` definitions (2 migrations) |
+| `config.rs` | TOML config loading from `~/.nmem/config.toml` |
+| `project.rs` | Derive project name from cwd |
+| `sweep.rs` | Retention-based purge (per obs_type TTL, respects pins) |
+| `maintain.rs` | Vacuum, WAL checkpoint, FTS integrity/rebuild |
+| `purge.rs` | Manual purge by date/project/session/type/search |
+| `pin.rs` | Pin/unpin observations |
+| `transcript.rs` | Scan transcript for prompt tracking |
+| `metrics.rs` | Optional OTLP metrics export |
+
+## Database
+
+SQLite with `bundled-sqlcipher`. DB at `~/.nmem/nmem.db` (override: `--db` or `NMEM_DB`).
+
+Three tables: `sessions`, `prompts`, `observations` + external FTS5 indexes (`observations_fts`, `prompts_fts`). Schema versioned via `rusqlite_migration` `user_version` PRAGMA.
+
+Key PRAGMAs: `journal_mode=WAL`, `synchronous=NORMAL`, `busy_timeout=5000`, `foreign_keys=ON`.
+
+Encryption key resolution: `NMEM_KEY` env → `encryption.key_file` in config → `~/.nmem/key` (auto-generated).
+
+## Config
+
+`~/.nmem/config.toml` (override: `NMEM_CONFIG` env).
+
+Sections: `[filter]` (secret patterns, entropy), `[projects.<name>]` (sensitivity, context limits), `[encryption]` (key_file), `[retention]` (per-type TTL in days), `[metrics]` (OTLP endpoint).
+
+## Key types
+
+- `NmemError` — `Database | Io | Json | Config` (in `lib.rs`)
+- `HookPayload` — deserialized hook JSON (in `record.rs`)
+- `SecretFilter` — `RegexSet` + entropy detection (in `filter.rs`)
+- `NmemConfig` — full config tree (in `config.rs`)
+- `NmemServer` — MCP server state, holds DB path (in `serve.rs`)
+
+## Design docs
+
+ADRs in `design/ADR/`. Read before changing load-bearing decisions:
+- ADR-001: Storage layer (SQLite, FTS5, encryption)
+- ADR-002: Observation extraction (structured, no LLM)
+- ADR-003: Daemon lifecycle (in-process hooks, no daemon)
+- ADR-004: Project scoping and isolation
+- ADR-005: Forgetting strategy
+- ADR-006: Interface protocol
+- ADR-007: Trust boundary and secrets filtering
+- ADR-008: Distribution and installation
+
+`design/DESIGN.md` has the overall design framing.
+
+## Library docs by module
+
+| Module | Read first |
+|--------|------------|
+| `db.rs` | `rusqlite.md`, `sqlcipher.md` |
+| `schema.rs` | `rusqlite-migration.md` |
+| `search.rs` | `fts5.md`, `sqlite-retrieval-patterns.md` |
+| `serve.rs` | `rmcp.md`, `fts5.md` |
+| `record.rs`, `extract.rs` | `claude-code-hooks-events.md`, `serde-json.md` |
+| `filter.rs` | `regex.md` |
+| `context.rs` | `sqlite-retrieval-patterns.md` |
+| `cli.rs` | `clap.md` |
+| `metrics.rs` | `victoria-logging.md` |
+| `design/` | `meta-cognition.md`, `claude-code-plugins.md` |
+
+## Tracking
+
+- `design/VSM.md` — system viability assessment (S1-S5), gaps, what closes the loop. The primary roadmap.
+- `TODO.md` — specific deferred features with rationale and activation triggers.
+
+Update both when adding features or discovering bugs.
+
+## Conventions
+
+- Observations are facts, not interpretations — extract structured data from tool calls
+- Dedup at write time (check session + obs_type + file_path + timestamp window)
+- Content truncated at 2000 chars for prompts
+- Secret filtering runs before storage, never after
+- `is_pinned` exempts observations from retention sweeps
