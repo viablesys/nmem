@@ -1166,6 +1166,111 @@ fn status_with_data() {
     assert!(stderr.contains("myproj"));
 }
 
+// --- Blended search tests ---
+
+#[test]
+fn search_blended_order_by() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    session_start(&db, "blend-1");
+    post_tool_use(&db, "blend-1", "Bash", r#"{"command":"cargo test"}"#);
+    post_tool_use(&db, "blend-1", "Read", r#"{"file_path":"/src/cargo.toml"}"#);
+
+    let out = nmem_cmd(&db)
+        .args(["search", "cargo", "--order-by", "blended"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    let results: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
+    // Both match "cargo"
+    assert_eq!(results.len(), 2);
+    // Each result has expected fields
+    assert!(results[0]["id"].is_number());
+    assert!(results[0]["timestamp"].is_number());
+    assert!(results[0]["obs_type"].is_string());
+}
+
+#[test]
+fn search_blended_ids_mode() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    session_start(&db, "blend-ids");
+    post_tool_use(&db, "blend-ids", "Bash", r#"{"command":"cargo test"}"#);
+    post_tool_use(&db, "blend-ids", "Bash", r#"{"command":"cargo build"}"#);
+
+    let out = nmem_cmd(&db)
+        .args(["search", "cargo", "--ids", "--order-by", "blended"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines.len(), 2);
+    for line in &lines {
+        assert!(line.parse::<i64>().is_ok(), "expected numeric ID, got: {line}");
+    }
+}
+
+#[test]
+fn search_invalid_order_by_fails() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    session_start(&db, "blend-bad");
+    post_tool_use(&db, "blend-bad", "Bash", r#"{"command":"cargo test"}"#);
+
+    nmem_cmd(&db)
+        .args(["search", "cargo", "--order-by", "nonsense"])
+        .assert()
+        .failure();
+}
+
+// --- Context config tests ---
+
+#[test]
+#[allow(deprecated)]
+fn context_injection_respects_config_limits() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+    let config_path = dir.path().join("config.toml");
+
+    // Config: suppress cross-project context entirely
+    std::fs::write(
+        &config_path,
+        r#"
+[projects.alpha]
+context_cross_limit = 0
+"#,
+    )
+    .unwrap();
+
+    // Seed cross-project data
+    session_start_project(&db, "cfg-alpha", "alpha");
+    post_tool_use_project(&db, "cfg-alpha", "alpha", "Bash", r#"{"command":"cargo build"}"#);
+    stop(&db, "cfg-alpha");
+
+    session_start_project(&db, "cfg-beta", "beta");
+    post_tool_use_project(&db, "cfg-beta", "beta", "Edit", r#"{"file_path":"/src/lib.rs"}"#);
+    stop(&db, "cfg-beta");
+
+    // New session for alpha with config
+    let mut cmd = Command::cargo_bin("nmem").unwrap();
+    let out = cmd
+        .env("NMEM_DB", &db)
+        .env("NMEM_CONFIG", &config_path)
+        .arg("record")
+        .write_stdin(
+            r#"{"session_id":"cfg-alpha2","cwd":"/home/test/workspace/alpha","hook_event_name":"SessionStart"}"#,
+        )
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    assert!(stdout.contains("## alpha"), "should contain local project section");
+    assert!(!stdout.contains("Other projects"), "cross_limit=0 should suppress cross-project section");
+}
+
 // --- Context injection tests ---
 
 #[test]

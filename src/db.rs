@@ -261,6 +261,25 @@ fn migrate_to_encrypted(db_path: &Path, key: &str) -> Result<(), NmemError> {
     Ok(())
 }
 
+// --- UDF registration ---
+
+/// Register custom SQL functions (exp_decay) needed by composite scoring queries.
+pub fn register_udfs(conn: &Connection) -> rusqlite::Result<()> {
+    conn.create_scalar_function(
+        "exp_decay",
+        2,
+        rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let age: f64 = ctx.get(0)?;
+            let half_life: f64 = ctx.get(1)?;
+            if half_life <= 0.0 {
+                return Ok(0.0f64);
+            }
+            Ok((-std::f64::consts::LN_2 * age / half_life).exp())
+        },
+    )
+}
+
 // --- Encrypt subcommand ---
 
 pub fn handle_encrypt(db_path: &Path) -> Result<(), NmemError> {

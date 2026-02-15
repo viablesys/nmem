@@ -40,6 +40,9 @@ pub struct SearchParams {
     /// Pagination offset (default 0).
     #[serde(default)]
     pub offset: Option<i64>,
+    /// Ranking order: "relevance" (BM25 only, default) or "blended" (BM25 + recency + type weight).
+    #[serde(default, rename = "orderBy")]
+    pub order_by: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -102,24 +105,6 @@ struct TimelineResult {
     anchor: FullObservation,
     before: Vec<FullObservation>,
     after: Vec<FullObservation>,
-}
-
-// --- UDF registration ---
-
-pub fn register_udfs(conn: &Connection) -> rusqlite::Result<()> {
-    conn.create_scalar_function(
-        "exp_decay",
-        2,
-        rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
-        |ctx| {
-            let age: f64 = ctx.get(0)?;
-            let half_life: f64 = ctx.get(1)?;
-            if half_life <= 0.0 {
-                return Ok(0.0f64);
-            }
-            Ok((-std::f64::consts::LN_2 * age / half_life).exp())
-        },
-    )
 }
 
 // --- Helpers ---
@@ -193,23 +178,68 @@ impl NmemServer {
         let limit = clamp(params.limit, 20, 100);
         let offset = params.offset.unwrap_or(0).max(0);
 
+        let blended = match params.order_by.as_deref() {
+            None | Some("relevance") => false,
+            Some("blended") => true,
+            Some(other) => {
+                return Err(ErrorData::new(
+                    ErrorCode::INVALID_PARAMS,
+                    format!("invalid orderBy: {other:?} (expected \"relevance\" or \"blended\")"),
+                    None,
+                ));
+            }
+        };
+
         let db = self.db.lock().map_err(|e| db_err(&e))?;
 
-        let mut stmt = db
-            .prepare(
-                "SELECT o.id, o.timestamp, o.obs_type,
-                        SUBSTR(o.content, 1, 120) AS content_preview,
-                        o.file_path, o.session_id, o.is_pinned
-                 FROM observations o
-                 JOIN sessions s ON o.session_id = s.id
-                 JOIN observations_fts f ON o.id = f.rowid
-                 WHERE observations_fts MATCH ?1
-                   AND (?2 IS NULL OR s.project = ?2)
-                   AND (?3 IS NULL OR o.obs_type = ?3)
-                 ORDER BY f.rank
-                 LIMIT ?4 OFFSET ?5",
+        let sql = if blended {
+            "WITH fts_matches AS (
+                SELECT o.id, o.timestamp, o.obs_type,
+                       SUBSTR(o.content, 1, 120) AS content_preview,
+                       o.file_path, o.session_id, o.is_pinned,
+                       f.rank AS raw_rank
+                FROM observations o
+                JOIN sessions s ON o.session_id = s.id
+                JOIN observations_fts f ON o.id = f.rowid
+                WHERE observations_fts MATCH ?1
+                  AND (?2 IS NULL OR s.project = ?2)
+                  AND (?3 IS NULL OR o.obs_type = ?3)
+            ),
+            rank_bounds AS (
+                SELECT MIN(raw_rank) AS min_r, MAX(raw_rank) AS max_r FROM fts_matches
+            ),
+            scored AS (
+                SELECT m.*,
+                       CASE WHEN b.max_r = b.min_r THEN 1.0
+                            ELSE (m.raw_rank - b.max_r) / (b.min_r - b.max_r)
+                       END AS bm25_norm,
+                       exp_decay((unixepoch('now') - m.timestamp) / 86400.0, 7.0) AS recency,
+                       CASE m.obs_type
+                           WHEN 'file_edit' THEN 1.0 WHEN 'command' THEN 0.67
+                           WHEN 'session_compact' THEN 0.5 WHEN 'mcp_call' THEN 0.33
+                           ELSE 0.17
+                       END AS type_w
+                FROM fts_matches m, rank_bounds b
             )
-            .map_err(|e| db_err(&e))?;
+            SELECT id, timestamp, obs_type, content_preview, file_path, session_id, is_pinned
+            FROM scored
+            ORDER BY (bm25_norm * 0.5 + recency * 0.3 + type_w * 0.2) DESC
+            LIMIT ?4 OFFSET ?5"
+        } else {
+            "SELECT o.id, o.timestamp, o.obs_type,
+                    SUBSTR(o.content, 1, 120) AS content_preview,
+                    o.file_path, o.session_id, o.is_pinned
+             FROM observations o
+             JOIN sessions s ON o.session_id = s.id
+             JOIN observations_fts f ON o.id = f.rowid
+             WHERE observations_fts MATCH ?1
+               AND (?2 IS NULL OR s.project = ?2)
+               AND (?3 IS NULL OR o.obs_type = ?3)
+             ORDER BY f.rank
+             LIMIT ?4 OFFSET ?5"
+        };
+
+        let mut stmt = db.prepare(sql).map_err(|e| db_err(&e))?;
 
         let results: Vec<SearchResult> = stmt
             .query_map(
@@ -538,7 +568,7 @@ impl ServerHandler for NmemServer {
 
 pub fn handle_serve(db_path: &Path) -> Result<(), NmemError> {
     let conn = open_db_readonly(db_path)?;
-    register_udfs(&conn)?;
+    crate::db::register_udfs(&conn)?;
     let db: DbHandle = Arc::new(Mutex::new(conn));
     let server = NmemServer::new(db);
 

@@ -1,5 +1,6 @@
+use nmem::db::register_udfs;
 use nmem::serve::{
-    register_udfs, GetObservationsParams, NmemServer, RecentContextParams, SearchParams,
+    GetObservationsParams, NmemServer, RecentContextParams, SearchParams,
     TimelineParams,
 };
 use rusqlite::Connection;
@@ -66,6 +67,7 @@ fn search_finds_by_content() {
             obs_type: None,
             limit: None,
             offset: None,
+            order_by: None,
         })
         .unwrap();
 
@@ -84,6 +86,7 @@ fn search_filters_by_project() {
             obs_type: None,
             limit: None,
             offset: None,
+            order_by: None,
         })
         .unwrap();
 
@@ -103,6 +106,7 @@ fn search_filters_by_obs_type() {
             obs_type: Some("file_edit".into()),
             limit: None,
             offset: None,
+            order_by: None,
         })
         .unwrap();
 
@@ -124,6 +128,7 @@ fn search_returns_empty_for_no_match() {
             obs_type: None,
             limit: None,
             offset: None,
+            order_by: None,
         })
         .unwrap();
 
@@ -141,6 +146,7 @@ fn search_respects_limit() {
             obs_type: None,
             limit: Some(2),
             offset: None,
+            order_by: None,
         })
         .unwrap();
 
@@ -375,6 +381,7 @@ fn search_includes_is_pinned() {
             obs_type: None,
             limit: None,
             offset: None,
+            order_by: None,
         })
         .unwrap();
 

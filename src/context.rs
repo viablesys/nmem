@@ -1,4 +1,4 @@
-use crate::serve::register_udfs;
+use crate::db::register_udfs;
 use crate::NmemError;
 use rusqlite::{Connection, params};
 
@@ -192,12 +192,8 @@ fn format_table(rows: &[ContextRow], header: &str) -> String {
 
 /// Generate context injection markdown for a SessionStart event.
 /// Returns empty string if no observations exist.
-pub fn generate_context(conn: &Connection, project: &str, source: &str) -> Result<String, NmemError> {
+pub fn generate_context(conn: &Connection, project: &str, local_limit: i64, cross_limit: i64) -> Result<String, NmemError> {
     register_udfs(conn)?;
-
-    let is_recovery = matches!(source, "compact" | "clear");
-    let local_limit: i64 = if is_recovery { 30 } else { 20 };
-    let cross_limit: i64 = if is_recovery { 15 } else { 10 };
 
     let local_rows = query_rows(conn, PROJECT_LOCAL_SQL, project, local_limit)?;
     let cross_rows = query_rows(conn, CROSS_PROJECT_SQL, project, cross_limit)?;

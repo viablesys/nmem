@@ -115,7 +115,9 @@ fn handle_session_start(
     maybe_sweep(conn, config);
 
     // Context injection — non-fatal, errors logged to stderr
-    match context::generate_context(conn, project, source) {
+    let is_recovery = matches!(source, "compact" | "clear");
+    let (local_limit, cross_limit) = crate::config::resolve_context_limits(config, project, is_recovery);
+    match context::generate_context(conn, project, local_limit, cross_limit) {
         Ok(ctx) if !ctx.is_empty() => print!("{ctx}"),
         Ok(_) => {}
         Err(e) => eprintln!("nmem: context injection failed: {e}"),

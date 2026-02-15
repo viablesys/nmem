@@ -93,6 +93,10 @@ pub struct SearchArgs {
     /// Output observation IDs only (one per line)
     #[arg(long)]
     pub ids: bool,
+
+    /// Ranking order: "relevance" (BM25 only) or "blended" (BM25 + recency + type weight)
+    #[arg(long, default_value = "relevance")]
+    pub order_by: String,
 }
 
 #[derive(Parser)]

@@ -31,6 +31,10 @@ pub struct FilterConfig {
 pub struct ProjectConfig {
     #[serde(default)]
     pub sensitivity: Sensitivity,
+    /// Max local-project observations in context injection (default: 20 normal, 30 recovery).
+    pub context_local_limit: Option<u32>,
+    /// Max cross-project observations in context injection (default: 10 normal, 15 recovery).
+    pub context_cross_limit: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone, Copy, PartialEq, Eq)]
@@ -109,6 +113,22 @@ fn validate_config(config: &NmemConfig) -> Result<(), NmemError> {
         })?;
     }
     Ok(())
+}
+
+/// Resolve context injection limits from config.
+/// Explicit per-project limits are used as-is (recovery mode does NOT multiply them).
+/// Without explicit config, defaults are 20/10 (normal) or 30/15 (recovery).
+pub fn resolve_context_limits(config: &NmemConfig, project: &str, is_recovery: bool) -> (i64, i64) {
+    let pc = config.projects.get(project);
+    let local = pc
+        .and_then(|p| p.context_local_limit)
+        .map(|v| v as i64)
+        .unwrap_or(if is_recovery { 30 } else { 20 });
+    let cross = pc
+        .and_then(|p| p.context_cross_limit)
+        .map(|v| v as i64)
+        .unwrap_or(if is_recovery { 15 } else { 10 });
+    (local, cross)
 }
 
 /// Merge global config + project-specific settings into FilterParams.
@@ -281,6 +301,75 @@ command = 60
         assert_eq!(config.retention.days["command"], 60);
         // Custom days map replaces defaults entirely
         assert!(!config.retention.days.contains_key("user_prompt"));
+    }
+
+    #[test]
+    fn context_limits_defaults_normal() {
+        let config = NmemConfig::default();
+        let (local, cross) = resolve_context_limits(&config, "unknown", false);
+        assert_eq!(local, 20);
+        assert_eq!(cross, 10);
+    }
+
+    #[test]
+    fn context_limits_defaults_recovery() {
+        let config = NmemConfig::default();
+        let (local, cross) = resolve_context_limits(&config, "unknown", true);
+        assert_eq!(local, 30);
+        assert_eq!(cross, 15);
+    }
+
+    #[test]
+    fn context_limits_custom_ignores_recovery() {
+        let config: NmemConfig = toml::from_str(
+            r#"
+[projects.myproj]
+context_local_limit = 50
+context_cross_limit = 5
+"#,
+        )
+        .unwrap();
+        // Normal
+        let (local, cross) = resolve_context_limits(&config, "myproj", false);
+        assert_eq!(local, 50);
+        assert_eq!(cross, 5);
+        // Recovery — same values, NOT multiplied
+        let (local, cross) = resolve_context_limits(&config, "myproj", true);
+        assert_eq!(local, 50);
+        assert_eq!(cross, 5);
+    }
+
+    #[test]
+    fn context_limits_partial_override() {
+        let config: NmemConfig = toml::from_str(
+            r#"
+[projects.myproj]
+context_local_limit = 40
+"#,
+        )
+        .unwrap();
+        // local is explicit, cross falls back to default
+        let (local, cross) = resolve_context_limits(&config, "myproj", false);
+        assert_eq!(local, 40);
+        assert_eq!(cross, 10);
+        // recovery: local still explicit, cross gets recovery default
+        let (local, cross) = resolve_context_limits(&config, "myproj", true);
+        assert_eq!(local, 40);
+        assert_eq!(cross, 15);
+    }
+
+    #[test]
+    fn context_limits_unknown_project_uses_defaults() {
+        let config: NmemConfig = toml::from_str(
+            r#"
+[projects.other]
+context_local_limit = 99
+"#,
+        )
+        .unwrap();
+        let (local, cross) = resolve_context_limits(&config, "unknown", false);
+        assert_eq!(local, 20);
+        assert_eq!(cross, 10);
     }
 
     #[test]
