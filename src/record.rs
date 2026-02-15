@@ -1,4 +1,5 @@
 use crate::config::{load_config, resolve_filter_params, NmemConfig};
+use crate::context;
 use crate::db::open_db;
 use crate::extract::{classify_tool, extract_content, extract_file_path};
 use crate::filter::{SecretFilter, redact_json_value_with};
@@ -85,6 +86,7 @@ fn handle_session_start(
     conn: &Connection,
     payload: &HookPayload,
     config: &NmemConfig,
+    project: &str,
 ) -> Result<(), NmemError> {
     let ts = now_ts();
     let tx = conn.unchecked_transaction()?;
@@ -111,6 +113,13 @@ fn handle_session_start(
     tx.commit()?;
 
     maybe_sweep(conn, config);
+
+    // Context injection — non-fatal, errors logged to stderr
+    match context::generate_context(conn, project, source) {
+        Ok(ctx) if !ctx.is_empty() => print!("{ctx}"),
+        Ok(_) => {}
+        Err(e) => eprintln!("nmem: context injection failed: {e}"),
+    }
 
     Ok(())
 }
@@ -282,7 +291,7 @@ pub fn handle_record(db_path: &Path) -> Result<(), NmemError> {
     let filter = SecretFilter::with_params(params);
 
     match payload.hook_event_name.as_str() {
-        "SessionStart" => handle_session_start(&conn, &payload, &config),
+        "SessionStart" => handle_session_start(&conn, &payload, &config, &project),
         "UserPromptSubmit" => handle_user_prompt(&conn, &payload, &filter),
         "PostToolUse" => handle_post_tool_use(&conn, &payload, &filter),
         "Stop" => handle_stop(&conn, &payload),

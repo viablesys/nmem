@@ -264,12 +264,17 @@ The SessionStart hook pushes context proactively. `nmem record` handles SessionS
 
 | Aspect | Specification |
 |--------|--------------|
-| Output | stdout plain text or `hookSpecificOutput.additionalContext` |
+| Output | stdout plain text (Claude Code captures as `additionalContext`) |
 | Format | Markdown table, compact, scannable |
 | Max lines | ~50 lines (~350-500 tokens, varies by content length). Competes with CLAUDE.md for context window. |
 | Timing | SessionStart only (`source` in `startup`, `resume`, `clear`, `compact`) |
-| Recovery mode | On `compact`/`clear`: expanded limits (more intents, files, threads) + recent actions trail. Agent lost its context window — inject more to compensate. |
-| Selection | 20 project-local + up to 10 cross-project backfill |
+| Recovery mode | On `compact`/`clear`: expanded limits (30 local + 15 cross). Agent lost its context window — inject more to compensate. |
+| Normal mode | 20 project-local + up to 10 cross-project backfill |
+| Scoring | Same composite scoring as `recent_context`: `exp_decay` recency (7d half-life) * 0.6 + type_weight * 0.4. Deduped by file_path. |
+| Execution order | After transaction commit and sweep — context reflects post-sweep state |
+| Error handling | Non-fatal. Errors go to stderr, do not fail the hook. |
+
+> **[ANNOTATION 2026-02-14, v3.0]:** Context injection now implemented in `src/context.rs`. The module duplicates the scoring SQL from `serve.rs` per the ADR-006 design decision ("inline SQL, not shared with serve.rs"). Cross-project section shows `[project_name]` suffix per row. Output format uses `# nmem context` as top-level header with `## project_name` and `## Other projects` subsections.
 
 > **[ANNOTATION 2026-02-14, v1.2]:** Live data shows 56% of user intents trigger zero tool actions (conversational turns: "yes", "i do", questions). Context injection should weight intents-with-actions higher than bare conversational turns. The prototype context generator already shows action counts per intent (`→ N actions`) but doesn't filter or sort by them. Consider promoting high-action intents and demoting zero-action turns in the selection logic.
 
@@ -345,3 +350,4 @@ Some projects may want more or fewer injected observations, or suppress cross-pr
 | 2026-02-14 | 1.3 | Annotated with live data. Added recovery mode to injection contract (compact/clear get expanded limits). Noted that 56% of user intents are zero-action conversational turns — context injection should weight intents-with-actions higher. |
 | 2026-02-14 | 2.0 | **Composite scoring for `recent_context`.** Replaced `ORDER BY timestamp DESC` with multi-signal scoring: recency decay (7d half-life via `exp_decay` UDF), type weight (file_edit > command > session_compact > mcp_call > file_read), project match (boost, not filter). Dedup now keeps highest-scored per file_path. Response adds `score` field (`ScoredObservation`). Added `functions` feature to rusqlite. 5 new integration tests. |
 | 2026-02-14 | 2.1 | **CLI query interface.** Added `nmem search` subcommand wrapping the same FTS5 query as MCP `search`. Three output modes: default JSON index, `--full` for complete observations, `--ids` for pipe-friendly ID lists. Filters: `--project`, `--type`, `--limit`. New module `src/search.rs` with inline SQL (decoupled from serve.rs MCP types). 7 integration tests. Harness independence section updated from aspirational to implemented. |
+| 2026-02-14 | 3.0 | **Context injection on SessionStart.** New module `src/context.rs` with `generate_context()` emitting scored markdown tables to stdout. Project-local (20 rows) + cross-project (10 rows) sections. Recovery modes (`compact`/`clear`) expand to 30+15. Scoring: `exp_decay` recency (7d half-life) + type weight, deduped by file_path. Wired into `record.rs::handle_session_start()` after commit+sweep, non-fatal. 5 integration tests + 7 unit tests. |

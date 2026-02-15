@@ -34,10 +34,14 @@ fn user_prompt(db: &PathBuf, session_id: &str, prompt: &str) {
 }
 
 fn post_tool_use(db: &PathBuf, session_id: &str, tool_name: &str, tool_input: &str) {
+    post_tool_use_project(db, session_id, "myproj", tool_name, tool_input);
+}
+
+fn post_tool_use_project(db: &PathBuf, session_id: &str, project: &str, tool_name: &str, tool_input: &str) {
     nmem_cmd(db)
         .arg("record")
         .write_stdin(format!(
-            r#"{{"session_id":"{session_id}","cwd":"/home/test/workspace/myproj","hook_event_name":"PostToolUse","tool_name":"{tool_name}","tool_input":{tool_input}}}"#
+            r#"{{"session_id":"{session_id}","cwd":"/home/test/workspace/{project}","hook_event_name":"PostToolUse","tool_name":"{tool_name}","tool_input":{tool_input}}}"#
         ))
         .assert()
         .success();
@@ -1160,4 +1164,149 @@ fn status_with_data() {
     assert!(stderr.contains("sessions — 1"));
     assert!(stderr.contains("last session"));
     assert!(stderr.contains("myproj"));
+}
+
+// --- Context injection tests ---
+
+#[test]
+fn context_injection_on_session_start() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    // Seed data: first session with some observations
+    session_start(&db, "ctx-seed");
+    post_tool_use(&db, "ctx-seed", "Read", r#"{"file_path":"/src/auth.rs"}"#);
+    post_tool_use(&db, "ctx-seed", "Edit", r#"{"file_path":"/src/auth.rs"}"#);
+    post_tool_use(&db, "ctx-seed", "Bash", r#"{"command":"cargo test"}"#);
+    stop(&db, "ctx-seed");
+
+    // New session — should get context injection in stdout
+    let out = nmem_cmd(&db)
+        .arg("record")
+        .write_stdin(
+            r#"{"session_id":"ctx-new","cwd":"/home/test/workspace/myproj","hook_event_name":"SessionStart"}"#,
+        )
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    assert!(stdout.contains("# nmem context"), "should contain context header");
+    assert!(stdout.contains("## myproj"), "should contain project section");
+    assert!(stdout.contains("file_edit"), "should contain file_edit observation");
+    assert!(stdout.contains("command"), "should contain command observation");
+    assert!(stdout.contains("| ID |"), "should contain table header");
+}
+
+#[test]
+fn context_injection_empty_db() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    // First-ever SessionStart — no prior data
+    let out = nmem_cmd(&db)
+        .arg("record")
+        .write_stdin(
+            r#"{"session_id":"ctx-empty","cwd":"/home/test/workspace/myproj","hook_event_name":"SessionStart"}"#,
+        )
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    assert!(stdout.is_empty(), "empty DB should produce no stdout context");
+}
+
+#[test]
+fn context_injection_cross_project() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    // Seed data for project alpha
+    session_start_project(&db, "ctx-alpha", "alpha");
+    post_tool_use_project(&db, "ctx-alpha", "alpha", "Bash", r#"{"command":"cargo build"}"#);
+    stop(&db, "ctx-alpha");
+
+    // Seed data for project beta
+    session_start_project(&db, "ctx-beta", "beta");
+    post_tool_use_project(&db, "ctx-beta", "beta", "Edit", r#"{"file_path":"/src/lib.rs"}"#);
+    stop(&db, "ctx-beta");
+
+    // New session for alpha — should see beta in cross-project
+    let out = nmem_cmd(&db)
+        .arg("record")
+        .write_stdin(
+            r#"{"session_id":"ctx-alpha2","cwd":"/home/test/workspace/alpha","hook_event_name":"SessionStart"}"#,
+        )
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    assert!(stdout.contains("## alpha"), "should contain project section");
+    assert!(stdout.contains("Other projects"), "should contain cross-project section");
+    assert!(stdout.contains("[beta]"), "cross-project should show beta project name");
+}
+
+#[test]
+fn context_injection_recovery_mode() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    // Seed data
+    session_start(&db, "ctx-rec-seed");
+    post_tool_use(&db, "ctx-rec-seed", "Read", r#"{"file_path":"/src/a.rs"}"#);
+    stop(&db, "ctx-rec-seed");
+
+    // Normal SessionStart
+    let out_normal = nmem_cmd(&db)
+        .arg("record")
+        .write_stdin(
+            r#"{"session_id":"ctx-rec-normal","cwd":"/home/test/workspace/myproj","hook_event_name":"SessionStart"}"#,
+        )
+        .assert()
+        .success();
+    let stdout_normal = String::from_utf8_lossy(&out_normal.get_output().stdout);
+
+    // Compact recovery SessionStart
+    let out_compact = nmem_cmd(&db)
+        .arg("record")
+        .write_stdin(
+            r#"{"session_id":"ctx-rec-compact","cwd":"/home/test/workspace/myproj","hook_event_name":"SessionStart","source":"compact"}"#,
+        )
+        .assert()
+        .success();
+    let stdout_compact = String::from_utf8_lossy(&out_compact.get_output().stdout);
+
+    // Both should produce output (with this small dataset the difference in limits won't matter,
+    // but both modes should work without error)
+    assert!(stdout_normal.contains("# nmem context"), "normal mode should produce context");
+    assert!(stdout_compact.contains("# nmem context"), "compact mode should produce context");
+}
+
+#[test]
+fn context_injection_shows_pinned() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    session_start(&db, "ctx-pin-seed");
+    post_tool_use(&db, "ctx-pin-seed", "Bash", r#"{"command":"important-cmd"}"#);
+    stop(&db, "ctx-pin-seed");
+
+    // Pin the observation
+    let obs = query_db(&db, "SELECT id FROM observations WHERE content = 'important-cmd'");
+    let id = &obs[0][0];
+    nmem_cmd(&db).args(["pin", id]).assert().success();
+
+    // New session — should see pin marker
+    let out = nmem_cmd(&db)
+        .arg("record")
+        .write_stdin(
+            r#"{"session_id":"ctx-pin-new","cwd":"/home/test/workspace/myproj","hook_event_name":"SessionStart"}"#,
+        )
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    assert!(stdout.contains("# nmem context"), "should produce context");
+    // Find the row with important-cmd and verify it has pin marker
+    let line = stdout.lines().find(|l| l.contains("important-cmd")).expect("should find important-cmd row");
+    assert!(line.contains("*"), "pinned observation should have * marker");
 }
