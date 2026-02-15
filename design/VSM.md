@@ -4,16 +4,23 @@ Current state of each VSM system. Update as capabilities mature.
 
 ## S1 — Operations
 
-Capture, store, retrieve. **Functional.**
+Capture, store, retrieve. **Functional but incomplete.**
 
-- Hooks record observations on SessionStart, PostToolUse, Stop
+- Hooks record observations on SessionStart, PostToolUse, UserPromptSubmit, Stop
 - Structured extraction classifies tool calls into obs_types without LLM
 - FTS5 indexes observations and prompts with porter stemming
-- MCP server exposes search, get_observations, recent_context
+- MCP server exposes search, get_observations, recent_context, timeline
 - Context injection pushes relevant history at session start
 - Secret filtering redacts before storage
 
-No known gaps at current scale. Extraction coverage could expand (SendMessage, Skill invocations not captured) but this is incremental.
+**Critical gap: session summarization.** claude-mem produced structured LLM summaries at every prompt turn (rolling) and at session end, with fields: request, investigated, learned, completed, next_steps, files_read, files_edited, notes. nmem has no equivalent. This means:
+- Context injection surfaces raw facts but no narrative
+- PreCompact events are ignored — long sessions lose signal when context is compacted
+- Cross-session retrieval finds file paths and commands but not intent or outcomes
+
+This is not S4 (cross-session intelligence) — it's core S1. A memory system that captures observations but can't summarize what happened is missing a fundamental operation. Summarization is compression of existing facts, not extraction of new ones.
+
+Incremental gaps: extraction coverage could expand (SendMessage, Skill invocations not captured).
 
 ## S2 — Coordination
 
@@ -110,20 +117,21 @@ A mature S5 would:
 
 | System | State | Gap |
 |--------|-------|-----|
-| S1 Operations | Functional | Incremental extraction coverage |
+| S1 Operations | Incomplete | **No session summarization** (rolling or end-of-session) |
 | S2 Coordination | Functional | Multi-agent would stress this |
 | S3 Control | Manual | Needs autonomous triggers |
 | S3* Audit | Minimal | Needs functional integrity checks |
 | S4 Intelligence | Missing | Core gap — no learning, no adaptation |
 | S5 Policy | Static | No tension to resolve without S4 |
 
-The organism captures and coordinates (S1-S2) but doesn't regulate itself (S3), verify its own health (S3*), learn from experience (S4), or evolve its policies (S5). It's a viable recorder, not yet a viable system.
+S1 captures facts but can't summarize them. S2 coordinates. S3 exists but doesn't self-trigger. S3* checks structure but not function. S4 is absent. S5 has nothing to mediate. The organism records but doesn't comprehend, regulate, or adapt.
 
 ## What closes the loop
 
-1. **S3 autonomy** — smallest change, highest immediate impact. A post-session hook or timer that checks storage and runs sweeps. The logic exists; wire a trigger.
-2. **S3* functional audits** — track extraction success rate, retrieval hit rate, filter accuracy. Surface in `nmem status`.
-3. **S4 retrieval feedback** — instrument whether context-injected observations appear in the agent's subsequent tool calls. This is the minimum viable learning signal.
-4. **S4 synthesis** — cluster and summarize after enough structured data accumulates. Don't rush this.
-5. **Multi-agent S2/S4** — networking, shared memory, cross-agent retrieval. Changes the nature of S2 coordination and gives S4 richer input.
-6. **S5 adaptive policy** — emerges naturally once S3 and S4 are both active and creating tension.
+1. **S1 session summarization** — highest priority. Add structured rolling summaries (per-prompt) and end-of-session summaries. This is the parity gap with claude-mem and the foundation for everything else. Requires LLM or structured template generation. Hook into PreCompact to preserve signal before context compaction.
+2. **S3 autonomy** — post-session hook or timer that checks storage and runs sweeps. The logic exists; wire a trigger.
+3. **S3* functional audits** — track extraction success rate, retrieval hit rate, filter accuracy. Surface in `nmem status`.
+4. **S4 retrieval feedback** — instrument whether context-injected observations appear in the agent's subsequent tool calls. This is the minimum viable learning signal.
+5. **S4 cross-session synthesis** — cluster and summarize across sessions. Depends on per-session summaries existing first.
+6. **Multi-agent S2/S4** — networking, shared memory, cross-agent retrieval. Changes the nature of S2 coordination and gives S4 richer input.
+7. **S5 adaptive policy** — emerges naturally once S3 and S4 are both active and creating tension.

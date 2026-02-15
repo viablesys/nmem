@@ -2,14 +2,42 @@
 
 Missing features, why they're missing, and what triggers implementation.
 
+## Parity gap (was in claude-mem, missing in nmem)
+
+### Session summarization (rolling + end-of-session)
+claude-mem produced structured LLM summaries at every prompt turn and at session end. Each summary had: `request`, `investigated`, `learned`, `completed`, `next_steps`, `files_read`, `files_edited`, `notes`. These were FTS5-indexed and surfaced in context injection.
+
+nmem has none of this. `sessions.summary` column exists but is never populated. No rolling summaries, no PreCompact snapshots, no structured narrative.
+
+This is the biggest functional gap. Without summarization:
+- Context injection surfaces raw observations but no narrative of what was accomplished
+- Long sessions lose signal when Claude Code compacts context (PreCompact fires, nmem ignores it)
+- Cross-session retrieval finds file paths and commands but not intent or outcomes
+- The `syntheses` table (ADR-002 Q3) was designed for cross-session patterns, but per-prompt rolling summaries are a prerequisite
+
+**Schema reference** (claude-mem's `session_summaries` table):
+- Per-prompt rows keyed by `(memory_session_id, prompt_number)`
+- Structured fields: request, investigated, learned, completed, next_steps, files_read, files_edited, notes
+- FTS5 on text fields for retrieval
+- `discovery_tokens` tracked LLM cost per summary
+
+**What needs to happen**:
+1. Add a `summaries` table with structured fields (not a single TEXT blob)
+2. Hook into PreCompact to snapshot rolling session state before compaction
+3. Generate summaries at Stop for session-end narrative
+4. Decide on LLM strategy: local model, API call, or structured template from observations
+5. Surface summaries in context injection and MCP search
+
+**Why it was missing**: ADR-002 chose no-LLM for observation extraction to avoid hallucination. But summarization is compression of existing facts, not extraction of new ones — different function, different risk profile. This distinction wasn't drawn clearly enough.
+
 ## Deferred by design
 
-### S4 Synthesis (LLM-based summarization)
-Periodic LLM synthesis over observation clusters to produce cross-session patterns. ADR-002 chose structured extraction (Position A) as the starting point — LLM synthesis is explicitly gated on evidence that retrieval quality is poor without it.
+### S4 Synthesis (cross-session pattern detection)
+Periodic synthesis over observation clusters to produce cross-session patterns. Distinct from per-session summarization above — S4 operates across sessions to detect recurring themes, hotspots, and convergence signals.
 
-**Trigger**: Retrieval consistently misses contextually relevant results across sessions; volume exceeds ~10K observations where abstraction adds value.
+**Trigger**: Per-session summarization implemented AND volume exceeds ~10K observations.
 
-**Depends on**: Mature S1 capture, `syntheses` table (schema designed in ADR-002 Q3 but not created).
+**Depends on**: Session summaries as input, `syntheses` table (schema designed in ADR-002 Q3 but not created).
 
 ### Auto-pinning (landmark detection)
 Automatic identification of important observations exempt from retention. Manual `nmem pin <id>` works; intelligence-driven pinning requires S4.
