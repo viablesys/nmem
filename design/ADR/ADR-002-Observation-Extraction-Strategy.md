@@ -284,6 +284,8 @@ At 18K rows, SQLite doesn't even notice. FTS5 is overkill. Full table scans comp
 
 **Position A: pure structured extraction.** No LLM at launch.
 
+> **[ANNOTATION 2026-02-15, v2.3]:** The decision to launch with Position A was correct and remains the foundation. S1 extraction is still pure structured parsing — no LLM in the capture path. However, nmem has since implemented S1's S4 (session summarization) using a local LLM (granite-4-h-tiny via LM Studio) at session end. This is Position C's periodic LLM synthesis, specifically applied within S1's internal viability model. The LLM synthesizes over verified structured records (observations), not over raw tool output — exactly as Position C prescribed. The actual trigger was not the criteria listed under "When to Reconsider" below (retrieval quality, volume >10K) but the parity gap with claude-mem: narrative coherence for session summaries requires language generation. The implementation stores summaries in `sessions.summary` column rather than the `syntheses` table designed in Q3 — the column approach was simpler for the v1 scope (one summary per session). A dedicated table with FTS5 indexing will be needed when rolling/per-prompt summaries are added.
+
 Rationale:
 1. It's the simplest thing that could work
 2. It produces verifiable, deterministic data
@@ -311,6 +313,8 @@ Add LLM synthesis (Position C / S4) when:
 
 Do **not** add LLM synthesis preemptively. The predecessor proved that premature LLM extraction produces garbage at cost. Earn the complexity with evidence.
 
+> **[ANNOTATION 2026-02-15, v2.3]:** S1's S4 (session summarization) was added before any of these criteria were met. The trigger was not retrieval quality but operational coherence — end-of-session summaries are needed for context injection to provide narrative, not just facts. This is Position C applied at the S1 level (within-session synthesis), not the outer S4 level (cross-session patterns). The outer S4 criteria above remain valid for cross-session synthesis. The next S4 capability — work unit detection and context management — is designed but blocked on Claude Code platform constraints (no programmatic context clear). See VSM.md S4 section for the full design.
+
 ## References
 
 - `claude-code-hooks-events.md` — Hook event schemas, what data each event provides for extraction
@@ -326,3 +330,4 @@ Do **not** add LLM synthesis preemptively. The predecessor proved that premature
 | 2026-02-14 | 2.0 | Accepted. Resolved Q1 (observation schema), Q3 (database schema), Q4 (per-source extraction mapping). Promoted Preliminary Direction to Decision. Added library references. |
 | 2026-02-14 | 2.1 | Resolved Q2 (store everything, filter at retrieval) and Q5 (volume estimates updated for unfiltered capture). All open questions now resolved. |
 | 2026-02-14 | 2.2 | Annotated with live production data. Thinking blocks partially close the "What is lost" gap for Position A — agent reasoning provides inline intent/decision capture without LLM extraction. Volume estimates annotated: real rate is ~585K records/year (~652 MB) due to thinking block density (2.9x per user prompt, 84% of content volume). |
+| 2026-02-15 | 2.3 | Annotated Decision and When to Reconsider sections with S1's S4 implementation learnings. Position A → partial Position C transition: session summarization uses local LLM (granite-4-h-tiny) at session end, synthesizing over structured records. Trigger was parity gap (narrative coherence), not the listed retrieval criteria. Storage uses `sessions.summary` column, not Q3's `syntheses` table. |

@@ -14,14 +14,50 @@ End-of-session summarization via local LLM (granite-4-h-tiny on LM Studio) is im
 - **Engine abstraction**: `summarize.rs` speaks the OpenAI chat completions protocol, which covers LM Studio, Ollama, vLLM, llama.cpp, and OpenAI itself. But the engine is hardcoded — no trait boundary for swapping to non-OpenAI protocols (Anthropic API, in-process model, deterministic template). Abstract when a second engine is needed (rule of three).
 - **Dedicated summaries table**: v1 stores in `sessions.summary` column. If rolling/per-prompt summaries are added, a dedicated table with structured fields and FTS5 will be needed.
 
+## S4 — Designed, blocked on platform
+
+### Work unit detection (core S4 algorithm)
+Recognize work unit boundaries from the observation stream. A work unit is a bounded chunk of coherent work: intent (prompt) → investigation (reads/searches) → execution (edits/commands) → completion (pattern resets). The signal is the ratio of user prompts : thinking blocks : tool calls, combined with hot file tracking and intent analysis. Detection logic runs on every hook fire as cheap SQL queries over current session observations. LLM summarization runs only at detected boundaries.
+
+**Status**: Designed. Implementation is consumer-independent — same algorithm for Claude Code hooks or API harness.
+
+**Depends on**: Nothing — can start now. S1 observation data is sufficient input.
+
+### Context actuation (S4 actuator)
+When S4 detects a work unit boundary, it should be able to clear context and inject the work unit summary plus relevant past summaries. Currently blocked: Claude Code hooks provide full observability but no programmatic context control.
+
+**Claude Code constraints (2026-02-15):**
+- No hook can trigger `/clear` or `/compact`
+- `additionalContext` injection is [buggy across multiple hook types](https://github.com/anthropics/claude-code/issues/19909)
+- Async hook `additionalContext` delivers on next turn but cannot clear existing context
+- API context editing (`clear_tool_uses`, `clear_thinking`) exists but isn't exposed to hooks
+
+**Upstream issues tracking this gap:**
+- [#24252](https://github.com/anthropics/claude-code/issues/24252) — Context Hooks
+- [#19909](https://github.com/anthropics/claude-code/issues/19909) — Lifecycle Hooks for Memory Provider Integration (5 injection bugs)
+- [#25689](https://github.com/anthropics/claude-code/issues/25689) — Context usage threshold hook event
+- [#21132](https://github.com/anthropics/claude-code/issues/21132) — Claude clear context for itself
+
+**Workaround**: S4 detects boundary → stores summary → signals via async hook → user/agent initiates `/clear` → SessionStart injects curated summaries. Reactive, not autonomous.
+
+**Alternative**: API-based harness bypasses Claude Code entirely. Claude API context editing beta gives full control. Viable path if Claude Code plugin model remains read-only for context.
+
+### Work unit UI (S4 external interface)
+User-facing dashboard powered by the same work unit model that drives context management. The UI is S4's external surface:
+- Current work unit: intent, hot files, investigate→execute progress
+- Work unit history: completed summaries, searchable by intent
+- Context health: window utilization, what's been compacted, what nmem would inject on reset
+
+**Depends on**: Work unit detection. UI renders what S4 knows.
+
 ## Deferred by design
 
 ### S4 Synthesis (cross-session pattern detection)
-Periodic synthesis over observation clusters to produce cross-session patterns. Distinct from per-session summarization above — S4 operates across sessions to detect recurring themes, hotspots, and convergence signals.
+Periodic synthesis over work unit summaries to produce cross-session patterns. Clusters work units by intent, detects recurring themes, hotspots, and convergence signals.
 
-**Trigger**: Per-session summarization implemented AND volume exceeds ~10K observations.
+**Trigger**: Work unit detection implemented AND volume of work unit summaries justifies clustering.
 
-**Depends on**: Session summaries as input, `syntheses` table (schema designed in ADR-002 Q3 but not created).
+**Depends on**: Work unit summaries as input, `syntheses` table (schema designed in ADR-002 Q3 but not created).
 
 ### Auto-pinning (landmark detection)
 Automatic identification of important observations exempt from retention. Manual `nmem pin <id>` works; intelligence-driven pinning requires S4.

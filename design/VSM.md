@@ -4,7 +4,7 @@ Current state of each VSM system. Update as capabilities mature.
 
 ## S1 — Operations
 
-Capture, store, retrieve. **Functional but incomplete.**
+Capture, store, retrieve. **Functional, S4 partial.**
 
 S1 is itself a viable system (VSM recursion). Its internal subsystems:
 
@@ -13,7 +13,7 @@ S1 is itself a viable system (VSM recursion). Its internal subsystems:
 | S1 | Raw capture (observations, prompts) | Functional |
 | S2 | Dedup, ordering, prompt-observation linking | Functional |
 | S3 | Content limits, truncation, what to capture | Partial |
-| **S4** | **Summarization — compress what was captured** | **Missing** |
+| S4 | Summarization — compress what was captured | Partial (v1) |
 | S5 | Capture policy (config, sensitivity, filtering) | Functional |
 
 What works:
@@ -24,17 +24,20 @@ What works:
 - Context injection pushes relevant history at session start
 - Secret filtering redacts before storage
 
-**Critical gap: S1's S4 (session summarization).** claude-mem produced structured summaries at every prompt turn (rolling) and at session end, with fields: request, investigated, learned, completed, next_steps, files_read, files_edited, notes. nmem has no equivalent. This means:
-- Context injection surfaces raw facts but no narrative
-- PreCompact events are ignored — long sessions lose signal when context is compacted
-- Cross-session retrieval finds file paths and commands but not intent or outcomes
+**S1's S4 (session summarization) — v1 implemented, gaps remain.** End-of-session summarization via local LLM (granite-4-h-tiny on LM Studio) is functional. Stop hook generates structured JSON summaries (request, investigated, learned, completed, next_steps, files_read, files_edited, notes) stored in `sessions.summary`, surfaced in context injection and `session_summaries` MCP tool. This closes the parity gap with claude-mem for end-of-session compression.
 
-Framing this as S1's missing S4 (not the outer S4) keeps the design coherent:
+**Remaining S1's S4 gaps:**
+- PreCompact events are ignored — long sessions lose signal when context is compacted
+- No rolling summaries — only end-of-session, which compresses too much for long sessions
+- Summary content not FTS5-indexed — search by project only, not by content
+- Summaries stored in `sessions.summary` column, not a dedicated table (limits future rolling/per-prompt summaries)
+
+Framing this as S1's S4 (not the outer S4) keeps the design coherent:
 - S1's S4 compresses what happened *within a session* — bounded, operational, simple
 - The outer S4 synthesizes *across sessions* — unbounded, adaptive, complex
 - The outer S4 depends on S1's S4 having done its job first
 
-S1's S4 may not require an LLM — structured templates computed from existing observations (file lists, command outcomes, prompt intents) could produce a useful balance sheet from the ledger. The question is whether deterministic compression captures enough signal or whether narrative coherence requires language generation.
+The v1 implementation confirmed that narrative coherence requires language generation — structured templates from observations alone don't capture intent or causality. An LLM (even a small local one) is necessary for this layer, validating ADR-002's Position C framing for S4-level synthesis.
 
 Incremental gaps: extraction coverage could expand (SendMessage, Skill invocations not captured).
 
@@ -86,14 +89,68 @@ S3* should be the immune system — detecting pathology before it becomes visibl
 
 ## S4 — Intelligence
 
-Adaptation, pattern recognition, environment sensing. **Missing entirely.**
+Adaptation, pattern recognition, environment sensing. **Designed, not implemented.**
 
-S4 answers: "what's changing, and how should we adapt?" In nmem's context:
+S4 answers: "what's changing, and how should we adapt?" The original framing (retrieval feedback, cross-session synthesis) remains valid but is now secondary to a more fundamental capability: **autonomous context management via work unit detection.**
+
+### Core concept: the work unit
+
+A work unit is a bounded chunk of coherent work within a session, recognized by observing the stream — not declared by the user. The signal is the pattern:
+
+1. **Intent** — user prompt sets direction
+2. **Investigation** — reads, searches, exploration (high read:edit ratio)
+3. **Execution** — edits, commands, builds (high edit:read ratio)
+4. **Completion** — the pattern resets (new unrelated intent, or ratio shifts dramatically)
+
+The ratio of user prompts : thinking blocks : tool calls (and the composition of tool types) characterizes the work phase. Hot files — informed by intent and access patterns across sessions — provide the topical signal. When the pattern shifts, that's a work unit boundary.
+
+### S4 as context manager
+
+S4's primary function is autonomous context window management:
+
+1. **Detect work unit boundaries** — pattern recognition over the observation stream (cheap SQL queries, runs on every hook fire)
+2. **Generate work unit summaries** — structured semantic summaries at boundaries (LLM, runs only at detected boundaries)
+3. **Control context injection** — after a `/clear`, inject the last work unit summary plus relevant past summaries from memory
+4. **Signal the agent** — when a boundary is detected mid-session, signal via async hook `additionalContext` that context should be refreshed
+
+Work unit summaries are the new primary semantic structure — they replace raw observations as the unit of cross-session memory. They capture intent, files involved, outcome, and logical next steps at a granularity between individual observations (too fine) and session summaries (too coarse).
+
+### S4 as the UI data model
+
+The same work unit model powers the user-facing interface. The UI is S4's external surface, the way the MCP server is S1's:
+
+- **Current work unit** — intent, hot files, progress through investigate→execute pattern
+- **Work unit history** — completed summaries, searchable by intent
+- **Context health** — window utilization, what's been compacted, what nmem would inject on reset
+
+### Platform constraints (2026-02-15)
+
+**Claude Code hooks** provide full observability (14 hook events, every tool call) but limited actuation:
+
+| Capability | Status |
+|-----------|--------|
+| Observe all tool calls, prompts, session events | Yes — 14 hook events |
+| Inject context at session boundaries | Yes — SessionStart `additionalContext` (fires on startup/resume/clear/compact) |
+| Inject context mid-session | Partial — async hook `additionalContext` delivered next turn, but [multiple bugs](https://github.com/anthropics/claude-code/issues/19909) block injection across PostToolUse/PreToolUse/UserPromptSubmit |
+| Trigger context clear programmatically | No — no hook or MCP tool can invoke `/clear` |
+| Partial context editing (clear old tool results) | No — API supports `clear_tool_uses` and `clear_thinking` strategies, but Claude Code doesn't expose these to hooks |
+
+**Relevant upstream issues:**
+- [#24252](https://github.com/anthropics/claude-code/issues/24252) — Context Hooks (hook into anything added to context)
+- [#19909](https://github.com/anthropics/claude-code/issues/19909) — Conversation Lifecycle Hooks for Memory Provider Integration (lists 5 context injection bugs)
+- [#25689](https://github.com/anthropics/claude-code/issues/25689) — Context usage threshold hook event (ContextThreshold at configurable %, blocking support)
+- [#21132](https://github.com/anthropics/claude-code/issues/21132) — Claude clear context for itself (agent-initiated `/clear`)
+- [#18427](https://github.com/anthropics/claude-code/issues/18427) — PostToolUse hooks cannot inject context visible to Claude
+
+**Implication:** nmem can build S4's intelligence (work unit detection, summary generation, pattern recognition) now. The actuators depend on Claude Code platform evolution. In the meantime, S4 operates reactively — detect boundaries, store summaries, inject on the next SessionStart (after user-initiated `/clear`). Full autonomous context control requires either upstream hook improvements or an API-based harness.
+
+**API-based harness alternative:** The Claude API's context editing beta (`clear_tool_uses_20250919`, `clear_thinking_20251015`) provides the full actuator set. An API-based agent harness (instead of Claude Code) would give S4 direct control over context on every turn — no platform dependency. This is a viable path if Claude Code's plugin model remains read-only for context.
+
+### Original S4 concerns (still valid, lower priority)
 
 **Inward-facing (self-model):**
 - Which observations get retrieved vs. ignored? (retrieval feedback loop)
 - Are certain obs_types over-represented in storage but under-used in retrieval? (capture ROI)
-- Are sessions getting shorter or longer on a project? (convergence signal)
 - Do certain file paths appear across many sessions? (hotspot detection)
 
 **Outward-facing (environment model):**
@@ -102,16 +159,9 @@ S4 answers: "what's changing, and how should we adapt?" In nmem's context:
 - Are hook payloads evolving? (upstream format detection)
 
 **Cross-session synthesis:**
-- Cluster related observations into higher-level summaries
-- Detect recurring patterns ("every debugging session on this project touches the same three files")
-- Produce durable insights that outlive individual observations
-
-S4 is where the system transitions from recorder to memory. Without it, nmem captures but doesn't learn. The `syntheses` table is designed (ADR-002 Q3) but not created.
-
-**Activation criteria**: S4 should be earned, not speculated. Implement when:
-- Retrieval quality is demonstrably poor across multiple sessions
-- Volume exceeds where scan-and-rank works (~10K+ observations)
-- Multi-agent networking creates richer content worth semantic analysis
+- Cluster work unit summaries into higher-level patterns
+- Detect recurring themes ("every debugging session on this project touches the same three files")
+- Produce durable insights that outlive individual work units
 
 ## S5 — Policy
 
@@ -133,21 +183,23 @@ A mature S5 would:
 
 | System | State | Gap |
 |--------|-------|-----|
-| S1 Operations | Incomplete | S1's S4 missing — no session summarization |
+| S1 Operations | Functional (S4 partial) | Session summarization v1 done; PreCompact, rolling, FTS5 indexing remain |
 | S2 Coordination | Functional | Multi-agent would stress this |
 | S3 Control | Manual | Needs autonomous triggers |
 | S3* Audit | Minimal | Needs functional integrity checks |
-| S4 Intelligence | Missing | Core gap — no learning, no adaptation |
-| S5 Policy | Static | No tension to resolve without S4 |
+| S4 Intelligence | Designed | Work unit model defined; platform constraints block autonomous actuation |
+| S5 Policy | Static | No tension to resolve without active S4 |
 
-S1 captures facts but can't summarize them. S2 coordinates. S3 exists but doesn't self-trigger. S3* checks structure but not function. S4 is absent. S5 has nothing to mediate. The organism records but doesn't comprehend, regulate, or adapt.
+S1 captures facts and produces end-of-session summaries. S2 coordinates. S3 exists but doesn't self-trigger. S3* checks structure but not function. S4 is designed (work unit detection, context management, UI) but blocked on platform actuation — nmem has eyes but no hands for context control. S5 has nothing to mediate yet. The organism records and compresses, but doesn't yet manage its own attention.
 
 ## What closes the loop
 
-1. **S1's S4 (session summarization)** — highest priority. Complete S1's internal viability by adding its missing intelligence layer. Rolling summaries (per-prompt) and end-of-session summaries, computed from existing observations. May be achievable with structured templates (deterministic) before resorting to LLM (generative). Hook into PreCompact to preserve signal before context compaction. This is the parity gap with claude-mem and the foundation for everything above it.
-2. **S3 autonomy** — post-session hook or timer that checks storage and runs sweeps. The logic exists; wire a trigger.
-3. **S3* functional audits** — track extraction success rate, retrieval hit rate, filter accuracy. Surface in `nmem status`.
-4. **S4 retrieval feedback** — instrument whether context-injected observations appear in the agent's subsequent tool calls. This is the minimum viable learning signal.
-5. **S4 cross-session synthesis** — cluster and summarize across sessions. Depends on per-session summaries existing first.
-6. **Multi-agent S2/S4** — networking, shared memory, cross-agent retrieval. Changes the nature of S2 coordination and gives S4 richer input.
-7. **S5 adaptive policy** — emerges naturally once S3 and S4 are both active and creating tension.
+1. ~~**S1's S4 (session summarization)**~~ — **Done (v1).** End-of-session summarization via local LLM. Remaining sub-gaps (PreCompact, rolling summaries, FTS5 indexing) tracked in TODO.md.
+2. **S4 work unit detection** — highest priority. The core S4 algorithm: recognize work unit boundaries from observation patterns (prompt:thinking:tool ratios, hot files, intent shifts). This is the intelligence that makes nmem a viable system. Implementation is consumer-independent — same algorithm whether actuated via Claude Code hooks or API.
+3. **S4 context actuation** — depends on Claude Code platform evolution (issues #24252, #25689, #21132) or building an API-based harness. Without this, S4 can detect and summarize but not act autonomously on context.
+4. **S4 UI** — work-unit-oriented dashboard. S4's external interface for users. Shows current work unit, history, context health. Same data model as context injection.
+5. **S3 autonomy** — post-session hook or timer that checks storage and runs sweeps. The logic exists; wire a trigger.
+6. **S3* functional audits** — track extraction success rate, retrieval hit rate, filter accuracy. Surface in `nmem status`.
+7. **S4 cross-session synthesis** — cluster work unit summaries into patterns. Depends on work unit detection.
+8. **Multi-agent S2/S4** — networking, shared memory, cross-agent retrieval. Changes the nature of S2 coordination and gives S4 richer input.
+9. **S5 adaptive policy** — emerges naturally once S3 and S4 are both active and creating tension.

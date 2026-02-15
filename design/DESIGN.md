@@ -4,8 +4,9 @@
 
 Also evokes: Mnemosyne (Greek, mn↔nm mirror), n-gram pattern recognition
 
-## Status: Early Design Phase
+## Status: Production (S1 functional, S4 in design)
 Started: 2026-02-08
+Production since: 2026-02-14
 Predecessor: claude-mem (TypeScript/Node plugin)
 
 > **Annotations added 2026-02-08** — storage-layer questions raised by review of ADR-001. Blockquotes are annotations; all original text is preserved.
