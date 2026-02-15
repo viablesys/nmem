@@ -1,4 +1,5 @@
 use crate::db::register_udfs;
+use crate::summarize::SessionSummary;
 use crate::NmemError;
 use rusqlite::{Connection, params};
 
@@ -245,16 +246,72 @@ fn format_table(rows: &[ContextRow], header: &str) -> String {
     out
 }
 
+struct SummaryRow {
+    started_at: i64,
+    summary: SessionSummary,
+}
+
+fn query_summaries(conn: &Connection, project: &str, limit: i64) -> Result<Vec<SummaryRow>, NmemError> {
+    let mut stmt = conn.prepare(
+        "SELECT started_at, summary FROM sessions
+         WHERE project = ?1 AND summary IS NOT NULL
+         ORDER BY started_at DESC LIMIT ?2",
+    )?;
+    let rows = stmt
+        .query_map(params![project, limit], |row| {
+            let started_at: i64 = row.get(0)?;
+            let summary_str: String = row.get(1)?;
+            Ok((started_at, summary_str))
+        })?
+        .filter_map(|r| {
+            let (started_at, summary_str) = r.ok()?;
+            let summary: SessionSummary = serde_json::from_str(&summary_str).ok()?;
+            Some(SummaryRow { started_at, summary })
+        })
+        .collect();
+    Ok(rows)
+}
+
+fn format_summaries(rows: &[SummaryRow]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::from("## Session Summaries\n");
+    for row in rows {
+        let time = format_relative_time(row.started_at);
+        let request = &row.summary.request;
+        if request.is_empty() {
+            continue;
+        }
+        let completed: String = row
+            .summary
+            .completed
+            .iter()
+            .take(3)
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if completed.is_empty() {
+            out.push_str(&format!("- [{time}] **{request}**\n"));
+        } else {
+            out.push_str(&format!("- [{time}] **{request}** — completed: {completed}\n"));
+        }
+    }
+    out
+}
+
 /// Generate context injection markdown for a SessionStart event.
 /// Returns empty string if no observations exist.
 pub fn generate_context(conn: &Connection, project: &str, local_limit: i64, cross_limit: i64) -> Result<String, NmemError> {
     register_udfs(conn)?;
 
     let intent_rows = query_intents(conn, project, 10)?;
+    let summary_rows = query_summaries(conn, project, 5)?;
     let local_rows = query_rows(conn, PROJECT_LOCAL_SQL, project, local_limit)?;
     let cross_rows = query_rows(conn, CROSS_PROJECT_SQL, project, cross_limit)?;
 
-    if intent_rows.is_empty() && local_rows.is_empty() && cross_rows.is_empty() {
+    if intent_rows.is_empty() && summary_rows.is_empty() && local_rows.is_empty() && cross_rows.is_empty() {
         return Ok(String::new());
     }
 
@@ -263,6 +320,12 @@ pub fn generate_context(conn: &Connection, project: &str, local_limit: i64, cros
     let intents = format_intents(&intent_rows);
     if !intents.is_empty() {
         out.push_str(&intents);
+        out.push('\n');
+    }
+
+    let summaries = format_summaries(&summary_rows);
+    if !summaries.is_empty() {
+        out.push_str(&summaries);
         out.push('\n');
     }
 

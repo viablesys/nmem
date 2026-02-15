@@ -17,6 +17,46 @@ pub struct NmemConfig {
     pub retention: RetentionConfig,
     #[serde(default)]
     pub metrics: crate::metrics::MetricsConfig,
+    #[serde(default)]
+    pub summarization: SummarizationConfig,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct SummarizationConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_summarization_endpoint")]
+    pub endpoint: String,
+    #[serde(default = "default_summarization_model")]
+    pub model: String,
+    #[serde(default = "default_summarization_timeout")]
+    pub timeout_secs: u64,
+    #[serde(default)]
+    pub fallback_endpoint: Option<String>,
+}
+
+impl Default for SummarizationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: default_summarization_endpoint(),
+            model: default_summarization_model(),
+            timeout_secs: default_summarization_timeout(),
+            fallback_endpoint: None,
+        }
+    }
+}
+
+fn default_summarization_endpoint() -> String {
+    "http://localhost:1234/v1/chat/completions".into()
+}
+
+fn default_summarization_model() -> String {
+    "ibm/granite-4-h-tiny".into()
+}
+
+fn default_summarization_timeout() -> u64 {
+    30
 }
 
 #[derive(Debug, Deserialize, Default)]

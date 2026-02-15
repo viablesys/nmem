@@ -233,7 +233,7 @@ fn handle_post_tool_use(
     Ok(())
 }
 
-fn handle_stop(conn: &Connection, payload: &HookPayload) -> Result<(), NmemError> {
+fn handle_stop(conn: &Connection, payload: &HookPayload, config: &NmemConfig) -> Result<(), NmemError> {
     let ts = now_ts();
     let tx = conn.unchecked_transaction()?;
 
@@ -268,6 +268,12 @@ fn handle_stop(conn: &Connection, payload: &HookPayload) -> Result<(), NmemError
 
     tx.commit()?;
 
+    // Summarize session — non-fatal
+    match crate::summarize::summarize_session(conn, &payload.session_id, &config.summarization) {
+        Ok(()) => {}
+        Err(e) => eprintln!("nmem: summarization failed (non-fatal): {e}"),
+    }
+
     // WAL checkpoint outside transaction
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
 
@@ -298,7 +304,7 @@ pub fn handle_record(db_path: &Path) -> Result<(), NmemError> {
         "SessionStart" => handle_session_start(&conn, &payload, &config, &project),
         "UserPromptSubmit" => handle_user_prompt(&conn, &payload, &filter),
         "PostToolUse" => handle_post_tool_use(&conn, &payload, &filter),
-        "Stop" => handle_stop(&conn, &payload),
+        "Stop" => handle_stop(&conn, &payload, &config),
         _ => Ok(()),
     };
 

@@ -13,6 +13,7 @@ pub mod record;
 pub mod schema;
 pub mod search;
 pub mod serve;
+pub mod summarize;
 pub mod sweep;
 pub mod status;
 pub mod transcript;
