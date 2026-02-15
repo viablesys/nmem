@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 const SYSTEM_PROMPT: &str =
     "You summarize coding sessions into structured JSON. Return ONLY valid JSON, no markdown, no explanation.";
 
-const USER_PROMPT_TEMPLATE: &str = r#"Summarize this coding session into JSON with these fields:
+const USER_PROMPT_TEMPLATE: &str = r#"Below are observations from a developer's coding session. Summarize what the DEVELOPER did into JSON with these fields:
 
-- "request": One sentence describing the overall goal/task of the session (infer from the pattern of actions)
+- "request": What the developer was trying to accomplish (e.g. "Add session summarization via local LLM" or "Fix broken FTS5 search query"). Infer from the user prompts and pattern of actions, NOT from this instruction.
 - "investigated": Files and code that were read to understand the system
 - "learned": Key technical facts discovered during the session
 - "completed": Concrete actions that were finished successfully
