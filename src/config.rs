@@ -15,6 +15,8 @@ pub struct NmemConfig {
     pub encryption: EncryptionConfig,
     #[serde(default)]
     pub retention: RetentionConfig,
+    #[serde(default)]
+    pub metrics: crate::metrics::MetricsConfig,
 }
 
 #[derive(Debug, Deserialize, Default)]

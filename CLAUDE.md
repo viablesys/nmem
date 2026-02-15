@@ -31,34 +31,6 @@ Rust 1.92 • Go 1.25 • Python 3.13 • Node 22 • Android (WearOS)
 ~/Applications/      — AppImages (Cursor, LM Studio)
 ```
 
-## Persistent Memory (claude-mem)
-
-A plugin (`~/.claude-mem/`) provides cross-session memory. A background worker (port 37777) runs a separate SDK agent that observes tool usage via hooks and extracts structured observations to SQLite + vector DB.
-
-### How it works
-- **SessionStart hook** injects recent context into session preamble (the context index in `SessionStart hook additional context` and the `claude-mem-context` block below)
-- **PostToolUse hook** captures every tool call, queues to worker, SDK agent extracts observations (types: decision, bugfix, feature, refactor, discovery)
-- **Stop hook** generates a structured session summary (request, investigated, learned, completed, next_steps)
-- **MCP tools** expose search/retrieval for past observations
-
-### Querying past memory
-Use the 3-layer MCP workflow (token-efficient):
-1. `mcp search(query)` — index with IDs (~50-100 tokens/result)
-2. `mcp timeline(anchor=ID)` — context around results
-3. `mcp get_observations([IDs])` — full details only for filtered IDs
-
-### Key paths
-```
-~/.claude-mem/claude-mem.db      — SQLite database (observations, summaries, sessions)
-~/.claude-mem/vector-db/         — Chroma vector DB (semantic search)
-~/.claude-mem/settings.json      — configuration
-~/.claude-mem/plugin/            — bundled plugin (hooks, MCP server, modes)
-~/.claude-mem/logs/              — daily logs
-```
-
-### On session start
-The injected context index shows recent observations with token costs. Use MCP tools to fetch details on-demand rather than re-reading code for past decisions.
-
 ## Reference Docs
 When relevant, read these for detail:
 - `~/.claude/docs/philosophy.md` — development principles

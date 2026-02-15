@@ -5,6 +5,7 @@ pub mod db;
 pub mod extract;
 pub mod filter;
 pub mod maintain;
+pub mod metrics;
 pub mod pin;
 pub mod project;
 pub mod purge;

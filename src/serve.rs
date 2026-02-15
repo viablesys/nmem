@@ -121,6 +121,21 @@ fn clamp(val: Option<i64>, default: i64, max: i64) -> i64 {
     val.unwrap_or(default).max(1).min(max)
 }
 
+fn record_query_metrics(tool: &str, start: std::time::Instant) {
+    let meter = opentelemetry::global::meter("nmem");
+    meter
+        .u64_counter("nmem_queries_total")
+        .build()
+        .add(1, &[opentelemetry::KeyValue::new("tool", tool.to_string())]);
+    meter
+        .f64_histogram("nmem_query_duration_seconds")
+        .build()
+        .record(
+            start.elapsed().as_secs_f64(),
+            &[opentelemetry::KeyValue::new("tool", tool.to_string())],
+        );
+}
+
 fn row_to_full_obs(row: &rusqlite::Row) -> rusqlite::Result<FullObservation> {
     let metadata_str: Option<String> = row.get(8)?;
     let metadata = metadata_str.and_then(|s| serde_json::from_str(&s).ok());
@@ -518,7 +533,10 @@ impl NmemServer {
         &self,
         p: Parameters<SearchParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.do_search(p.0)
+        let start = std::time::Instant::now();
+        let result = self.do_search(p.0);
+        record_query_metrics("search", start);
+        result
     }
 
     #[tool(
@@ -529,7 +547,10 @@ impl NmemServer {
         &self,
         p: Parameters<GetObservationsParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.do_get_observations(p.0)
+        let start = std::time::Instant::now();
+        let result = self.do_get_observations(p.0);
+        record_query_metrics("get_observations", start);
+        result
     }
 
     #[tool(
@@ -540,7 +561,10 @@ impl NmemServer {
         &self,
         p: Parameters<TimelineParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.do_timeline(p.0)
+        let start = std::time::Instant::now();
+        let result = self.do_timeline(p.0);
+        record_query_metrics("timeline", start);
+        result
     }
 
     #[tool(
@@ -551,7 +575,10 @@ impl NmemServer {
         &self,
         p: Parameters<RecentContextParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.do_recent_context(p.0)
+        let start = std::time::Instant::now();
+        let result = self.do_recent_context(p.0);
+        record_query_metrics("recent_context", start);
+        result
     }
 }
 
@@ -578,6 +605,9 @@ pub fn handle_serve(db_path: &Path) -> Result<(), NmemError> {
         .map_err(NmemError::Io)?;
 
     rt.block_on(async {
+        let config = crate::config::load_config().unwrap_or_default();
+        let provider = crate::metrics::init_meter_provider(&config.metrics);
+
         eprintln!("nmem: serve starting");
         let service = server
             .serve(stdio())
@@ -588,6 +618,11 @@ pub fn handle_serve(db_path: &Path) -> Result<(), NmemError> {
             .await
             .map_err(|e| NmemError::Config(format!("mcp: {e}")))?;
         eprintln!("nmem: serve stopped");
+
+        if let Some(p) = provider {
+            let _ = p.shutdown();
+        }
+
         Ok(())
     })
 }

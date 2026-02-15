@@ -275,6 +275,8 @@ fn handle_stop(conn: &Connection, payload: &HookPayload) -> Result<(), NmemError
 }
 
 pub fn handle_record(db_path: &Path) -> Result<(), NmemError> {
+    let start = std::time::Instant::now();
+
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
 
@@ -292,11 +294,93 @@ pub fn handle_record(db_path: &Path) -> Result<(), NmemError> {
     let params = resolve_filter_params(&config, Some(&project));
     let filter = SecretFilter::with_params(params);
 
-    match payload.hook_event_name.as_str() {
+    let result = match payload.hook_event_name.as_str() {
         "SessionStart" => handle_session_start(&conn, &payload, &config, &project),
         "UserPromptSubmit" => handle_user_prompt(&conn, &payload, &filter),
         "PostToolUse" => handle_post_tool_use(&conn, &payload, &filter),
         "Stop" => handle_stop(&conn, &payload),
         _ => Ok(()),
+    };
+
+    // Metrics export — non-fatal
+    if config.metrics.enabled {
+        record_metrics(&config, &payload, &project, result.is_ok(), start);
+    }
+
+    result
+}
+
+fn record_metrics(
+    config: &NmemConfig,
+    payload: &HookPayload,
+    project: &str,
+    success: bool,
+    start: std::time::Instant,
+) {
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("nmem: metrics runtime: {e}");
+            return;
+        }
+    };
+
+    let provider = match rt.block_on(async {
+        crate::metrics::init_meter_provider(&config.metrics)
+    }) {
+        Some(p) => p,
+        None => return,
+    };
+
+    let meter = opentelemetry::global::meter("nmem");
+
+    if success {
+        use opentelemetry::KeyValue;
+        match payload.hook_event_name.as_str() {
+            "SessionStart" => {
+                meter
+                    .u64_counter("nmem_sessions_total")
+                    .build()
+                    .add(1, &[KeyValue::new("project", project.to_string())]);
+            }
+            "UserPromptSubmit" => {
+                meter
+                    .u64_counter("nmem_prompts_total")
+                    .build()
+                    .add(1, &[KeyValue::new("project", project.to_string())]);
+            }
+            "PostToolUse" => {
+                let obs_type = classify_tool(payload.tool_name.as_deref().unwrap_or(""));
+                meter.u64_counter("nmem_observations_total").build().add(
+                    1,
+                    &[
+                        KeyValue::new("obs_type", obs_type),
+                        KeyValue::new("project", project.to_string()),
+                        KeyValue::new(
+                            "tool_name",
+                            payload
+                                .tool_name
+                                .as_deref()
+                                .unwrap_or("")
+                                .to_string(),
+                        ),
+                    ],
+                );
+            }
+            _ => {}
+        }
+    }
+
+    meter
+        .f64_histogram("nmem_record_duration_seconds")
+        .build()
+        .record(start.elapsed().as_secs_f64(), &[]);
+
+    if let Err(e) = provider.shutdown() {
+        eprintln!("nmem: metrics shutdown: {e}");
     }
 }
