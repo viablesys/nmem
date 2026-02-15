@@ -2,8 +2,9 @@ use rusqlite_migration::{M, Migrations};
 use std::sync::LazyLock;
 
 pub static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
-    Migrations::new(vec![M::up(
-        "
+    Migrations::new(vec![
+        M::up(
+            "
 CREATE TABLE sessions (
     id          TEXT PRIMARY KEY,
     project     TEXT NOT NULL,
@@ -78,7 +79,11 @@ CREATE TRIGGER prompts_ad AFTER DELETE ON prompts BEGIN
         VALUES('delete', old.id, old.content);
 END;
 ",
-    )])
+        ),
+        M::up(
+            "ALTER TABLE observations ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;",
+        ),
+    ])
 });
 
 #[cfg(test)]

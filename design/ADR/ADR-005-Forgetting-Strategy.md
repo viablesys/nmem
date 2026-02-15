@@ -357,9 +357,9 @@ WAL frame persistence is a separate concern. After a secure purge, run `PRAGMA w
 
 ## Open Questions
 
-### Q1: Should retention protect "landmark" observations regardless of type?
+### Q1: Should retention protect "landmark" observations regardless of type? — RESOLVED
 
-Some observations are landmarks — first session in a new project, first error in a debugging arc, the observation that resolved a long-running issue. These have disproportionate retrieval value but no structural marker distinguishing them from ordinary observations of the same type. Should there be an `is_pinned` flag that exempts observations from retention sweeps? If so, who sets it — the user explicitly, or nmem's S4 when it identifies patterns?
+> **[RESOLVED 2026-02-14, v4.0]:** Yes. An `is_pinned INTEGER NOT NULL DEFAULT 0` column was added to the `observations` table via schema migration. `nmem pin <id>` / `nmem unpin <id>` CLI commands set the flag. Pinned observations are exempt from retention sweeps (`AND is_pinned = 0` in DELETE queries). Purge remains the explicit escape valve — it deletes regardless of pin status. Pin status is exposed in search results (`is_pinned` field in JSON output) and MCP serve responses. Status output shows pinned count when > 0. Initial implementation is user-explicit only; S4 auto-pinning deferred to future work.
 
 ### Q2: Does the purge command need dry-run output?
 
@@ -414,3 +414,4 @@ Do **not** enable retention preemptively. The cost of keeping too much data is l
 | 2026-02-14 | 1.3 | Annotated with live production data. Volume estimates revised to ~585K records/year (~652 MB). Thinking blocks identified as prime retention candidates (84% of content, low reuse). Position C activation timeline shortened to year-1. |
 | 2026-02-14 | 2.0 | **Implemented.** `nmem purge` subcommand shipped in `src/purge.rs`. All 7 filter flags from spec implemented (`--before`, `--project`, `--session`, `--id`, `--type`/`--older-than`, `--search`). Confirmation via `--confirm` flag (no interactive stdin). Secure deletion: `PRAGMA secure_delete = ON`, `incremental_vacuum`, FTS5 rebuild >1000 rows, WAL checkpoint. FK-safe deletion order: observations → prompts → _cursor → sessions. Orphan cleanup for non-session/project modes. 9 integration tests, all passing. |
 | 2026-02-14 | 3.0 | **Retention sweeps implemented.** Position C (type-aware retention) activated. `src/sweep.rs` new module. Two entry points: `nmem maintain --sweep` (explicit) and opportunistic trigger on SessionStart (threshold: 100+ old observations). `RetentionConfig` in `src/config.rs` with default days from ADR policy table. Syntheses guard via `sqlite_master` check. `cleanup_orphans`/`post_purge_maintenance` made pub for reuse. 4 unit + 3 integration tests. |
+| 2026-02-14 | 4.0 | **Observation pinning implemented.** Q1 resolved. Schema migration adds `is_pinned INTEGER NOT NULL DEFAULT 0` to observations. `nmem pin <id>` / `nmem unpin <id>` CLI commands. Sweep queries guard with `AND is_pinned = 0`. Purge ignores pin status (escape valve). Pin status in search/serve JSON output. Status shows pinned count. New module `src/pin.rs`. 7 integration + 2 serve integration + 1 unit test. |

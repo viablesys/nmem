@@ -28,6 +28,10 @@ pub enum Command {
     Search(SearchArgs),
     /// Encrypt the database (migrate from unencrypted to SQLCipher)
     Encrypt,
+    /// Pin an observation (exempt from retention sweeps)
+    Pin(PinArgs),
+    /// Unpin an observation (restore to normal retention)
+    Unpin(PinArgs),
 }
 
 #[derive(Parser)]
@@ -89,6 +93,12 @@ pub struct SearchArgs {
     /// Output observation IDs only (one per line)
     #[arg(long)]
     pub ids: bool,
+}
+
+#[derive(Parser)]
+pub struct PinArgs {
+    /// Observation ID
+    pub id: i64,
 }
 
 #[derive(Parser)]

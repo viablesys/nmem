@@ -54,6 +54,15 @@ pub fn handle_status(db_path: &Path) -> Result<(), NmemError> {
         eprintln!("nmem: observations — {obs_count} ({0})", parts.join(", "));
     }
 
+    let pinned: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM observations WHERE is_pinned = 1",
+        [],
+        |r| r.get(0),
+    )?;
+    if pinned > 0 {
+        eprintln!("nmem: pinned — {pinned}");
+    }
+
     eprintln!("nmem: prompts — {prompt_count}");
     eprintln!("nmem: sessions — {session_count}");
 

@@ -355,6 +355,67 @@ fn recent_context_empty_project() {
     }
 }
 
+// --- pin tests ---
+
+#[test]
+fn search_includes_is_pinned() {
+    let server = make_server();
+
+    // Pin observation 2 directly via SQL
+    {
+        let db = server.db_handle().lock().unwrap();
+        db.execute("UPDATE observations SET is_pinned = 1 WHERE id = 2", [])
+            .unwrap();
+    }
+
+    let result = server
+        .do_search(SearchParams {
+            query: "auth".into(),
+            project: None,
+            obs_type: None,
+            limit: None,
+            offset: None,
+        })
+        .unwrap();
+
+    let arr = result_json(&result);
+    let items = arr.as_array().unwrap();
+    // Find the pinned one (id=2)
+    let pinned_item = items.iter().find(|o| o["id"] == 2);
+    assert!(pinned_item.is_some(), "should find observation 2");
+    assert_eq!(pinned_item.unwrap()["is_pinned"], true);
+
+    // Find an unpinned one
+    let unpinned_item = items.iter().find(|o| o["id"] != 2);
+    if let Some(item) = unpinned_item {
+        assert_eq!(item["is_pinned"], false);
+    }
+}
+
+#[test]
+fn get_observations_includes_is_pinned() {
+    let server = make_server();
+
+    // Pin observation 1 directly via SQL
+    {
+        let db = server.db_handle().lock().unwrap();
+        db.execute("UPDATE observations SET is_pinned = 1 WHERE id = 1", [])
+            .unwrap();
+    }
+
+    let result = server
+        .do_get_observations(GetObservationsParams { ids: vec![1, 3] })
+        .unwrap();
+
+    let arr = result_json(&result);
+    let items = arr.as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["id"], 1);
+    assert_eq!(items[0]["is_pinned"], true);
+    assert_eq!(items[1]["id"], 3);
+    assert_eq!(items[1]["is_pinned"], false);
+}
+
 // --- scored context tests ---
 
 /// Create a test DB with timestamps relative to `now` for scoring tests.

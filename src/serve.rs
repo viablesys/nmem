@@ -80,6 +80,7 @@ struct SearchResult {
     content_preview: String,
     file_path: Option<String>,
     session_id: String,
+    is_pinned: bool,
 }
 
 #[derive(Serialize)]
@@ -93,6 +94,7 @@ struct FullObservation {
     file_path: Option<String>,
     content: String,
     metadata: Option<serde_json::Value>,
+    is_pinned: bool,
 }
 
 #[derive(Serialize)]
@@ -147,6 +149,7 @@ fn row_to_full_obs(row: &rusqlite::Row) -> rusqlite::Result<FullObservation> {
         file_path: row.get(6)?,
         content: row.get(7)?,
         metadata,
+        is_pinned: row.get::<_, i64>(9)? != 0,
     })
 }
 
@@ -161,6 +164,7 @@ struct ScoredObservation {
     file_path: Option<String>,
     content: String,
     metadata: Option<serde_json::Value>,
+    is_pinned: bool,
     score: f64,
 }
 
@@ -177,7 +181,8 @@ fn row_to_scored_obs(row: &rusqlite::Row) -> rusqlite::Result<ScoredObservation>
         file_path: row.get(6)?,
         content: row.get(7)?,
         metadata,
-        score: row.get(9)?,
+        is_pinned: row.get::<_, i64>(9)? != 0,
+        score: row.get(10)?,
     })
 }
 
@@ -194,7 +199,7 @@ impl NmemServer {
             .prepare(
                 "SELECT o.id, o.timestamp, o.obs_type,
                         SUBSTR(o.content, 1, 120) AS content_preview,
-                        o.file_path, o.session_id
+                        o.file_path, o.session_id, o.is_pinned
                  FROM observations o
                  JOIN sessions s ON o.session_id = s.id
                  JOIN observations_fts f ON o.id = f.rowid
@@ -217,6 +222,7 @@ impl NmemServer {
                         content_preview: row.get(3)?,
                         file_path: row.get(4)?,
                         session_id: row.get(5)?,
+                        is_pinned: row.get::<_, i64>(6)? != 0,
                     })
                 },
             )
@@ -264,7 +270,7 @@ impl NmemServer {
             .collect();
         let sql = format!(
             "SELECT o.id, o.timestamp, o.session_id, o.obs_type, o.source_event,
-                    o.tool_name, o.file_path, o.content, o.metadata
+                    o.tool_name, o.file_path, o.content, o.metadata, o.is_pinned
              FROM observations o
              WHERE o.id IN ({})
              ORDER BY CASE o.id {} END",
@@ -304,7 +310,7 @@ impl NmemServer {
         let anchor: FullObservation = db
             .query_row(
                 "SELECT id, timestamp, session_id, obs_type, source_event,
-                        tool_name, file_path, content, metadata
+                        tool_name, file_path, content, metadata, is_pinned
                  FROM observations WHERE id = ?1",
                 rusqlite::params![params.anchor],
                 row_to_full_obs,
@@ -323,7 +329,7 @@ impl NmemServer {
         let mut before_stmt = db
             .prepare(
                 "SELECT id, timestamp, session_id, obs_type, source_event,
-                        tool_name, file_path, content, metadata
+                        tool_name, file_path, content, metadata, is_pinned
                  FROM observations
                  WHERE session_id = ?1 AND id < ?2
                  ORDER BY id DESC
@@ -344,7 +350,7 @@ impl NmemServer {
         let mut after_stmt = db
             .prepare(
                 "SELECT id, timestamp, session_id, obs_type, source_event,
-                        tool_name, file_path, content, metadata
+                        tool_name, file_path, content, metadata, is_pinned
                  FROM observations
                  WHERE session_id = ?1 AND id > ?2
                  ORDER BY id ASC
@@ -382,7 +388,7 @@ impl NmemServer {
         let results: Vec<ScoredObservation> = if params.project.is_some() {
             let sql = "WITH scored AS (
                 SELECT o.id, o.timestamp, o.session_id, o.obs_type, o.source_event,
-                       o.tool_name, o.file_path, o.content, o.metadata,
+                       o.tool_name, o.file_path, o.content, o.metadata, o.is_pinned,
                        exp_decay(
                            (unixepoch('now') - o.timestamp) / 86400.0, 7.0
                        ) AS recency,
@@ -405,7 +411,7 @@ impl NmemServer {
                 FROM scored
             )
             SELECT id, timestamp, session_id, obs_type, source_event,
-                   tool_name, file_path, content, metadata, score
+                   tool_name, file_path, content, metadata, is_pinned, score
             FROM ranked WHERE rn = 1
             ORDER BY score DESC
             LIMIT ?2";
@@ -421,7 +427,7 @@ impl NmemServer {
         } else {
             let sql = "WITH scored AS (
                 SELECT o.id, o.timestamp, o.session_id, o.obs_type, o.source_event,
-                       o.tool_name, o.file_path, o.content, o.metadata,
+                       o.tool_name, o.file_path, o.content, o.metadata, o.is_pinned,
                        exp_decay(
                            (unixepoch('now') - o.timestamp) / 86400.0, 7.0
                        ) AS recency,
@@ -442,7 +448,7 @@ impl NmemServer {
                 FROM scored
             )
             SELECT id, timestamp, session_id, obs_type, source_event,
-                   tool_name, file_path, content, metadata, score
+                   tool_name, file_path, content, metadata, is_pinned, score
             FROM ranked WHERE rn = 1
             ORDER BY score DESC
             LIMIT ?1";

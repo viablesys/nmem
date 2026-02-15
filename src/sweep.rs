@@ -48,12 +48,14 @@ pub fn run_sweep(conn: &Connection, config: &RetentionConfig) -> Result<SweepRes
         let deleted = if has_syntheses {
             tx.execute(
                 "DELETE FROM observations WHERE obs_type = ?1 AND timestamp < ?2
+                 AND is_pinned = 0
                  AND id NOT IN (SELECT value FROM syntheses, json_each(syntheses.source_obs_ids))",
                 params![obs_type, cutoff],
             )?
         } else {
             tx.execute(
-                "DELETE FROM observations WHERE obs_type = ?1 AND timestamp < ?2",
+                "DELETE FROM observations WHERE obs_type = ?1 AND timestamp < ?2
+                 AND is_pinned = 0",
                 params![obs_type, cutoff],
             )?
         };
@@ -183,6 +185,57 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM observations", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn sweep_skips_pinned() {
+        let (_dir, conn) = setup_db();
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // Two old observations
+        insert_obs(&conn, "file_read", now - 200 * 86400);
+        insert_obs(&conn, "file_read", now - 200 * 86400);
+
+        // Pin the first one
+        let first_id: i64 = conn
+            .query_row(
+                "SELECT id FROM observations ORDER BY id LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "UPDATE observations SET is_pinned = 1 WHERE id = ?1",
+            [first_id],
+        )
+        .unwrap();
+
+        let config = RetentionConfig {
+            enabled: true,
+            days: HashMap::from([("file_read".into(), 90)]),
+        };
+
+        let result = run_sweep(&conn, &config).unwrap();
+        assert_eq!(result.deleted, 1);
+
+        // Pinned observation survives
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM observations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 1);
+
+        let pinned: i64 = conn
+            .query_row(
+                "SELECT is_pinned FROM observations WHERE id = ?1",
+                [first_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pinned, 1);
     }
 
     #[test]

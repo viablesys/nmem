@@ -12,6 +12,7 @@ struct SearchResult {
     content_preview: String,
     file_path: Option<String>,
     session_id: String,
+    is_pinned: bool,
 }
 
 #[derive(Serialize)]
@@ -25,6 +26,7 @@ struct FullObservation {
     file_path: Option<String>,
     content: String,
     metadata: Option<serde_json::Value>,
+    is_pinned: bool,
 }
 
 pub fn handle_search(db_path: &Path, args: &SearchArgs) -> Result<(), NmemError> {
@@ -52,7 +54,7 @@ fn print_index(
     let mut stmt = conn.prepare(
         "SELECT o.id, o.timestamp, o.obs_type,
                 SUBSTR(o.content, 1, 120) AS content_preview,
-                o.file_path, o.session_id
+                o.file_path, o.session_id, o.is_pinned
          FROM observations o
          JOIN sessions s ON o.session_id = s.id
          JOIN observations_fts f ON o.id = f.rowid
@@ -74,6 +76,7 @@ fn print_index(
                     content_preview: row.get(3)?,
                     file_path: row.get(4)?,
                     session_id: row.get(5)?,
+                    is_pinned: row.get::<_, i64>(6)? != 0,
                 })
             },
         )?
@@ -94,7 +97,7 @@ fn print_full(
 ) -> Result<(), NmemError> {
     let mut stmt = conn.prepare(
         "SELECT o.id, o.timestamp, o.session_id, o.obs_type, o.source_event,
-                o.tool_name, o.file_path, o.content, o.metadata
+                o.tool_name, o.file_path, o.content, o.metadata, o.is_pinned
          FROM observations o
          JOIN sessions s ON o.session_id = s.id
          JOIN observations_fts f ON o.id = f.rowid
@@ -121,6 +124,7 @@ fn print_full(
                     file_path: row.get(6)?,
                     content: row.get(7)?,
                     metadata,
+                    is_pinned: row.get::<_, i64>(9)? != 0,
                 })
             },
         )?

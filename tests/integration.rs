@@ -945,6 +945,177 @@ fn search_no_db() {
         .failure();
 }
 
+// --- Pin tests ---
+
+#[test]
+fn pin_observation() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    session_start(&db, "pin-1");
+    post_tool_use(&db, "pin-1", "Read", r#"{"file_path":"/src/a.rs"}"#);
+
+    let obs = query_db(&db, "SELECT id FROM observations");
+    let id = &obs[0][0];
+
+    nmem_cmd(&db)
+        .args(["pin", id])
+        .assert()
+        .success();
+
+    let pinned = query_db(&db, &format!("SELECT is_pinned FROM observations WHERE id = {id}"));
+    assert_eq!(pinned[0][0], "1");
+}
+
+#[test]
+fn unpin_observation() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    session_start(&db, "unpin-1");
+    post_tool_use(&db, "unpin-1", "Read", r#"{"file_path":"/src/a.rs"}"#);
+
+    let obs = query_db(&db, "SELECT id FROM observations");
+    let id = &obs[0][0];
+
+    // Pin then unpin
+    nmem_cmd(&db).args(["pin", id]).assert().success();
+    nmem_cmd(&db).args(["unpin", id]).assert().success();
+
+    let pinned = query_db(&db, &format!("SELECT is_pinned FROM observations WHERE id = {id}"));
+    assert_eq!(pinned[0][0], "0");
+}
+
+#[test]
+fn pin_nonexistent_fails() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    session_start(&db, "pin-ne");
+
+    nmem_cmd(&db)
+        .args(["pin", "99999"])
+        .assert()
+        .failure();
+}
+
+#[test]
+#[allow(deprecated)]
+fn sweep_skips_pinned() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+    let config_path = dir.path().join("config.toml");
+
+    std::fs::write(
+        &config_path,
+        r#"
+[retention]
+enabled = true
+
+[retention.days]
+file_read = 0
+"#,
+    )
+    .unwrap();
+
+    session_start(&db, "sw-pin");
+    post_tool_use(&db, "sw-pin", "Read", r#"{"file_path":"/src/a.rs"}"#);
+    post_tool_use(&db, "sw-pin", "Read", r#"{"file_path":"/src/b.rs"}"#);
+
+    // Pin the first observation
+    let obs = query_db(&db, "SELECT id FROM observations ORDER BY id");
+    let pinned_id = &obs[0][0];
+    nmem_cmd(&db).args(["pin", pinned_id]).assert().success();
+
+    assert_eq!(query_db(&db, "SELECT COUNT(*) FROM observations")[0][0], "2");
+
+    // Run sweep — should delete only the unpinned one
+    let mut cmd = Command::cargo_bin("nmem").unwrap();
+    cmd.env("NMEM_DB", &db)
+        .env("NMEM_CONFIG", &config_path)
+        .args(["maintain", "--sweep"])
+        .assert()
+        .success();
+
+    let remaining = query_db(&db, "SELECT id, is_pinned FROM observations");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0][0], *pinned_id);
+    assert_eq!(remaining[0][1], "1");
+}
+
+#[test]
+fn purge_deletes_pinned() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    session_start(&db, "purge-pin");
+    post_tool_use(&db, "purge-pin", "Read", r#"{"file_path":"/src/a.rs"}"#);
+
+    let obs = query_db(&db, "SELECT id FROM observations");
+    let id = &obs[0][0];
+
+    // Pin it
+    nmem_cmd(&db).args(["pin", id]).assert().success();
+    assert_eq!(
+        query_db(&db, &format!("SELECT is_pinned FROM observations WHERE id = {id}"))[0][0],
+        "1"
+    );
+
+    // Purge by ID with --confirm — should delete regardless of pin
+    nmem_cmd(&db)
+        .args(["purge", "--id", id, "--confirm"])
+        .assert()
+        .success();
+
+    assert_eq!(query_db(&db, "SELECT COUNT(*) FROM observations")[0][0], "0");
+}
+
+#[test]
+fn search_shows_pin_status() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    session_start(&db, "srch-pin");
+    post_tool_use(&db, "srch-pin", "Bash", r#"{"command":"cargo test"}"#);
+
+    let obs = query_db(&db, "SELECT id FROM observations");
+    let id = &obs[0][0];
+
+    nmem_cmd(&db).args(["pin", id]).assert().success();
+
+    let out = nmem_cmd(&db)
+        .args(["search", "cargo"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    let results: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["is_pinned"], true);
+}
+
+#[test]
+fn search_full_shows_pin_status() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    session_start(&db, "srch-fpin");
+    post_tool_use(&db, "srch-fpin", "Bash", r#"{"command":"cargo build"}"#);
+
+    let obs = query_db(&db, "SELECT id FROM observations");
+    let id = &obs[0][0];
+
+    nmem_cmd(&db).args(["pin", id]).assert().success();
+
+    let out = nmem_cmd(&db)
+        .args(["search", "cargo", "--full"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    let results: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["is_pinned"], true);
+}
+
 // --- Status tests ---
 
 #[test]
