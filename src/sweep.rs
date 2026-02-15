@@ -29,10 +29,12 @@ pub fn run_sweep(conn: &Connection, config: &RetentionConfig) -> Result<SweepRes
         });
     }
 
+    // +1 so retention of 0 days includes records written this second
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs() as i64;
+        .as_secs() as i64
+        + 1;
 
     let has_syntheses = has_syntheses_table(conn);
     let tx = conn.unchecked_transaction()?;
