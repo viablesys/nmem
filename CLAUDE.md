@@ -26,6 +26,7 @@ Rust 1.92 • Go 1.25 • Python 3.13 • Node 22 • Android (WearOS)
 
 ## Key Paths
 ```
+~/workspace/         
 ~/dev/viablesys/     — github repos
 ~/Android/Sdk/       — Android SDK + adb
 ~/Applications/      — AppImages (Cursor, LM Studio)
