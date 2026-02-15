@@ -166,11 +166,21 @@ Recent observations for the current working context. MCP equivalent of SessionSt
 | `project` | string | no | current project | Project scope. |
 | `limit` | integer | no | 30 | Max observations. Capped at 100. |
 
-**Returns:** JSON array of recent observations (full schema), newest first. Selection:
+**Returns:** JSON array of observations ranked by composite score (highest first). Each object includes all ADR-002 schema fields plus a `score` field (float). Selection:
 
-1. Most recent project-local observations by `timestamp DESC`.
-2. Cross-project backfill if project has fewer than `limit` results.
-3. Deduplicated by `file_path` where `file_path IS NOT NULL` (keep most recent per path). Observations with NULL `file_path` (commands, errors, prompts) are never deduplicated — each is unique context.
+1. **Composite scoring** — three signals, no BM25 (no text query):
+   ```
+   score = recency * W_r + type_weight * W_t + project_match * W_p
+   ```
+   With project specified: `W_r=0.5, W_t=0.3, W_p=0.2`. Without project: `W_r=0.6, W_t=0.4` (project signal dropped).
+
+2. **Recency** — exponential decay with 7-day half-life: `exp(-ln(2) * age_days / 7.0)`. Values: 1.0 (now), 0.5 (7d), 0.25 (14d), 0.125 (21d). Implemented as a SQLite UDF (`exp_decay`).
+
+3. **Type weight** — normalized to 0..1: `file_edit`=1.0, `command`=0.67, `session_compact`=0.5, `mcp_call`=0.33, all others=0.17.
+
+4. **Project match** — binary boost: same project=1.0, different project=0.3. When `project` is specified, cross-project observations still appear but rank lower (boost, not filter).
+
+5. Deduplicated by `file_path` where `file_path IS NOT NULL` (keep highest-scored per path). Observations with NULL `file_path` (commands, errors, prompts) are never deduplicated — each is unique context.
 
 ### Error Handling
 
@@ -247,6 +257,8 @@ FTS5 BM25 ranks by term relevance, not recency. Options: BM25 only (consumer ass
 
 **If needed later:** `sqlite-retrieval-patterns.md` § 2 documents exponential time-decay blending with BM25 via a CTE-based composite score: `(0.7 * bm25_norm) + (0.3 * recency_score)`. This can be dropped into the `search` SQL sketch without schema changes — only the ORDER BY clause changes. The `orderBy` parameter (already in the MCP tool spec) could accept `"relevance"` (BM25 only, default) or `"blended"` (BM25 + recency).
 
+> **[ANNOTATION 2026-02-14, v2.0]:** Recency weighting is now implemented for `recent_context` (composite scoring with `exp_decay` UDF). The `search` tool remains BM25-only — recency blending for `search` can reuse the same `exp_decay` UDF if needed later.
+
 ### Q2: Should context injection be configurable per project?
 
 Some projects may want more or fewer injected observations, or suppress cross-project context. S5 (policy) concern. Defer until configuration strategy is decided.
@@ -290,3 +302,4 @@ Some projects may want more or fewer injected observations, or suppress cross-pr
 | 2026-02-14 | 1.1 | Refined. FTS5 rank ordering clarified. recent_context dedup scoped to non-NULL file_path. Token budget noted as approximate. MCP error handling table added. Timeline missing-anchor behavior specified. |
 | 2026-02-14 | 1.2 | Refined with library topics. Q1 recency weighting linked to sqlite-retrieval-patterns.md composite scoring. SQL sketch references to fts5.md. References: rusqlite.md, fts5.md, sqlite-retrieval-patterns.md, serde-json.md, ADR-004. |
 | 2026-02-14 | 1.3 | Annotated with live data. Added recovery mode to injection contract (compact/clear get expanded limits). Noted that 56% of user intents are zero-action conversational turns — context injection should weight intents-with-actions higher. |
+| 2026-02-14 | 2.0 | **Composite scoring for `recent_context`.** Replaced `ORDER BY timestamp DESC` with multi-signal scoring: recency decay (7d half-life via `exp_decay` UDF), type weight (file_edit > command > session_compact > mcp_call > file_read), project match (boost, not filter). Dedup now keeps highest-scored per file_path. Response adds `score` field (`ScoredObservation`). Added `functions` feature to rusqlite. 5 new integration tests. |

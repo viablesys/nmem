@@ -102,6 +102,24 @@ struct TimelineResult {
     after: Vec<FullObservation>,
 }
 
+// --- UDF registration ---
+
+pub fn register_udfs(conn: &Connection) -> rusqlite::Result<()> {
+    conn.create_scalar_function(
+        "exp_decay",
+        2,
+        rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let age: f64 = ctx.get(0)?;
+            let half_life: f64 = ctx.get(1)?;
+            if half_life <= 0.0 {
+                return Ok(0.0f64);
+            }
+            Ok((-std::f64::consts::LN_2 * age / half_life).exp())
+        },
+    )
+}
+
 // --- Helpers ---
 
 fn db_err(e: &impl std::fmt::Display) -> ErrorData {
@@ -129,6 +147,37 @@ fn row_to_full_obs(row: &rusqlite::Row) -> rusqlite::Result<FullObservation> {
         file_path: row.get(6)?,
         content: row.get(7)?,
         metadata,
+    })
+}
+
+#[derive(Serialize)]
+struct ScoredObservation {
+    id: i64,
+    timestamp: i64,
+    session_id: String,
+    obs_type: String,
+    source_event: String,
+    tool_name: Option<String>,
+    file_path: Option<String>,
+    content: String,
+    metadata: Option<serde_json::Value>,
+    score: f64,
+}
+
+fn row_to_scored_obs(row: &rusqlite::Row) -> rusqlite::Result<ScoredObservation> {
+    let metadata_str: Option<String> = row.get(8)?;
+    let metadata = metadata_str.and_then(|s| serde_json::from_str(&s).ok());
+    Ok(ScoredObservation {
+        id: row.get(0)?,
+        timestamp: row.get(1)?,
+        session_id: row.get(2)?,
+        obs_type: row.get(3)?,
+        source_event: row.get(4)?,
+        tool_name: row.get(5)?,
+        file_path: row.get(6)?,
+        content: row.get(7)?,
+        metadata,
+        score: row.get(9)?,
     })
 }
 
@@ -330,49 +379,76 @@ impl NmemServer {
 
         let db = self.db.lock().map_err(|e| db_err(&e))?;
 
-        let sql = if params.project.is_some() {
-            "WITH ranked AS (
-                SELECT o.*,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY COALESCE(o.file_path, CAST(o.id AS TEXT))
-                           ORDER BY o.timestamp DESC
-                       ) AS rn
+        let results: Vec<ScoredObservation> = if params.project.is_some() {
+            let sql = "WITH scored AS (
+                SELECT o.id, o.timestamp, o.session_id, o.obs_type, o.source_event,
+                       o.tool_name, o.file_path, o.content, o.metadata,
+                       exp_decay(
+                           (unixepoch('now') - o.timestamp) / 86400.0, 7.0
+                       ) AS recency,
+                       CASE o.obs_type
+                           WHEN 'file_edit' THEN 1.0 WHEN 'command' THEN 0.67
+                           WHEN 'session_compact' THEN 0.5 WHEN 'mcp_call' THEN 0.33
+                           ELSE 0.17
+                       END AS type_w,
+                       CASE WHEN s.project = ?1 THEN 1.0 ELSE 0.3 END AS proj_w
                 FROM observations o
                 JOIN sessions s ON o.session_id = s.id
-                WHERE s.project = ?1
-            )
-            SELECT id, timestamp, session_id, obs_type, source_event,
-                   tool_name, file_path, content, metadata
-            FROM ranked
-            WHERE rn = 1
-            ORDER BY timestamp DESC
-            LIMIT ?2"
-        } else {
-            "WITH ranked AS (
-                SELECT o.*,
+            ),
+            ranked AS (
+                SELECT *,
+                       (recency * 0.5 + type_w * 0.3 + proj_w * 0.2) AS score,
                        ROW_NUMBER() OVER (
-                           PARTITION BY COALESCE(o.file_path, CAST(o.id AS TEXT))
-                           ORDER BY o.timestamp DESC
+                           PARTITION BY COALESCE(file_path, CAST(id AS TEXT))
+                           ORDER BY (recency * 0.5 + type_w * 0.3 + proj_w * 0.2) DESC
                        ) AS rn
-                FROM observations o
+                FROM scored
             )
             SELECT id, timestamp, session_id, obs_type, source_event,
-                   tool_name, file_path, content, metadata
-            FROM ranked
-            WHERE rn = 1
-            ORDER BY timestamp DESC
-            LIMIT ?1"
-        };
+                   tool_name, file_path, content, metadata, score
+            FROM ranked WHERE rn = 1
+            ORDER BY score DESC
+            LIMIT ?2";
 
-        let results: Vec<FullObservation> = if params.project.is_some() {
             let mut stmt = db.prepare(sql).map_err(|e| db_err(&e))?;
-            stmt.query_map(rusqlite::params![params.project, limit], row_to_full_obs)
-                .map_err(|e| db_err(&e))?
-                .collect::<Result<_, _>>()
-                .map_err(|e| db_err(&e))?
+            stmt.query_map(
+                rusqlite::params![params.project, limit],
+                row_to_scored_obs,
+            )
+            .map_err(|e| db_err(&e))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| db_err(&e))?
         } else {
+            let sql = "WITH scored AS (
+                SELECT o.id, o.timestamp, o.session_id, o.obs_type, o.source_event,
+                       o.tool_name, o.file_path, o.content, o.metadata,
+                       exp_decay(
+                           (unixepoch('now') - o.timestamp) / 86400.0, 7.0
+                       ) AS recency,
+                       CASE o.obs_type
+                           WHEN 'file_edit' THEN 1.0 WHEN 'command' THEN 0.67
+                           WHEN 'session_compact' THEN 0.5 WHEN 'mcp_call' THEN 0.33
+                           ELSE 0.17
+                       END AS type_w
+                FROM observations o
+            ),
+            ranked AS (
+                SELECT *,
+                       (recency * 0.6 + type_w * 0.4) AS score,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY COALESCE(file_path, CAST(id AS TEXT))
+                           ORDER BY (recency * 0.6 + type_w * 0.4) DESC
+                       ) AS rn
+                FROM scored
+            )
+            SELECT id, timestamp, session_id, obs_type, source_event,
+                   tool_name, file_path, content, metadata, score
+            FROM ranked WHERE rn = 1
+            ORDER BY score DESC
+            LIMIT ?1";
+
             let mut stmt = db.prepare(sql).map_err(|e| db_err(&e))?;
-            stmt.query_map(rusqlite::params![limit], row_to_full_obs)
+            stmt.query_map(rusqlite::params![limit], row_to_scored_obs)
                 .map_err(|e| db_err(&e))?
                 .collect::<Result<_, _>>()
                 .map_err(|e| db_err(&e))?
@@ -392,6 +468,10 @@ impl NmemServer {
             db,
             tool_router: Self::tool_router(),
         }
+    }
+
+    pub fn db_handle(&self) -> &DbHandle {
+        &self.db
     }
 
     #[tool(
@@ -428,7 +508,7 @@ impl NmemServer {
     }
 
     #[tool(
-        description = "Recent observations for session context. Newest first, deduped by file_path.",
+        description = "Recent observations ranked by composite score (recency decay + type weight + project match). Deduped by file_path, keeping highest-scored entry per file.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn recent_context(
@@ -452,6 +532,7 @@ impl ServerHandler for NmemServer {
 
 pub fn handle_serve(db_path: &Path) -> Result<(), NmemError> {
     let conn = open_db_readonly(db_path)?;
+    register_udfs(&conn)?;
     let db: DbHandle = Arc::new(Mutex::new(conn));
     let server = NmemServer::new(db);
 

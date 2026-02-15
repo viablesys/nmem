@@ -1,5 +1,6 @@
 use nmem::serve::{
-    GetObservationsParams, NmemServer, RecentContextParams, SearchParams, TimelineParams,
+    register_udfs, GetObservationsParams, NmemServer, RecentContextParams, SearchParams,
+    TimelineParams,
 };
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
@@ -7,6 +8,7 @@ use std::sync::{Arc, Mutex};
 fn test_db() -> Arc<Mutex<Connection>> {
     let mut conn = Connection::open_in_memory().unwrap();
     nmem::schema_migrations().to_latest(&mut conn).unwrap();
+    register_udfs(&conn).unwrap();
 
     conn.execute_batch(
         "
@@ -278,13 +280,13 @@ fn recent_context_returns_deduped_by_file_path() {
     let arr = result_json(&result);
     let items = arr.as_array().unwrap();
 
-    // /src/auth.rs appears in obs 1, 2, 6 — dedup keeps newest (id=6)
+    // /src/auth.rs appears in obs 1, 2, 6 — dedup keeps highest-scored file_edit
     let auth_entries: Vec<_> = items
         .iter()
         .filter(|o| o["file_path"].as_str() == Some("/src/auth.rs"))
         .collect();
     assert_eq!(auth_entries.len(), 1);
-    assert_eq!(auth_entries[0]["id"], 6);
+    assert_eq!(auth_entries[0]["obs_type"], "file_edit");
 
     // NULL file_path observations are NOT deduped
     let null_fp: Vec<_> = items.iter().filter(|o| o["file_path"].is_null()).collect();
@@ -303,8 +305,12 @@ fn recent_context_filters_by_project() {
 
     let arr = result_json(&result);
     let items = arr.as_array().unwrap();
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0]["session_id"], "sess-b");
+    // With composite scoring, project is a boost signal not a filter —
+    // same-project observations rank higher but cross-project still appear
+    assert!(!items.is_empty());
+    // The "other" project observation (sess-b) should be present
+    let has_other = items.iter().any(|o| o["session_id"] == "sess-b");
+    assert!(has_other, "expected sess-b observation to be present");
 }
 
 #[test]
@@ -338,5 +344,238 @@ fn recent_context_empty_project() {
         })
         .unwrap();
 
-    assert_eq!(result_json(&result).as_array().unwrap().len(), 0);
+    // With composite scoring, project is a boost signal not a filter —
+    // observations still appear but with lower project weight (0.3)
+    let items = result_json(&result);
+    let arr = items.as_array().unwrap();
+    assert!(!arr.is_empty());
+    // All observations should have score > 0
+    for item in arr {
+        assert!(item["score"].as_f64().unwrap() > 0.0);
+    }
+}
+
+// --- scored context tests ---
+
+/// Create a test DB with timestamps relative to `now` for scoring tests.
+fn scored_test_db(now: i64) -> NmemServer {
+    let mut conn = Connection::open_in_memory().unwrap();
+    nmem::schema_migrations().to_latest(&mut conn).unwrap();
+    register_udfs(&conn).unwrap();
+
+    conn.execute_batch(&format!(
+        "
+        INSERT INTO sessions (id, project, started_at) VALUES ('s1', 'proj-a', {now});
+        INSERT INTO sessions (id, project, started_at) VALUES ('s2', 'proj-b', {now});
+        "
+    ))
+    .unwrap();
+
+    NmemServer::new(Arc::new(Mutex::new(conn)))
+}
+
+fn insert_obs(
+    server: &NmemServer,
+    id: i64,
+    session_id: &str,
+    timestamp: i64,
+    obs_type: &str,
+    file_path: Option<&str>,
+    content: &str,
+) {
+    let db = server.db_handle();
+    let db = db.lock().unwrap();
+    let fp = file_path
+        .map(|s| format!("'{s}'"))
+        .unwrap_or("NULL".into());
+    db.execute_batch(&format!(
+        "INSERT INTO observations (id, session_id, prompt_id, timestamp, obs_type, source_event, tool_name, file_path, content, metadata)
+         VALUES ({id}, '{session_id}', NULL, {timestamp}, '{obs_type}', 'PostToolUse', NULL, {fp}, '{content}', NULL);"
+    ))
+    .unwrap();
+}
+
+#[test]
+fn scored_context_type_weight_ordering() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let server = scored_test_db(now);
+
+    // Same timestamp, different types, different file_paths
+    insert_obs(&server, 1, "s1", now, "file_read", Some("/a.rs"), "read a");
+    insert_obs(&server, 2, "s1", now, "file_edit", Some("/b.rs"), "edit b");
+    insert_obs(&server, 3, "s1", now, "command", Some("/c.rs"), "cmd c");
+
+    let result = server
+        .do_recent_context(RecentContextParams {
+            project: None,
+            limit: Some(10),
+        })
+        .unwrap();
+
+    let arr = result_json(&result);
+    let items = arr.as_array().unwrap();
+    // file_edit should rank first, then command, then file_read
+    assert_eq!(items[0]["obs_type"], "file_edit");
+    assert_eq!(items[1]["obs_type"], "command");
+    assert_eq!(items[2]["obs_type"], "file_read");
+}
+
+#[test]
+fn scored_context_recency_beats_type() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let server = scored_test_db(now);
+
+    let fourteen_days_ago = now - 14 * 86400;
+    // Old file_edit (14d ago): recency=0.25, type_w=1.0 → score=0.25*0.6+1.0*0.4=0.55
+    insert_obs(
+        &server,
+        1,
+        "s1",
+        fourteen_days_ago,
+        "file_edit",
+        Some("/old.rs"),
+        "old edit",
+    );
+    // Fresh file_read (now): recency≈1.0, type_w=0.17 → score=1.0*0.6+0.17*0.4=0.668
+    insert_obs(
+        &server,
+        2,
+        "s1",
+        now,
+        "file_read",
+        Some("/new.rs"),
+        "fresh read",
+    );
+
+    let result = server
+        .do_recent_context(RecentContextParams {
+            project: None,
+            limit: Some(10),
+        })
+        .unwrap();
+
+    let arr = result_json(&result);
+    let items = arr.as_array().unwrap();
+    // Fresh file_read should beat old file_edit
+    assert_eq!(items[0]["id"], 2);
+    assert_eq!(items[1]["id"], 1);
+}
+
+#[test]
+fn scored_context_project_boost() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let server = scored_test_db(now);
+
+    // Same type, same timestamp, different projects
+    insert_obs(
+        &server,
+        1,
+        "s1",
+        now,
+        "file_edit",
+        Some("/a.rs"),
+        "edit in proj-a",
+    );
+    insert_obs(
+        &server,
+        2,
+        "s2",
+        now,
+        "file_edit",
+        Some("/b.rs"),
+        "edit in proj-b",
+    );
+
+    let result = server
+        .do_recent_context(RecentContextParams {
+            project: Some("proj-a".into()),
+            limit: Some(10),
+        })
+        .unwrap();
+
+    let arr = result_json(&result);
+    let items = arr.as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    // proj-a observation should rank higher due to project boost
+    assert_eq!(items[0]["id"], 1);
+    assert_eq!(items[1]["id"], 2);
+}
+
+#[test]
+fn scored_context_dedup_keeps_highest() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let server = scored_test_db(now);
+
+    // Same file_path, same timestamp, different types
+    insert_obs(
+        &server,
+        1,
+        "s1",
+        now,
+        "file_read",
+        Some("/same.rs"),
+        "read same",
+    );
+    insert_obs(
+        &server,
+        2,
+        "s1",
+        now,
+        "file_edit",
+        Some("/same.rs"),
+        "edit same",
+    );
+
+    let result = server
+        .do_recent_context(RecentContextParams {
+            project: None,
+            limit: Some(10),
+        })
+        .unwrap();
+
+    let arr = result_json(&result);
+    let items = arr.as_array().unwrap();
+    // Dedup should keep file_edit (higher score) over file_read
+    let same_entries: Vec<_> = items
+        .iter()
+        .filter(|o| o["file_path"].as_str() == Some("/same.rs"))
+        .collect();
+    assert_eq!(same_entries.len(), 1);
+    assert_eq!(same_entries[0]["obs_type"], "file_edit");
+}
+
+#[test]
+fn scored_context_has_score_field() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let server = scored_test_db(now);
+
+    insert_obs(&server, 1, "s1", now, "file_edit", Some("/x.rs"), "edit x");
+
+    let result = server
+        .do_recent_context(RecentContextParams {
+            project: None,
+            limit: Some(10),
+        })
+        .unwrap();
+
+    let arr = result_json(&result);
+    let items = arr.as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    let score = items[0]["score"].as_f64().unwrap();
+    assert!(score > 0.0, "score should be > 0, got {score}");
 }
