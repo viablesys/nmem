@@ -1329,6 +1329,48 @@ context_cross_limit = 0
     assert!(!stdout.contains("Other projects"), "cross_limit=0 should suppress cross-project section");
 }
 
+#[test]
+#[allow(deprecated)]
+fn context_injection_suppress_cross_project() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+    let config_path = dir.path().join("config.toml");
+
+    std::fs::write(
+        &config_path,
+        r#"
+[projects.alpha]
+suppress_cross_project = true
+"#,
+    )
+    .unwrap();
+
+    // Seed cross-project data
+    session_start_project(&db, "scp-alpha", "alpha");
+    post_tool_use_project(&db, "scp-alpha", "alpha", "Bash", r#"{"command":"cargo build"}"#);
+    stop(&db, "scp-alpha");
+
+    session_start_project(&db, "scp-beta", "beta");
+    post_tool_use_project(&db, "scp-beta", "beta", "Edit", r#"{"file_path":"/src/lib.rs"}"#);
+    stop(&db, "scp-beta");
+
+    // New session for alpha with suppress_cross_project config
+    let mut cmd = Command::cargo_bin("nmem").unwrap();
+    let out = cmd
+        .env("NMEM_DB", &db)
+        .env("NMEM_CONFIG", &config_path)
+        .arg("record")
+        .write_stdin(
+            r#"{"session_id":"scp-alpha2","cwd":"/home/test/workspace/alpha","hook_event_name":"SessionStart"}"#,
+        )
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    assert!(stdout.contains("## alpha"), "should contain local project section");
+    assert!(!stdout.contains("Other projects"), "suppress_cross_project should suppress cross-project section");
+}
+
 // --- Context injection tests ---
 
 #[test]

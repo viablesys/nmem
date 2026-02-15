@@ -35,6 +35,10 @@ pub struct ProjectConfig {
     pub context_local_limit: Option<u32>,
     /// Max cross-project observations in context injection (default: 10 normal, 15 recovery).
     pub context_cross_limit: Option<u32>,
+    /// Suppress cross-project observations in context injection (default: false).
+    /// Takes precedence over `context_cross_limit` when true.
+    #[serde(default)]
+    pub suppress_cross_project: bool,
 }
 
 #[derive(Debug, Deserialize, Default, Clone, Copy, PartialEq, Eq)]
@@ -124,10 +128,13 @@ pub fn resolve_context_limits(config: &NmemConfig, project: &str, is_recovery: b
         .and_then(|p| p.context_local_limit)
         .map(|v| v as i64)
         .unwrap_or(if is_recovery { 30 } else { 20 });
-    let cross = pc
-        .and_then(|p| p.context_cross_limit)
-        .map(|v| v as i64)
-        .unwrap_or(if is_recovery { 15 } else { 10 });
+    let cross = if pc.is_some_and(|p| p.suppress_cross_project) {
+        0
+    } else {
+        pc.and_then(|p| p.context_cross_limit)
+            .map(|v| v as i64)
+            .unwrap_or(if is_recovery { 15 } else { 10 })
+    };
     (local, cross)
 }
 
@@ -370,6 +377,34 @@ context_local_limit = 99
         let (local, cross) = resolve_context_limits(&config, "unknown", false);
         assert_eq!(local, 20);
         assert_eq!(cross, 10);
+    }
+
+    #[test]
+    fn suppress_cross_project_overrides_limits() {
+        let config: NmemConfig = toml::from_str(
+            r#"
+[projects.myproj]
+suppress_cross_project = true
+context_cross_limit = 5
+"#,
+        )
+        .unwrap();
+        let (_, cross) = resolve_context_limits(&config, "myproj", false);
+        assert_eq!(cross, 0, "suppress_cross_project should override context_cross_limit");
+        let (_, cross) = resolve_context_limits(&config, "myproj", true);
+        assert_eq!(cross, 0, "suppress_cross_project should override recovery defaults too");
+    }
+
+    #[test]
+    fn suppress_cross_project_default_false() {
+        let config: NmemConfig = toml::from_str(
+            r#"
+[projects.myproj]
+"#,
+        )
+        .unwrap();
+        let (_, cross) = resolve_context_limits(&config, "myproj", false);
+        assert_eq!(cross, 10, "default config should not suppress cross-project");
     }
 
     #[test]
