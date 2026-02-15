@@ -280,8 +280,8 @@ fn format_summaries(rows: &[SummaryRow]) -> String {
     let mut out = String::from("## Session Summaries\n");
     for row in rows {
         let time = format_relative_time(row.started_at);
-        let request = &row.summary.request;
-        if request.is_empty() {
+        let intent = &row.summary.intent;
+        if intent.is_empty() {
             continue;
         }
         let completed: String = row
@@ -293,9 +293,9 @@ fn format_summaries(rows: &[SummaryRow]) -> String {
             .collect::<Vec<_>>()
             .join(", ");
         if completed.is_empty() {
-            out.push_str(&format!("- [{time}] **{request}**\n"));
+            out.push_str(&format!("- [{time}] **{intent}**\n"));
         } else {
-            out.push_str(&format!("- [{time}] **{request}** — completed: {completed}\n"));
+            out.push_str(&format!("- [{time}] **{intent}** — completed: {completed}\n"));
         }
     }
     out

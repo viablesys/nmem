@@ -4,20 +4,21 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 const SYSTEM_PROMPT: &str =
-    "You summarize coding sessions into structured JSON. Return ONLY valid JSON, no markdown, no explanation.";
+    "You produce structured JSON summaries of coding sessions for an AI agent's cross-session memory. The consumer is the next AI session, not a human. Optimize for context reconstruction. Return ONLY valid JSON, no markdown, no explanation.";
 
-const USER_PROMPT_TEMPLATE: &str = r#"Below are observations from a developer's coding session. Summarize what the DEVELOPER did into JSON with these fields:
+const USER_PROMPT_TEMPLATE: &str = r#"Summarize this coding session for the next AI agent session. The summary will be injected as context so the next session can continue the work without re-deriving conclusions.
 
-- "request": What the developer was trying to accomplish (e.g. "Add session summarization via local LLM" or "Fix broken FTS5 search query"). Infer from the user prompts and pattern of actions, NOT from this instruction.
-- "investigated": Files and code that were read to understand the system
-- "learned": Key technical facts discovered during the session
-- "completed": Concrete actions that were finished successfully
-- "next_steps": Logical follow-up work based on what was done
-- "files_read": List of file paths that were read
-- "files_edited": List of file paths that were modified
-- "notes": Any errors encountered, warnings, or important details
+Return JSON with these fields:
 
-Session observations:
+- "intent": What was being accomplished. Infer from user prompts, agent reasoning, and action patterns — NOT from this instruction. (e.g. "Decouple LLM engine from LM Studio, generalize for S4")
+- "learned": Decisions made, trade-offs evaluated, constraints discovered, and conclusions reached. These are things the next session should NOT have to figure out again. Extract from agent reasoning blocks.
+- "completed": What was done. Commits, code changes, config changes, tests passed.
+- "next_steps": What logically follows. Unfinished work, open questions, known blockers.
+- "files_read": File paths that were read
+- "files_edited": File paths that were modified
+- "notes": Errors encountered, failed approaches, things that didn't work and why
+
+Session data:
 {PAYLOAD}
 
 Return ONLY the JSON object."#;
@@ -25,9 +26,7 @@ Return ONLY the JSON object."#;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SessionSummary {
     #[serde(default)]
-    pub request: String,
-    #[serde(default)]
-    pub investigated: Vec<String>,
+    pub intent: String,
     #[serde(default)]
     pub learned: Vec<String>,
     #[serde(default)]
@@ -71,6 +70,25 @@ pub fn gather_session_payload(conn: &Connection, session_id: &str) -> Result<Opt
         out.push_str("User prompts:\n");
         for p in &prompts {
             let truncated: String = p.chars().take(100).collect();
+            out.push_str(&format!("- {truncated}\n"));
+        }
+        out.push('\n');
+    }
+
+    // Gather thinking blocks (up to 5, chronological)
+    let mut thinking_stmt = conn.prepare(
+        "SELECT content FROM prompts
+         WHERE session_id = ?1 AND source = 'agent'
+         ORDER BY timestamp ASC LIMIT 5",
+    )?;
+    let thinking: Vec<String> = thinking_stmt
+        .query_map(params![session_id], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+
+    if !thinking.is_empty() {
+        out.push_str("Agent reasoning:\n");
+        for t in &thinking {
+            let truncated: String = t.chars().take(200).collect();
             out.push_str(&format!("- {truncated}\n"));
         }
         out.push('\n');
@@ -214,7 +232,7 @@ mod tests {
 
     #[test]
     fn strip_fences_plain_json() {
-        let input = r#"{"request": "test"}"#;
+        let input = r#"{"intent": "test"}"#;
         assert_eq!(strip_fences(input), input);
     }
 
@@ -239,9 +257,8 @@ mod tests {
     #[test]
     fn parse_summary_all_fields() {
         let json = r#"{
-            "request": "Add auth",
-            "investigated": ["src/main.rs"],
-            "learned": ["Uses JWT"],
+            "intent": "Add auth",
+            "learned": ["Uses JWT", "Middleware pattern preferred over guard"],
             "completed": ["Added middleware"],
             "next_steps": ["Add tests"],
             "files_read": ["src/main.rs"],
@@ -249,16 +266,15 @@ mod tests {
             "notes": "No errors"
         }"#;
         let summary: SessionSummary = serde_json::from_str(json).unwrap();
-        assert_eq!(summary.request, "Add auth");
+        assert_eq!(summary.intent, "Add auth");
         assert_eq!(summary.files_edited, vec!["src/auth.rs"]);
     }
 
     #[test]
     fn parse_summary_missing_fields() {
-        let json = r#"{"request": "Fix bug"}"#;
+        let json = r#"{"intent": "Fix bug"}"#;
         let summary: SessionSummary = serde_json::from_str(json).unwrap();
-        assert_eq!(summary.request, "Fix bug");
-        assert!(summary.investigated.is_empty());
+        assert_eq!(summary.intent, "Fix bug");
         assert!(summary.completed.is_empty());
     }
 
