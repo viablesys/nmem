@@ -1,8 +1,9 @@
-use crate::config::{load_config, resolve_filter_params};
+use crate::config::{load_config, resolve_filter_params, NmemConfig};
 use crate::db::open_db;
 use crate::extract::{classify_tool, extract_content, extract_file_path};
 use crate::filter::{SecretFilter, redact_json_value_with};
 use crate::project::derive_project;
+use crate::sweep::run_sweep;
 use crate::transcript::{get_current_prompt_id, scan_transcript};
 use crate::NmemError;
 use rusqlite::{Connection, params};
@@ -57,7 +58,34 @@ fn ensure_session(conn: &Connection, session_id: &str, cwd: &str, ts: i64) -> Re
     Ok(())
 }
 
-fn handle_session_start(conn: &Connection, payload: &HookPayload) -> Result<(), NmemError> {
+fn maybe_sweep(conn: &Connection, config: &NmemConfig) {
+    if !config.retention.enabled {
+        return;
+    }
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM observations WHERE timestamp < unixepoch('now') - 86400",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if count < 100 {
+        return;
+    }
+    match run_sweep(conn, &config.retention) {
+        Ok(r) if r.deleted > 0 => {
+            eprintln!("nmem: sweep deleted {} expired observations", r.deleted)
+        }
+        Err(e) => eprintln!("nmem: sweep error (non-fatal): {e}"),
+        _ => {}
+    }
+}
+
+fn handle_session_start(
+    conn: &Connection,
+    payload: &HookPayload,
+    config: &NmemConfig,
+) -> Result<(), NmemError> {
     let ts = now_ts();
     let tx = conn.unchecked_transaction()?;
 
@@ -81,6 +109,9 @@ fn handle_session_start(conn: &Connection, payload: &HookPayload) -> Result<(), 
     }
 
     tx.commit()?;
+
+    maybe_sweep(conn, config);
+
     Ok(())
 }
 
@@ -251,7 +282,7 @@ pub fn handle_record(db_path: &Path) -> Result<(), NmemError> {
     let filter = SecretFilter::with_params(params);
 
     match payload.hook_event_name.as_str() {
-        "SessionStart" => handle_session_start(&conn, &payload),
+        "SessionStart" => handle_session_start(&conn, &payload, &config),
         "UserPromptSubmit" => handle_user_prompt(&conn, &payload, &filter),
         "PostToolUse" => handle_post_tool_use(&conn, &payload, &filter),
         "Stop" => handle_stop(&conn, &payload),

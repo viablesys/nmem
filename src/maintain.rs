@@ -1,5 +1,7 @@
 use crate::cli::MaintainArgs;
+use crate::config::load_config;
 use crate::db::open_db;
+use crate::sweep::run_sweep;
 use crate::NmemError;
 use std::path::Path;
 
@@ -37,6 +39,25 @@ pub fn handle_maintain(db_path: &Path, args: &MaintainArgs) -> Result<(), NmemEr
 
         conn.execute_batch("INSERT INTO prompts_fts(prompts_fts) VALUES('rebuild')")?;
         eprintln!("nmem: FTS rebuild (prompts) — ok");
+    }
+
+    // Retention sweep
+    if args.sweep {
+        let config = load_config().unwrap_or_default();
+        if !config.retention.enabled {
+            eprintln!("nmem: retention sweep skipped (not enabled in config)");
+        } else {
+            let result = run_sweep(&conn, &config.retention)?;
+            if result.deleted > 0 {
+                for (obs_type, count) in &result.by_type {
+                    eprintln!("nmem: sweep — {obs_type}: {count} deleted");
+                }
+                eprintln!("nmem: sweep — {} total deleted, {} orphans cleaned",
+                    result.deleted, result.orphans_cleaned);
+            } else {
+                eprintln!("nmem: sweep — nothing to delete");
+            }
+        }
     }
 
     let size_after = std::fs::metadata(db_path)?.len();

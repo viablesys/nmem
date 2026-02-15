@@ -218,7 +218,7 @@ fn delete_sessions_for_project(conn: &Connection, project: &str) -> Result<usize
     Ok(deleted)
 }
 
-fn cleanup_orphans(conn: &Connection) -> Result<usize, NmemError> {
+pub fn cleanup_orphans(conn: &Connection) -> Result<usize, NmemError> {
     conn.execute_batch("DELETE FROM _cursor WHERE session_id NOT IN (SELECT id FROM sessions)")?;
     conn.execute_batch(
         "DELETE FROM prompts WHERE session_id NOT IN (SELECT id FROM sessions)",
@@ -234,7 +234,7 @@ fn cleanup_orphans(conn: &Connection) -> Result<usize, NmemError> {
     Ok(orphaned)
 }
 
-fn post_purge_maintenance(conn: &Connection, obs_deleted: usize) -> Result<(), NmemError> {
+pub fn post_purge_maintenance(conn: &Connection, obs_deleted: usize) -> Result<(), NmemError> {
     conn.pragma_update(None, "incremental_vacuum", 0)?;
 
     if obs_deleted > 1000 {

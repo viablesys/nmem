@@ -609,6 +609,119 @@ fn purge_by_type_and_age() {
     assert_eq!(remaining[0][0], "command");
 }
 
+// --- Sweep tests ---
+
+#[test]
+#[allow(deprecated)]
+fn maintain_sweep_flag() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+    let config_path = dir.path().join("config.toml");
+
+    std::fs::write(
+        &config_path,
+        r#"
+[retention]
+enabled = true
+
+[retention.days]
+file_read = 0
+command = 9999
+"#,
+    )
+    .unwrap();
+
+    session_start(&db, "sw-maint");
+    post_tool_use(&db, "sw-maint", "Read", r#"{"file_path":"/src/a.rs"}"#);
+    post_tool_use(&db, "sw-maint", "Bash", r#"{"command":"cargo test"}"#);
+
+    assert_eq!(query_db(&db, "SELECT COUNT(*) FROM observations")[0][0], "2");
+
+    // Run maintain --sweep with retention config
+    let mut cmd = Command::cargo_bin("nmem").unwrap();
+    cmd.env("NMEM_DB", &db)
+        .env("NMEM_CONFIG", &config_path)
+        .args(["maintain", "--sweep"])
+        .assert()
+        .success();
+
+    // file_read (retention 0 days) should be deleted, command (9999 days) kept
+    let remaining = query_db(&db, "SELECT obs_type FROM observations");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0][0], "command");
+}
+
+#[test]
+fn sweep_disabled_by_default() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    session_start(&db, "sw-disabled");
+    post_tool_use(&db, "sw-disabled", "Read", r#"{"file_path":"/src/a.rs"}"#);
+
+    // No config file, retention defaults to disabled
+    nmem_cmd(&db)
+        .args(["maintain", "--sweep"])
+        .assert()
+        .success();
+
+    // Nothing deleted
+    assert_eq!(query_db(&db, "SELECT COUNT(*) FROM observations")[0][0], "1");
+}
+
+#[test]
+#[allow(deprecated)]
+fn sweep_on_session_start() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+    let config_path = dir.path().join("config.toml");
+
+    std::fs::write(
+        &config_path,
+        r#"
+[retention]
+enabled = true
+
+[retention.days]
+file_read = 0
+"#,
+    )
+    .unwrap();
+
+    // Create initial session and seed >100 old observations to trigger sweep threshold
+    session_start(&db, "sw-ss-setup");
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let old_ts = 1000i64; // very old timestamp
+        for i in 0..110 {
+            conn.execute(
+                "INSERT INTO observations (session_id, prompt_id, timestamp, obs_type, source_event, content)
+                 VALUES ('sw-ss-setup', NULL, ?1, 'file_read', 'PostToolUse', ?2)",
+                rusqlite::params![old_ts, format!("old-{i}")],
+            ).unwrap();
+        }
+    }
+
+    // Verify observations exist
+    let before: String = query_db(&db, "SELECT COUNT(*) FROM observations")[0][0].clone();
+    assert!(before.parse::<i32>().unwrap() >= 110);
+
+    // SessionStart with retention config triggers opportunistic sweep
+    let mut cmd = Command::cargo_bin("nmem").unwrap();
+    cmd.env("NMEM_DB", &db)
+        .env("NMEM_CONFIG", &config_path)
+        .arg("record")
+        .write_stdin(
+            r#"{"session_id":"sw-ss-new","cwd":"/home/test/workspace/myproj","hook_event_name":"SessionStart"}"#,
+        )
+        .assert()
+        .success();
+
+    // Old file_read observations should be swept
+    let after: String = query_db(&db, "SELECT COUNT(*) FROM observations WHERE obs_type = 'file_read'")[0][0].clone();
+    assert_eq!(after, "0", "expired file_read observations should be swept on SessionStart");
+}
+
 // --- Maintain tests ---
 
 #[test]

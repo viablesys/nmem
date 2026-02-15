@@ -68,4 +68,8 @@ pub struct MaintainArgs {
     /// Also rebuild FTS5 indexes (rewrites entire index)
     #[arg(long)]
     pub rebuild_fts: bool,
+
+    /// Run retention sweep (deletes expired observations per config)
+    #[arg(long)]
+    pub sweep: bool,
 }

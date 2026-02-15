@@ -1,7 +1,7 @@
 # ADR-005: Forgetting Strategy
 
 ## Status
-Accepted — Purge mechanism implemented (v2.0)
+Accepted — Purge mechanism (v2.0) and retention sweeps (v3.0) implemented
 
 ## Framing
 *What gets deleted, when, and how.*
@@ -297,8 +297,8 @@ WAL frame persistence is a separate concern. After a secure purge, run `PRAGMA w
 | Incremental vacuum | ✅ | `PRAGMA incremental_vacuum` after deletion |
 | FTS5 rebuild | ✅ | Rebuild if >1000 observations deleted |
 | WAL checkpoint | ✅ | `PRAGMA wal_checkpoint(TRUNCATE)` post-purge |
-| Retention sweeps | Deferred | As designed — not activated until needed |
-| Syntheses protection | Deferred | Table doesn't exist yet (ADR-002 Q3) |
+| Retention sweeps | ✅ | `nmem maintain --sweep` + opportunistic on SessionStart |
+| Syntheses protection | ✅ | Guard checks `sqlite_master` — skips subquery when table absent |
 
 ### Deviations from spec
 
@@ -321,6 +321,39 @@ WAL frame persistence is a separate concern. After a secure purge, run `PRAGMA w
 - `purge_fts_sync` — FTS index consistency after purge
 
 2 unit tests for date parsing (`parse_date_known_epoch`, `parse_date_invalid`).
+
+## Retention Sweep Implementation Notes (2026-02-14)
+
+> **[ANNOTATION 2026-02-14, v3.0]:** Automated retention sweeps shipped. Position C (type-aware retention) activated as designed. Implementation in `src/sweep.rs` (~80 lines), wired through `src/cli.rs` (`--sweep` flag), `src/maintain.rs`, and `src/record.rs` (opportunistic trigger).
+
+### Architecture
+
+**Config** (`src/config.rs`): `RetentionConfig` struct with `enabled: bool` and `days: HashMap<String, u32>`. Defaults match the policy table from this ADR. When `enabled = false` (default), sweeps are no-ops. Types not present in the `days` map are never swept — safe default for unknown/future types.
+
+**Sweep logic** (`src/sweep.rs`): `run_sweep(conn, config)` iterates over configured `(obs_type, days)` pairs, builds per-type DELETE with cutoff timestamp. Syntheses guard checks `sqlite_master` for table existence before adding the `NOT IN` subquery. Returns `SweepResult { deleted, by_type, orphans_cleaned }`.
+
+**Two entry points:**
+1. `nmem maintain --sweep` — explicit CLI invocation, reports per-type counts
+2. Opportunistic on `SessionStart` in `src/record.rs` — runs only when `enabled = true` AND DB has 100+ observations older than 1 day. Non-fatal: sweep errors are logged to stderr but don't block the record operation.
+
+### Reuse from purge
+
+`cleanup_orphans` and `post_purge_maintenance` from `src/purge.rs` made `pub` and reused by sweep. Same orphan cleanup (sessions with no observations or prompts) and same post-deletion maintenance (incremental vacuum, FTS5 rebuild if >1000 deleted, WAL checkpoint).
+
+**No `secure_delete` for sweeps** — as specified in this ADR. Secure deletion is reserved for manual purges of secrets, not routine retention.
+
+### Test coverage
+
+4 unit tests in `src/sweep.rs`:
+- `sweep_disabled_is_noop` — config with `enabled: false`, 0 deleted
+- `sweep_deletes_expired` — only observations past retention window deleted
+- `sweep_preserves_unexpired` — observations within window survive
+- `sweep_unknown_type_preserved` — obs_type not in config.days never swept
+
+3 integration tests in `tests/integration.rs`:
+- `maintain_sweep_flag` — CLI `--sweep` with retention config, verify correct type-selective deletion
+- `sweep_disabled_by_default` — no config file, no deletions
+- `sweep_on_session_start` — opportunistic sweep fires when 100+ old observations exist
 
 ## Open Questions
 
@@ -380,3 +413,4 @@ Do **not** enable retention preemptively. The cost of keeping too much data is l
 | 2026-02-14 | 1.2 | Refined with library topics. PurgeArgs clap derive struct. FTS5 rebuild integrated into secure_purge. References: rusqlite.md, fts5.md, clap.md. |
 | 2026-02-14 | 1.3 | Annotated with live production data. Volume estimates revised to ~585K records/year (~652 MB). Thinking blocks identified as prime retention candidates (84% of content, low reuse). Position C activation timeline shortened to year-1. |
 | 2026-02-14 | 2.0 | **Implemented.** `nmem purge` subcommand shipped in `src/purge.rs`. All 7 filter flags from spec implemented (`--before`, `--project`, `--session`, `--id`, `--type`/`--older-than`, `--search`). Confirmation via `--confirm` flag (no interactive stdin). Secure deletion: `PRAGMA secure_delete = ON`, `incremental_vacuum`, FTS5 rebuild >1000 rows, WAL checkpoint. FK-safe deletion order: observations → prompts → _cursor → sessions. Orphan cleanup for non-session/project modes. 9 integration tests, all passing. |
+| 2026-02-14 | 3.0 | **Retention sweeps implemented.** Position C (type-aware retention) activated. `src/sweep.rs` new module. Two entry points: `nmem maintain --sweep` (explicit) and opportunistic trigger on SessionStart (threshold: 100+ old observations). `RetentionConfig` in `src/config.rs` with default days from ADR policy table. Syntheses guard via `sqlite_master` check. `cleanup_orphans`/`post_purge_maintenance` made pub for reuse. 4 unit + 3 integration tests. |

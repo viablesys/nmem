@@ -13,6 +13,8 @@ pub struct NmemConfig {
     pub projects: HashMap<String, ProjectConfig>,
     #[serde(default)]
     pub encryption: EncryptionConfig,
+    #[serde(default)]
+    pub retention: RetentionConfig,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -43,6 +45,38 @@ pub enum Sensitivity {
 #[derive(Debug, Deserialize, Default)]
 pub struct EncryptionConfig {
     pub key_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RetentionConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_retention_days")]
+    pub days: HashMap<String, u32>,
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            days: default_retention_days(),
+        }
+    }
+}
+
+fn default_retention_days() -> HashMap<String, u32> {
+    HashMap::from([
+        ("user_prompt".into(), 730),
+        ("command_error".into(), 730),
+        ("file_write".into(), 365),
+        ("file_edit".into(), 365),
+        ("session_start".into(), 365),
+        ("session_end".into(), 365),
+        ("file_read".into(), 90),
+        ("search".into(), 90),
+        ("mcp_call".into(), 90),
+        ("command".into(), 180),
+    ])
 }
 
 /// Load config from NMEM_CONFIG env var, ~/.nmem/config.toml, or defaults.
@@ -219,6 +253,34 @@ sensitivity = "strict"
         let params = resolve_filter_params(&config, Some("myproj"));
         // Global threshold should prevail over strict's default
         assert_eq!(params.entropy_threshold, 4.5);
+    }
+
+    #[test]
+    fn default_retention_config() {
+        let config = NmemConfig::default();
+        assert!(!config.retention.enabled);
+        assert_eq!(config.retention.days["file_read"], 90);
+        assert_eq!(config.retention.days["command"], 180);
+        assert_eq!(config.retention.days["file_edit"], 365);
+        assert_eq!(config.retention.days["user_prompt"], 730);
+    }
+
+    #[test]
+    fn parse_retention_config() {
+        let toml_str = r#"
+[retention]
+enabled = true
+
+[retention.days]
+file_read = 30
+command = 60
+"#;
+        let config: NmemConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.retention.enabled);
+        assert_eq!(config.retention.days["file_read"], 30);
+        assert_eq!(config.retention.days["command"], 60);
+        // Custom days map replaces defaults entirely
+        assert!(!config.retention.days.contains_key("user_prompt"));
     }
 
     #[test]
