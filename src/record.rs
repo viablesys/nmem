@@ -234,7 +234,61 @@ fn handle_post_tool_use(
     )?;
 
     tx.commit()?;
+
+    // Stream to VictoriaLogs — non-fatal, fire-and-forget
+    stream_observation_to_logs(
+        &payload.session_id,
+        &derive_project(&payload.cwd),
+        obs_type,
+        tool_name,
+        file_path.as_deref(),
+        &filtered_content,
+    );
+
     Ok(())
+}
+
+const VLOGS_ENDPOINT: &str = "http://localhost:9428/insert/jsonline";
+
+fn stream_observation_to_logs(
+    session_id: &str,
+    project: &str,
+    obs_type: &str,
+    tool_name: &str,
+    file_path: Option<&str>,
+    content: &str,
+) {
+    let msg = if let Some(fp) = file_path {
+        format!("{obs_type}: {fp}")
+    } else {
+        let preview: String = content.chars().take(80).collect();
+        format!("{obs_type}: {preview}")
+    };
+
+    let mut record = serde_json::json!({
+        "_msg": msg,
+        "service": "nmem",
+        "type": "observation",
+        "session_id": session_id,
+        "project": project,
+        "obs_type": obs_type,
+        "tool_name": tool_name,
+    });
+
+    if let Some(fp) = file_path {
+        record["file_path"] = serde_json::Value::String(fp.to_string());
+    }
+
+    let body = format!("{}\n", record);
+    let agent = ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .timeout_global(Some(std::time::Duration::from_secs(1)))
+            .build(),
+    );
+    let _ = agent
+        .post(VLOGS_ENDPOINT)
+        .header("Content-Type", "application/stream+json")
+        .send(body.as_bytes());
 }
 
 fn handle_stop(conn: &Connection, payload: &HookPayload, config: &NmemConfig) -> Result<(), NmemError> {

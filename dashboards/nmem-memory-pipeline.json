@@ -1,0 +1,251 @@
+{
+  "uid": "nmem-memory-pipeline",
+  "title": "nmem — Memory Pipeline",
+  "tags": ["nmem"],
+  "timezone": "browser",
+  "time": {"from": "now-24h", "to": "now"},
+  "refresh": "30s",
+  "panels": [
+    {
+      "type": "row",
+      "title": "Session Summaries",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "collapsed": false
+    },
+    {
+      "type": "logs",
+      "title": "Session Summaries",
+      "description": "Agent-oriented session summaries from local LLM. Each entry = one completed session. Fields: intent, learned, completed, next_steps, files_edited.",
+      "datasource": {"type": "victoriametrics-logs-datasource", "uid": "cfcfmk1w8kxs0f"},
+      "targets": [
+        {
+          "datasource": {"type": "victoriametrics-logs-datasource", "uid": "cfcfmk1w8kxs0f"},
+          "expr": "service:nmem AND type:session_summary AND NOT project:myproj",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "gridPos": {"h": 12, "w": 24, "x": 0, "y": 1}
+    },
+    {
+      "type": "row",
+      "title": "Observation Stream",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 13},
+      "collapsed": false
+    },
+    {
+      "type": "logs",
+      "title": "All Observations",
+      "description": "Real-time observation stream. Each entry = one tool use captured by hooks. Linked to summaries via session_id.",
+      "datasource": {"type": "victoriametrics-logs-datasource", "uid": "cfcfmk1w8kxs0f"},
+      "targets": [
+        {
+          "datasource": {"type": "victoriametrics-logs-datasource", "uid": "cfcfmk1w8kxs0f"},
+          "expr": "service:nmem AND type:observation AND NOT project:~\"alpha|beta|myproj\"",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 14}
+    },
+    {
+      "type": "logs",
+      "title": "File Edits",
+      "description": "File modification observations only — the primary signal for what's being worked on.",
+      "datasource": {"type": "victoriametrics-logs-datasource", "uid": "cfcfmk1w8kxs0f"},
+      "targets": [
+        {
+          "datasource": {"type": "victoriametrics-logs-datasource", "uid": "cfcfmk1w8kxs0f"},
+          "expr": "service:nmem AND type:observation AND obs_type:file_edit AND NOT project:~\"alpha|beta|myproj\"",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24}
+    },
+    {
+      "type": "logs",
+      "title": "Git & GitHub Activity",
+      "description": "Commits, pushes, and GitHub CLI operations — milestone markers.",
+      "datasource": {"type": "victoriametrics-logs-datasource", "uid": "cfcfmk1w8kxs0f"},
+      "targets": [
+        {
+          "datasource": {"type": "victoriametrics-logs-datasource", "uid": "cfcfmk1w8kxs0f"},
+          "expr": "service:nmem AND type:observation AND (obs_type:git_commit OR obs_type:git_push OR obs_type:github) AND NOT project:~\"alpha|beta|myproj\"",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24}
+    },
+    {
+      "type": "row",
+      "title": "Session Drill-Down",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 32},
+      "collapsed": true,
+      "panels": [
+        {
+          "type": "logs",
+          "title": "Session: Observations + Summary",
+          "description": "All nmem entries for a specific session. Set session_id in the variable above to drill down. Shows both observations and the session summary, linked by session_id.",
+          "datasource": {"type": "victoriametrics-logs-datasource", "uid": "cfcfmk1w8kxs0f"},
+          "targets": [
+            {
+              "datasource": {"type": "victoriametrics-logs-datasource", "uid": "cfcfmk1w8kxs0f"},
+              "expr": "service:nmem AND session_id:${session_id}",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "dedupStrategy": "none",
+            "enableLogDetails": true,
+            "prettifyLogMessage": false,
+            "showCommonLabels": false,
+            "showLabels": true,
+            "showTime": true,
+            "sortOrder": "Ascending",
+            "wrapLogMessage": true
+          },
+          "gridPos": {"h": 14, "w": 24, "x": 0, "y": 33}
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Metrics",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 47},
+      "collapsed": true,
+      "panels": [
+        {
+          "type": "stat",
+          "title": "Total Observations",
+          "datasource": {"type": "prometheus", "uid": "cfcfmb6ljde68b"},
+          "targets": [
+            {
+              "datasource": {"type": "prometheus", "uid": "cfcfmb6ljde68b"},
+              "expr": "sum(nmem_observations_total)",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {"color": "green", "value": null}
+                ]
+              }
+            }
+          },
+          "gridPos": {"h": 4, "w": 6, "x": 0, "y": 48}
+        },
+        {
+          "type": "piechart",
+          "title": "Observation Types",
+          "datasource": {"type": "prometheus", "uid": "cfcfmb6ljde68b"},
+          "targets": [
+            {
+              "datasource": {"type": "prometheus", "uid": "cfcfmb6ljde68b"},
+              "expr": "sum by (obs_type) (nmem_observations_total)",
+              "legendFormat": "{{obs_type}}",
+              "refId": "A"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 8, "x": 6, "y": 48}
+        },
+        {
+          "type": "piechart",
+          "title": "Tool Usage",
+          "datasource": {"type": "prometheus", "uid": "cfcfmb6ljde68b"},
+          "targets": [
+            {
+              "datasource": {"type": "prometheus", "uid": "cfcfmb6ljde68b"},
+              "expr": "topk(15, sum by (tool_name) (nmem_observations_total))",
+              "legendFormat": "{{tool_name}}",
+              "refId": "A"
+            }
+          ],
+          "gridPos": {"h": 8, "w": 8, "x": 14, "y": 48}
+        },
+        {
+          "type": "timeseries",
+          "title": "Record Duration (p50 / p95 / p99)",
+          "datasource": {"type": "prometheus", "uid": "cfcfmb6ljde68b"},
+          "targets": [
+            {
+              "datasource": {"type": "prometheus", "uid": "cfcfmb6ljde68b"},
+              "expr": "histogram_quantile(0.5, sum(rate(nmem_record_duration_seconds_bucket[5m])) by (le))",
+              "legendFormat": "p50",
+              "refId": "A"
+            },
+            {
+              "datasource": {"type": "prometheus", "uid": "cfcfmb6ljde68b"},
+              "expr": "histogram_quantile(0.95, sum(rate(nmem_record_duration_seconds_bucket[5m])) by (le))",
+              "legendFormat": "p95",
+              "refId": "B"
+            },
+            {
+              "datasource": {"type": "prometheus", "uid": "cfcfmb6ljde68b"},
+              "expr": "histogram_quantile(0.99, sum(rate(nmem_record_duration_seconds_bucket[5m])) by (le))",
+              "legendFormat": "p99",
+              "refId": "C"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s"
+            }
+          },
+          "gridPos": {"h": 8, "w": 24, "x": 0, "y": 56}
+        }
+      ]
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "session_id",
+        "label": "Session ID",
+        "type": "textbox",
+        "current": {"value": ""},
+        "options": []
+      }
+    ]
+  }
+}
