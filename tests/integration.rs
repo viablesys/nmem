@@ -1303,14 +1303,19 @@ context_cross_limit = 0
     )
     .unwrap();
 
-    // Seed cross-project data
+    // Seed local data — file_edit so it appears in context
     session_start_project(&db, "cfg-alpha", "alpha");
-    post_tool_use_project(&db, "cfg-alpha", "alpha", "Bash", r#"{"command":"cargo build"}"#);
+    post_tool_use_project(&db, "cfg-alpha", "alpha", "Edit", r#"{"file_path":"/src/main.rs"}"#);
     stop(&db, "cfg-alpha");
 
+    // Seed cross-project data — pin so it would appear if not suppressed
     session_start_project(&db, "cfg-beta", "beta");
     post_tool_use_project(&db, "cfg-beta", "beta", "Edit", r#"{"file_path":"/src/lib.rs"}"#);
     stop(&db, "cfg-beta");
+
+    let obs = query_db(&db, "SELECT id FROM observations WHERE session_id = 'cfg-beta' AND obs_type = 'file_edit'");
+    let id = &obs[0][0];
+    nmem_cmd(&db).args(["pin", id]).assert().success();
 
     // New session for alpha with config
     let mut cmd = Command::cargo_bin("nmem").unwrap();
@@ -1345,14 +1350,19 @@ suppress_cross_project = true
     )
     .unwrap();
 
-    // Seed cross-project data
+    // Seed local data — file_edit so it appears in context
     session_start_project(&db, "scp-alpha", "alpha");
-    post_tool_use_project(&db, "scp-alpha", "alpha", "Bash", r#"{"command":"cargo build"}"#);
+    post_tool_use_project(&db, "scp-alpha", "alpha", "Edit", r#"{"file_path":"/src/main.rs"}"#);
     stop(&db, "scp-alpha");
 
+    // Seed cross-project data — pin so it would appear if not suppressed
     session_start_project(&db, "scp-beta", "beta");
     post_tool_use_project(&db, "scp-beta", "beta", "Edit", r#"{"file_path":"/src/lib.rs"}"#);
     stop(&db, "scp-beta");
+
+    let obs = query_db(&db, "SELECT id FROM observations WHERE session_id = 'scp-beta' AND obs_type = 'file_edit'");
+    let id = &obs[0][0];
+    nmem_cmd(&db).args(["pin", id]).assert().success();
 
     // New session for alpha with suppress_cross_project config
     let mut cmd = Command::cargo_bin("nmem").unwrap();
@@ -1398,7 +1408,8 @@ fn context_injection_on_session_start() {
     assert!(stdout.contains("# nmem context"), "should contain context header");
     assert!(stdout.contains("## myproj"), "should contain project section");
     assert!(stdout.contains("file_edit"), "should contain file_edit observation");
-    assert!(stdout.contains("command"), "should contain command observation");
+    // Commands only appear if pinned or git commit/push — generic commands are filtered out
+    assert!(!stdout.contains("cargo test"), "generic commands should not appear in context");
     assert!(stdout.contains("| ID |"), "should contain table header");
 }
 
@@ -1425,17 +1436,22 @@ fn context_injection_cross_project() {
     let dir = TempDir::new().unwrap();
     let db = dir.path().join("test.db");
 
-    // Seed data for project alpha
+    // Seed data for project alpha — file_edit shows in local context
     session_start_project(&db, "ctx-alpha", "alpha");
-    post_tool_use_project(&db, "ctx-alpha", "alpha", "Bash", r#"{"command":"cargo build"}"#);
+    post_tool_use_project(&db, "ctx-alpha", "alpha", "Edit", r#"{"file_path":"/src/main.rs"}"#);
     stop(&db, "ctx-alpha");
 
-    // Seed data for project beta
+    // Seed data for project beta — pin an observation so it appears cross-project
     session_start_project(&db, "ctx-beta", "beta");
     post_tool_use_project(&db, "ctx-beta", "beta", "Edit", r#"{"file_path":"/src/lib.rs"}"#);
     stop(&db, "ctx-beta");
 
-    // New session for alpha — should see beta in cross-project
+    // Pin beta's observation — cross-project only shows pinned items
+    let obs = query_db(&db, "SELECT id FROM observations WHERE session_id = 'ctx-beta' AND obs_type = 'file_edit'");
+    let id = &obs[0][0];
+    nmem_cmd(&db).args(["pin", id]).assert().success();
+
+    // New session for alpha — should see beta in cross-project (pinned)
     let out = nmem_cmd(&db)
         .arg("record")
         .write_stdin(
@@ -1455,9 +1471,9 @@ fn context_injection_recovery_mode() {
     let dir = TempDir::new().unwrap();
     let db = dir.path().join("test.db");
 
-    // Seed data
+    // Seed data — file_edit so it appears in filtered context
     session_start(&db, "ctx-rec-seed");
-    post_tool_use(&db, "ctx-rec-seed", "Read", r#"{"file_path":"/src/a.rs"}"#);
+    post_tool_use(&db, "ctx-rec-seed", "Edit", r#"{"file_path":"/src/a.rs"}"#);
     stop(&db, "ctx-rec-seed");
 
     // Normal SessionStart

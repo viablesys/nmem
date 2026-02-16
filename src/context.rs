@@ -69,59 +69,27 @@ fn format_intents(rows: &[IntentRow]) -> String {
 }
 
 const PROJECT_LOCAL_SQL: &str = "
-WITH scored AS (
-    SELECT o.id, o.timestamp, o.obs_type, o.file_path, o.content, o.is_pinned,
-           NULL AS project,
-           exp_decay((unixepoch('now') - o.timestamp) / 86400.0, 7.0) AS recency,
-           CASE o.obs_type
-               WHEN 'file_edit' THEN 1.0 WHEN 'command' THEN 0.67
-               WHEN 'session_compact' THEN 0.5 WHEN 'mcp_call' THEN 0.33
-               ELSE 0.17
-           END AS type_w
-    FROM observations o
-    JOIN sessions s ON o.session_id = s.id
-    WHERE s.project = ?1
-),
-ranked AS (
-    SELECT *,
-           (recency * 0.6 + type_w * 0.4) AS score,
-           ROW_NUMBER() OVER (
-               PARTITION BY COALESCE(file_path, CAST(id AS TEXT))
-               ORDER BY (recency * 0.6 + type_w * 0.4) DESC
-           ) AS rn
-    FROM scored
-)
-SELECT id, timestamp, obs_type, file_path, content, is_pinned, project, score
-FROM ranked WHERE rn = 1
-ORDER BY score DESC
+SELECT o.id, o.timestamp, o.obs_type, o.file_path, o.content, o.is_pinned,
+       NULL AS project
+FROM observations o
+JOIN sessions s ON o.session_id = s.id
+WHERE s.project = ?1
+  AND (
+    o.is_pinned = 1
+    OR (o.obs_type = 'file_edit' AND o.timestamp > unixepoch('now') - 7200)
+    OR (o.obs_type IN ('git_commit', 'git_push') AND o.timestamp > unixepoch('now') - 86400)
+  )
+ORDER BY o.is_pinned DESC, o.timestamp DESC
 LIMIT ?2";
 
 const CROSS_PROJECT_SQL: &str = "
-WITH scored AS (
-    SELECT o.id, o.timestamp, o.obs_type, o.file_path, o.content, o.is_pinned,
-           s.project,
-           exp_decay((unixepoch('now') - o.timestamp) / 86400.0, 7.0) AS recency,
-           CASE o.obs_type
-               WHEN 'file_edit' THEN 1.0 WHEN 'command' THEN 0.67
-               WHEN 'session_compact' THEN 0.5 WHEN 'mcp_call' THEN 0.33
-               ELSE 0.17
-           END AS type_w
-    FROM observations o
-    JOIN sessions s ON o.session_id = s.id
-    WHERE s.project IS NOT NULL AND s.project != ?1
-),
-ranked AS (
-    SELECT *,
-           (recency * 0.6 + type_w * 0.4) AS score,
-           ROW_NUMBER() OVER (
-               PARTITION BY COALESCE(file_path, CAST(id AS TEXT))
-               ORDER BY (recency * 0.6 + type_w * 0.4) DESC
-           ) AS rn
-    FROM scored
-)
-SELECT id, timestamp, obs_type, file_path, content, is_pinned, project, score
-FROM ranked WHERE rn = 1
-ORDER BY score DESC
+SELECT o.id, o.timestamp, o.obs_type, o.file_path, o.content, o.is_pinned,
+       s.project
+FROM observations o
+JOIN sessions s ON o.session_id = s.id
+WHERE s.project IS NOT NULL AND s.project != ?1
+  AND o.is_pinned = 1
+ORDER BY o.timestamp DESC
 LIMIT ?2";
 
 fn query_rows(conn: &Connection, sql: &str, project: &str, limit: i64) -> Result<Vec<ContextRow>, NmemError> {
@@ -278,7 +246,7 @@ fn format_summaries(rows: &[SummaryRow]) -> String {
     }
 
     let mut out = String::from("## Session Summaries\n");
-    for row in rows {
+    for (i, row) in rows.iter().enumerate() {
         let time = format_relative_time(row.started_at);
         let intent = &row.summary.intent;
         if intent.is_empty() {
@@ -297,6 +265,30 @@ fn format_summaries(rows: &[SummaryRow]) -> String {
         } else {
             out.push_str(&format!("- [{time}] **{intent}** — completed: {completed}\n"));
         }
+
+        // Show learned + next_steps for recent summaries (high-value context)
+        if i < 3 && !row.summary.learned.is_empty() {
+            let learned = row
+                .summary
+                .learned
+                .iter()
+                .take(3)
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("; ");
+            out.push_str(&format!("  - Learned: {learned}\n"));
+        }
+        if i == 0 && !row.summary.next_steps.is_empty() {
+            let next = row
+                .summary
+                .next_steps
+                .iter()
+                .take(3)
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("; ");
+            out.push_str(&format!("  - Next: {next}\n"));
+        }
     }
     out
 }
@@ -307,7 +299,7 @@ pub fn generate_context(conn: &Connection, project: &str, local_limit: i64, cros
     register_udfs(conn)?;
 
     let intent_rows = query_intents(conn, project, 10)?;
-    let summary_rows = query_summaries(conn, project, 5)?;
+    let summary_rows = query_summaries(conn, project, 10)?;
     let local_rows = query_rows(conn, PROJECT_LOCAL_SQL, project, local_limit)?;
     let cross_rows = query_rows(conn, CROSS_PROJECT_SQL, project, cross_limit)?;
 
