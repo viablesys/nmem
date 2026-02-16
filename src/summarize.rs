@@ -223,7 +223,51 @@ pub fn summarize_session(
         params![summary_json, session_id],
     )?;
 
+    // Stream to VictoriaLogs — non-fatal, fire-and-forget
+    let project: Option<String> = conn
+        .query_row(
+            "SELECT project FROM sessions WHERE id = ?1",
+            params![session_id],
+            |r| r.get(0),
+        )
+        .ok();
+    stream_summary_to_logs(session_id, project.as_deref().unwrap_or("unknown"), &summary);
+
     Ok(())
+}
+
+const VLOGS_ENDPOINT: &str = "http://localhost:9428/insert/jsonline";
+
+/// Stream a session summary to VictoriaLogs as a structured log entry.
+fn stream_summary_to_logs(session_id: &str, project: &str, summary: &SessionSummary) {
+    let completed = summary.completed.join("; ");
+    let learned = summary.learned.join("; ");
+    let next_steps = summary.next_steps.join("; ");
+    let files_edited = summary.files_edited.join(", ");
+
+    let record = serde_json::json!({
+        "_msg": summary.intent,
+        "service": "nmem",
+        "type": "session_summary",
+        "session_id": session_id,
+        "project": project,
+        "intent": summary.intent,
+        "learned": learned,
+        "completed": completed,
+        "next_steps": next_steps,
+        "files_edited": files_edited,
+    });
+
+    let body = format!("{}\n", record);
+    let agent = ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .timeout_global(Some(std::time::Duration::from_secs(2)))
+            .build(),
+    );
+    let _ = agent
+        .post(VLOGS_ENDPOINT)
+        .header("Content-Type", "application/stream+json")
+        .send(body.as_bytes());
 }
 
 #[cfg(test)]

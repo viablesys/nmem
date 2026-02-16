@@ -4,8 +4,16 @@ Missing features, why they're missing, and what triggers implementation.
 
 ## Parity gap (was in claude-mem, missing in nmem)
 
-### S1's S4: session summarization — v1 implemented, gaps remain
-End-of-session summarization via local LLM (granite-4-h-tiny on LM Studio) is implemented. Stop hook calls OpenAI-compatible chat completions endpoint, stores structured JSON in `sessions.summary`, surfaces in context injection and `session_summaries` MCP tool.
+### S1's S4: session summarization — v2 validated
+End-of-session summarization via local LLM (granite-4-h-tiny on LM Studio). Stop hook calls OpenAI-compatible chat completions endpoint, stores structured JSON in `sessions.summary`, surfaces in context injection and `session_summaries` MCP tool. Summaries streamed to VictoriaLogs for dashboard visibility.
+
+**v2 changes (2026-02-15):**
+- Prompt reframed for agent context reconstruction, not human readability — consumer is the next AI session
+- `request` → `intent` rename across summarize/context/serve
+- Thinking blocks (`source = 'agent'` in prompts table) included in summarization payload — richest signal for `learned` field
+- `investigated` field dropped (redundant with `files_read`)
+- `learned` field now captures decisions, trade-offs, constraints — things the next session should not re-derive
+- `notes` field reframed as negative knowledge — failed approaches and why
 
 **Remaining gaps**:
 - **PreCompact summarization**: Long sessions lose signal when Claude Code compacts context. PreCompact hook fires but nmem ignores it. Adding summarization there would delay context injection by ~7.6s while the user is waiting — needs async/background approach.

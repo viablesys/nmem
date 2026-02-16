@@ -13,7 +13,7 @@ S1 is itself a viable system (VSM recursion). Its internal subsystems:
 | S1 | Raw capture (observations, prompts) | Functional |
 | S2 | Dedup, ordering, prompt-observation linking | Functional |
 | S3 | Content limits, truncation, what to capture | Partial |
-| S4 | Summarization — compress what was captured | Partial (v1) |
+| S4 | Summarization — compress what was captured | Functional (v2) |
 | S5 | Capture policy (config, sensitivity, filtering) | Functional |
 
 What works:
@@ -24,7 +24,9 @@ What works:
 - Context injection pushes relevant history at session start
 - Secret filtering redacts before storage
 
-**S1's S4 (session summarization) — v1 implemented, gaps remain.** End-of-session summarization via local LLM (granite-4-h-tiny on LM Studio) is functional. Stop hook generates structured JSON summaries (request, investigated, learned, completed, next_steps, files_read, files_edited, notes) stored in `sessions.summary`, surfaced in context injection and `session_summaries` MCP tool. This closes the parity gap with claude-mem for end-of-session compression.
+**S1's S4 (session summarization) — v2 validated.** End-of-session summarization via local LLM (granite-4-h-tiny on LM Studio). Stop hook generates structured JSON summaries (intent, learned, completed, next_steps, files_read, files_edited, notes) stored in `sessions.summary`, surfaced in context injection and `session_summaries` MCP tool, streamed to VictoriaLogs.
+
+Key design insight: nmem is a tool for the agent, not the user. Summaries are optimized for context reconstruction by the next AI session — decisions, trade-offs, and conclusions that should not be re-derived. The prompt explicitly frames the consumer as the next Claude session. Thinking blocks (`source = 'agent'` in prompts table, extracted from transcript by `scan_transcript`) feed the `learned` field — they contain the richest reasoning signal.
 
 **Remaining S1's S4 gaps:**
 - PreCompact events are ignored — long sessions lose signal when context is compacted
@@ -37,7 +39,7 @@ Framing this as S1's S4 (not the outer S4) keeps the design coherent:
 - The outer S4 synthesizes *across sessions* — unbounded, adaptive, complex
 - The outer S4 depends on S1's S4 having done its job first
 
-The v1 implementation confirmed that narrative coherence requires language generation — structured templates from observations alone don't capture intent or causality. An LLM (even a small local one) is necessary for this layer, validating ADR-002's Position C framing for S4-level synthesis.
+The implementation confirmed that narrative coherence requires language generation — structured templates from observations alone don't capture intent or causality. An LLM (even a small local one) is necessary for this layer, validating ADR-002's Position C framing for S4-level synthesis. Prompt engineering matters even for small models — framing the task correctly (agent context reconstruction vs. human report) substantially changes output quality.
 
 Incremental gaps: extraction coverage could expand (SendMessage, Skill invocations not captured).
 
@@ -183,18 +185,18 @@ A mature S5 would:
 
 | System | State | Gap |
 |--------|-------|-----|
-| S1 Operations | Functional (S4 partial) | Session summarization v1 done; PreCompact, rolling, FTS5 indexing remain |
+| S1 Operations | Functional (S4 v2) | Session summarization validated; PreCompact, rolling, FTS5 indexing remain |
 | S2 Coordination | Functional | Multi-agent would stress this |
 | S3 Control | Manual | Needs autonomous triggers |
 | S3* Audit | Minimal | Needs functional integrity checks |
 | S4 Intelligence | Designed | Work unit model defined; platform constraints block autonomous actuation |
 | S5 Policy | Static | No tension to resolve without active S4 |
 
-S1 captures facts and produces end-of-session summaries. S2 coordinates. S3 exists but doesn't self-trigger. S3* checks structure but not function. S4 is designed (work unit detection, context management, UI) but blocked on platform actuation — nmem has eyes but no hands for context control. S5 has nothing to mediate yet. The organism records and compresses, but doesn't yet manage its own attention.
+S1 captures facts and produces agent-oriented session summaries. S2 coordinates. S3 exists but doesn't self-trigger. S3* checks structure but not function. S4 is designed (work unit detection, context management, UI) but blocked on platform actuation — nmem has eyes but no hands for context control. S5 has nothing to mediate yet. The organism records and compresses, but doesn't yet manage its own attention.
 
 ## What closes the loop
 
-1. ~~**S1's S4 (session summarization)**~~ — **Done (v1).** End-of-session summarization via local LLM. Remaining sub-gaps (PreCompact, rolling summaries, FTS5 indexing) tracked in TODO.md.
+1. ~~**S1's S4 (session summarization)**~~ — **Done (v2).** Agent-oriented summarization via local LLM. Thinking blocks feed `learned` field. Summaries streamed to VictoriaLogs. Remaining sub-gaps (PreCompact, rolling summaries, FTS5 indexing) tracked in TODO.md.
 2. **S4 work unit detection** — highest priority. The core S4 algorithm: recognize work unit boundaries from observation patterns (prompt:thinking:tool ratios, hot files, intent shifts). This is the intelligence that makes nmem a viable system. Implementation is consumer-independent — same algorithm whether actuated via Claude Code hooks or API.
 3. **S4 context actuation** — depends on Claude Code platform evolution (issues #24252, #25689, #21132) or building an API-based harness. Without this, S4 can detect and summarize but not act autonomously on context.
 4. **S4 UI** — work-unit-oriented dashboard. S4's external interface for users. Shows current work unit, history, context health. Same data model as context injection.
