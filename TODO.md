@@ -104,9 +104,9 @@ Global `[retention.days]` only. No `[projects.X.retention.days]` override.
 **Why**: Global policy sufficient at current scale. Add when a user needs per-project tuning.
 
 ### Configurable type weights in context injection
-`context.rs` hardcodes type_weight (file_edit=1.0, command=0.67, etc.). Not exposed in config.
+`serve.rs` and `search.rs` hardcode type_weight (file_edit=1.0, command=0.67, etc.) for MCP scored retrieval. Not exposed in config. Context injection (`context.rs`) no longer uses type weights — it filters to pinned + recent file_edits + git milestones only, with summaries as primary content.
 
-**Why**: Defaults are reasonable. No evidence they need tuning.
+**Why**: Defaults are reasonable for MCP retrieval. Context injection moved past scoring to explicit filtering.
 
 ### Expanded tool classification
 `extract.rs` maps tools to obs_types but is coarse (e.g., task_spawn covers TaskCreate/TaskUpdate/TaskList without distinguishing). SendMessage and Skill invocations not captured.

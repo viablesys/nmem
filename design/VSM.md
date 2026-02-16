@@ -21,7 +21,7 @@ What works:
 - Structured extraction classifies tool calls into obs_types without LLM
 - FTS5 indexes observations and prompts with porter stemming
 - MCP server exposes search, get_observations, recent_context, timeline
-- Context injection pushes relevant history at session start
+- Context injection is summary-primary: session summaries (with learned/next_steps) are the main signal, raw observations filtered to pinned items + recent file_edits + git milestones only. Cross-project limited to pinned observations.
 - Secret filtering redacts before storage
 
 **S1's S4 (session summarization) — v2 validated.** End-of-session summarization via local LLM (granite-4-h-tiny on LM Studio). Stop hook generates structured JSON summaries (intent, learned, completed, next_steps, files_read, files_edited, notes) stored in `sessions.summary`, surfaced in context injection and `session_summaries` MCP tool, streamed to VictoriaLogs.
@@ -94,6 +94,8 @@ S3* should be the immune system — detecting pathology before it becomes visibl
 Adaptation, pattern recognition, environment sensing. **Designed, not implemented.**
 
 S4 answers: "what's changing, and how should we adapt?" The original framing (retrieval feedback, cross-session synthesis) remains valid but is now secondary to a more fundamental capability: **autonomous context management via work unit detection.**
+
+Context injection (`context.rs`) has been restructured toward S4 principles — summaries are primary content, raw observations filtered to signal only (pinned + recent edits + git milestones). This is a step toward S4 but still mechanical: the same queries run every SessionStart regardless of session type or agent need. True S4 context injection would adapt based on the session's first prompt or detected work unit.
 
 ### Core concept: the work unit
 
@@ -185,14 +187,14 @@ A mature S5 would:
 
 | System | State | Gap |
 |--------|-------|-----|
-| S1 Operations | Functional (S4 v2) | Session summarization validated; PreCompact, rolling, FTS5 indexing remain |
+| S1 Operations | Functional (S4 v2) | Summary-primary context injection; PreCompact, rolling, FTS5 indexing remain |
 | S2 Coordination | Functional | Multi-agent would stress this |
 | S3 Control | Manual | Needs autonomous triggers |
 | S3* Audit | Minimal | Needs functional integrity checks |
 | S4 Intelligence | Designed | Work unit model defined; platform constraints block autonomous actuation |
 | S5 Policy | Static | No tension to resolve without active S4 |
 
-S1 captures facts and produces agent-oriented session summaries. S2 coordinates. S3 exists but doesn't self-trigger. S3* checks structure but not function. S4 is designed (work unit detection, context management, UI) but blocked on platform actuation — nmem has eyes but no hands for context control. S5 has nothing to mediate yet. The organism records and compresses, but doesn't yet manage its own attention.
+S1 captures facts and produces agent-oriented session summaries. Context injection is now summary-primary — raw observation noise replaced with curated signal (summaries + pinned + recent edits + git milestones). S2 coordinates. S3 exists but doesn't self-trigger. S3* checks structure but not function. S4 is designed (work unit detection, context management, UI) but blocked on platform actuation — nmem has eyes but no hands for context control. S5 has nothing to mediate yet. The organism records, compresses, and selectively recalls, but doesn't yet manage its own attention.
 
 ## What closes the loop
 
