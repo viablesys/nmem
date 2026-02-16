@@ -16,6 +16,7 @@ End-of-session summarization via local LLM (granite-4-h-tiny on LM Studio). Stop
 - `notes` field reframed as negative knowledge — failed approaches and why
 
 **Remaining gaps**:
+- **LLM dependency is non-fatal but silent**: If LM Studio is not running (or the model isn't loaded), summarization fails and the session is recorded without a summary. The failure is logged to stderr (`summarization failed (non-fatal)`) but the user has no indication that summaries are missing — future sessions just have a gap in their context injection. No fallback strategy exists (e.g., template-based summary from observations alone). This is acceptable for a single-developer tool where the user controls LM Studio, but fragile for any distribution scenario.
 - **PreCompact summarization**: Long sessions lose signal when Claude Code compacts context. PreCompact hook fires but nmem ignores it. Adding summarization there would delay context injection by ~7.6s while the user is waiting — needs async/background approach.
 - **Rolling summaries**: claude-mem summarized at every prompt turn. nmem only summarizes at session end. For long sessions, the end-of-session summary compresses too much.
 - **FTS5 indexing of summaries**: Summary content is stored as JSON in `sessions.summary` but not FTS5-indexed. Search via `session_summaries` MCP tool queries by project only, not by content.

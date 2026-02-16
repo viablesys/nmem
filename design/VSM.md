@@ -95,7 +95,7 @@ Adaptation, pattern recognition, environment sensing. **Designed, not implemente
 
 S4 answers: "what's changing, and how should we adapt?" The original framing (retrieval feedback, cross-session synthesis) remains valid but is now secondary to a more fundamental capability: **autonomous context management via work unit detection.**
 
-Context injection (`context.rs`) has been restructured toward S4 principles — summaries are primary content, raw observations filtered to signal only (pinned + recent edits + git milestones). This is a step toward S4 but still mechanical: the same queries run every SessionStart regardless of session type or agent need. True S4 context injection would adapt based on the session's first prompt or detected work unit.
+Context injection (`context.rs`) has been restructured toward S4 principles — summaries are primary content, raw observations filtered to signal only (pinned + recent edits + git milestones). This is a step toward S4 but still mechanical: the same queries run every SessionStart regardless of session type or agent need. Concrete limitation: if a user switches between two features in the same project, context injection doesn't prioritize the feature being returned to — it's time-ordered, not relevance-ordered. True S4 context injection would adapt based on the session's first prompt or detected work unit.
 
 ### Core concept: the work unit
 
