@@ -83,6 +83,12 @@ pub struct RecentContextParams {
     pub limit: Option<i64>,
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct RegenerateContextParams {
+    /// Project name (required). Use the project name from session start.
+    pub project: String,
+}
+
 // --- Response types ---
 
 #[derive(Serialize)]
@@ -526,6 +532,26 @@ impl NmemServer {
         let json = serde_json::to_string(&results).map_err(|e| db_err(&e))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
+    pub fn do_regenerate_context(
+        &self,
+        params: RegenerateContextParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        let db = self.db.lock().map_err(|e| db_err(&e))?;
+        let config = crate::config::load_config().unwrap_or_default();
+        let (local_limit, cross_limit) =
+            crate::config::resolve_context_limits(&config, &params.project, false);
+        let ctx = crate::context::generate_context(&db, &params.project, local_limit, cross_limit)
+            .map_err(|e| db_err(&e))?;
+        if ctx.is_empty() {
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "No context available for project \"{}\".",
+                params.project
+            ))]))
+        } else {
+            Ok(CallToolResult::success(vec![Content::text(ctx)]))
+        }
+    }
+
     pub fn do_session_summaries(
         &self,
         params: SessionSummariesParams,
@@ -646,6 +672,20 @@ impl NmemServer {
         let start = std::time::Instant::now();
         let result = self.do_session_summaries(p.0);
         record_query_metrics("session_summaries", start);
+        result
+    }
+
+    #[tool(
+        description = "Regenerate the full context injection (intents, session summaries, recent observations, cross-project pins) as markdown. Same output as SessionStart but with current data.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn regenerate_context(
+        &self,
+        p: Parameters<RegenerateContextParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let start = std::time::Instant::now();
+        let result = self.do_regenerate_context(p.0);
+        record_query_metrics("regenerate_context", start);
         result
     }
 
