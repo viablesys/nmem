@@ -24,6 +24,7 @@ fn run() -> Result<(), NmemError> {
         Command::Encrypt => nmem::db::handle_encrypt(&db_path),
         Command::Pin(args) => nmem::pin::handle_pin(&db_path, args.id),
         Command::Unpin(args) => nmem::pin::handle_unpin(&db_path, args.id),
+        Command::Context(args) => nmem::context::handle_context(&db_path, &args),
     }
 }
 

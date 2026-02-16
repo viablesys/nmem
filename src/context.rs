@@ -331,6 +331,29 @@ pub fn generate_context(conn: &Connection, project: &str, local_limit: i64, cros
     Ok(out)
 }
 
+/// CLI handler: print context injection output for the current project.
+pub fn handle_context(db_path: &std::path::Path, args: &crate::cli::ContextArgs) -> Result<(), NmemError> {
+    let conn = crate::db::open_db_readonly(db_path)?;
+
+    let project = args.project.clone().unwrap_or_else(|| {
+        let cwd = std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        crate::project::derive_project(&cwd)
+    });
+
+    let config = crate::config::load_config()?;
+    let (local_limit, cross_limit) = crate::config::resolve_context_limits(&config, &project, false);
+
+    let ctx = generate_context(&conn, &project, local_limit, cross_limit)?;
+    if ctx.is_empty() {
+        println!("No context available for project \"{project}\".");
+    } else {
+        print!("{ctx}");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

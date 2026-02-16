@@ -32,6 +32,8 @@ pub enum Command {
     Pin(PinArgs),
     /// Unpin an observation (restore to normal retention)
     Unpin(PinArgs),
+    /// Show what nmem would inject at session start
+    Context(ContextArgs),
 }
 
 #[derive(Parser)]
@@ -103,6 +105,13 @@ pub struct SearchArgs {
 pub struct PinArgs {
     /// Observation ID
     pub id: i64,
+}
+
+#[derive(Parser)]
+pub struct ContextArgs {
+    /// Project name (defaults to current directory)
+    #[arg(long)]
+    pub project: Option<String>,
 }
 
 #[derive(Parser)]

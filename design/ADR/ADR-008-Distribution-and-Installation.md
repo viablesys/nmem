@@ -49,6 +49,8 @@ nmem is a single Rust binary (`nmem`) with two subcommands: `record` (synchronou
 - Should dev install skip release optimizations for faster iteration?
 - How to handle the chicken-and-egg: nmem hooks call the nmem binary, but during development the binary path changes between debug/release builds.
 
+> **[NOTE 2026-02-15]** Current dev install uses a symlink: `ln -sf ~/workspace/nmem/target/release/nmem ~/.local/bin/nmem`. This keeps `nmem` on PATH without `cargo install`, and `cargo build --release` updates it in place (hardlinked). Hooks and slash commands can reference `nmem` by name rather than absolute path. Trade-off: forgets to rebuild → stale binary; but that's already the case with hooks calling `target/release/nmem` directly.
+
 ### Q4: Upgrade Path
 - How does a user know a new version is available?
 - Can the binary self-update, or is that the marketplace/package manager's job?
