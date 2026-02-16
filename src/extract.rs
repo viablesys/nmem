@@ -1,6 +1,7 @@
 use serde_json::Value;
 
 /// Classify a tool name into an observation type.
+/// For Bash commands, pass the command string to sub-classify git operations.
 pub fn classify_tool(name: &str) -> &'static str {
     match name {
         "Bash" => "command",
@@ -14,6 +15,47 @@ pub fn classify_tool(name: &str) -> &'static str {
         _ if name.contains("__") => "mcp_call",
         _ => "tool_other",
     }
+}
+
+/// Sub-classify a Bash command. Returns a more specific obs_type if the
+/// command is a git commit, push, or gh CLI call, otherwise returns "command".
+pub fn classify_bash(command: &str) -> &'static str {
+    let cmd = command.trim();
+    // Handle chained commands: `git add . && git commit -m "msg" && git push`
+    // Classify by the strongest signal (push > commit > gh > command)
+    if contains_git_cmd(cmd, "push") {
+        "git_push"
+    } else if contains_git_cmd(cmd, "commit") {
+        "git_commit"
+    } else if contains_cmd(cmd, "gh") {
+        "github"
+    } else {
+        "command"
+    }
+}
+
+fn contains_git_cmd(cmd: &str, subcmd: &str) -> bool {
+    // Match: "git push", "git -C /path push", "git commit", etc.
+    for segment in cmd.split("&&").chain(cmd.split(';')) {
+        let segment = segment.trim();
+        let words: Vec<&str> = segment.split_whitespace().collect();
+        if let Some(pos) = words.iter().position(|&w| w == "git") {
+            if words[pos + 1..].iter().any(|&w| w == subcmd) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn contains_cmd(cmd: &str, target: &str) -> bool {
+    for segment in cmd.split("&&").chain(cmd.split(';')) {
+        let segment = segment.trim();
+        if segment.split_whitespace().next() == Some(target) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Extract the primary content from a tool invocation.
@@ -114,6 +156,22 @@ mod tests {
         assert_eq!(classify_tool("WebSearch"), "web_search");
         assert_eq!(classify_tool("mcp__server__tool"), "mcp_call");
         assert_eq!(classify_tool("Unknown"), "tool_other");
+    }
+
+    #[test]
+    fn test_classify_bash() {
+        assert_eq!(classify_bash("git push"), "git_push");
+        assert_eq!(classify_bash("git commit -m \"msg\""), "git_commit");
+        assert_eq!(classify_bash("git -C /path push"), "git_push");
+        assert_eq!(classify_bash("git -C /path commit -m \"msg\""), "git_commit");
+        assert_eq!(classify_bash("git add . && git commit -m \"msg\""), "git_commit");
+        assert_eq!(classify_bash("git add . && git commit -m \"msg\" && git push"), "git_push");
+        assert_eq!(classify_bash("git status"), "command");
+        assert_eq!(classify_bash("gh pr create --title \"feat\""), "github");
+        assert_eq!(classify_bash("gh issue view 123"), "github");
+        assert_eq!(classify_bash("gh search issues --repo org/repo \"query\""), "github");
+        assert_eq!(classify_bash("ls -la"), "command");
+        assert_eq!(classify_bash("cargo test"), "command");
     }
 
     #[test]

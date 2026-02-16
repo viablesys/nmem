@@ -185,8 +185,12 @@ fn handle_post_tool_use(
         get_current_prompt_id(&tx, &payload.session_id)?
     };
 
-    let obs_type = classify_tool(tool_name);
     let content = extract_content(tool_name, &tool_input);
+    let obs_type = if tool_name == "Bash" {
+        crate::extract::classify_bash(&content)
+    } else {
+        classify_tool(tool_name)
+    };
     let file_path = extract_file_path(tool_name, &tool_input);
 
     // Filter secrets from content
