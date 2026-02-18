@@ -22,9 +22,10 @@ pub mod s3_maintain;
 pub mod s3_purge;
 pub mod s3_sweep;
 
-// S4 Intelligence — context injection, task dispatch, cross-session patterns
+// S4 Intelligence — context injection, task dispatch, cross-session patterns, episodic memory
 pub mod s4_context;
 pub mod s4_dispatch;
+pub mod s4_memory;
 
 // S5 Policy — config, boundaries, identity
 pub mod s5_config;
@@ -45,6 +46,7 @@ pub use s3_maintain as maintain;
 pub use s3_purge as purge;
 pub use s3_sweep as sweep;
 pub use s4_dispatch as dispatch;
+pub use s4_memory as memory;
 pub use s5_config as config;
 pub use s5_filter as filter;
 pub use s5_project as project;

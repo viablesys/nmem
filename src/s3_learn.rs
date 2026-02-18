@@ -506,7 +506,7 @@ fn detect_repeated_intents(
     Ok(patterns)
 }
 
-const STOPWORDS: &[&str] = &[
+pub const STOPWORDS: &[&str] = &[
     "a", "an", "the", "and", "or", "to", "of", "in", "for", "with", "on", "at", "by", "from",
     "is", "it", "this", "that", "be", "as", "are", "was", "were", "been", "do", "does", "did",
     "will", "would", "could", "should", "may", "might", "can", "has", "have", "had", "not", "no",
@@ -514,7 +514,7 @@ const STOPWORDS: &[&str] = &[
 ];
 
 /// Extract meaningful keywords from an intent string.
-fn intent_keywords(intent: &str) -> Vec<String> {
+pub fn intent_keywords(intent: &str) -> Vec<String> {
     intent
         .to_lowercase()
         .split(|c: char| !c.is_alphanumeric() && c != '_')
@@ -524,7 +524,7 @@ fn intent_keywords(intent: &str) -> Vec<String> {
 }
 
 /// Jaccard similarity between two keyword bags (as sorted unique sets).
-fn jaccard(a: &[String], b: &[String]) -> f64 {
+pub fn jaccard(a: &[String], b: &[String]) -> f64 {
     if a.is_empty() && b.is_empty() {
         return 0.0;
     }

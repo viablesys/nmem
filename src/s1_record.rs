@@ -350,6 +350,13 @@ fn handle_stop(conn: &Connection, payload: &HookPayload, config: &NmemConfig) ->
 
     tx.commit()?;
 
+    // Detect episodes — non-fatal
+    match crate::s4_memory::detect_and_narrate_episodes(conn, &payload.session_id, &config.summarization) {
+        Ok(n) if n > 1 => eprintln!("nmem: {n} episodes detected"),
+        Err(e) => eprintln!("nmem: episode detection failed (non-fatal): {e}"),
+        _ => {}
+    }
+
     // Summarize session — non-fatal
     match crate::s1_4_summarize::summarize_session(conn, &payload.session_id, &config.summarization) {
         Ok(()) => {}

@@ -102,6 +102,26 @@ CREATE INDEX idx_tasks_status ON tasks(status, created_at);
         ),
         M::up("ALTER TABLE tasks ADD COLUMN run_after INTEGER;"),
         M::up("ALTER TABLE tasks ADD COLUMN output_path TEXT;"),
+        M::up(
+            "
+CREATE TABLE work_units (
+    id              INTEGER PRIMARY KEY,
+    session_id      TEXT NOT NULL REFERENCES sessions(id),
+    started_at      INTEGER NOT NULL,
+    ended_at        INTEGER,
+    intent          TEXT,
+    first_prompt_id INTEGER,
+    last_prompt_id  INTEGER,
+    hot_files       TEXT,
+    phase_signature TEXT,
+    obs_count       INTEGER,
+    summary         TEXT,
+    learned         TEXT,
+    notes           TEXT
+);
+CREATE INDEX idx_wu_session ON work_units(session_id);
+",
+        ),
     ])
 });
 
