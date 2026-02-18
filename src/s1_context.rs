@@ -21,6 +21,7 @@ LEFT JOIN observations o ON o.prompt_id = p.id
 JOIN sessions s ON p.session_id = s.id
 WHERE p.source = 'user'
   AND s.project = ?1
+  AND (?3 IS NULL OR p.timestamp < ?3)
 GROUP BY p.id
 HAVING COUNT(o.id) > 0
 ORDER BY p.timestamp DESC
@@ -32,9 +33,9 @@ struct IntentRow {
     action_count: i64,
 }
 
-fn query_intents(conn: &Connection, project: &str, limit: i64) -> Result<Vec<IntentRow>, NmemError> {
+fn query_intents(conn: &Connection, project: &str, limit: i64, before: Option<i64>) -> Result<Vec<IntentRow>, NmemError> {
     let mut stmt = conn.prepare(INTENTS_SQL)?;
-    let rows = stmt.query_map(params![project, limit], |row| {
+    let rows = stmt.query_map(params![project, limit, before], |row| {
         Ok(IntentRow {
             timestamp: row.get(1)?,
             content: row.get(2)?,
@@ -74,6 +75,7 @@ SELECT o.id, o.timestamp, o.obs_type, o.file_path, o.content, o.is_pinned,
 FROM observations o
 JOIN sessions s ON o.session_id = s.id
 WHERE s.project = ?1
+  AND (?3 IS NULL OR o.timestamp < ?3)
   AND (
     o.is_pinned = 1
     OR (o.obs_type = 'file_edit' AND o.timestamp > unixepoch('now') - 7200)
@@ -89,12 +91,13 @@ FROM observations o
 JOIN sessions s ON o.session_id = s.id
 WHERE s.project IS NOT NULL AND s.project != ?1
   AND o.is_pinned = 1
+  AND (?3 IS NULL OR o.timestamp < ?3)
 ORDER BY o.timestamp DESC
 LIMIT ?2";
 
-fn query_rows(conn: &Connection, sql: &str, project: &str, limit: i64) -> Result<Vec<ContextRow>, NmemError> {
+fn query_rows(conn: &Connection, sql: &str, project: &str, limit: i64, before: Option<i64>) -> Result<Vec<ContextRow>, NmemError> {
     let mut stmt = conn.prepare(sql)?;
-    let rows = stmt.query_map(params![project, limit], |row| {
+    let rows = stmt.query_map(params![project, limit, before], |row| {
         Ok(ContextRow {
             id: row.get(0)?,
             timestamp: row.get(1)?,
@@ -219,14 +222,15 @@ struct SummaryRow {
     summary: SessionSummary,
 }
 
-fn query_summaries(conn: &Connection, project: &str, limit: i64) -> Result<Vec<SummaryRow>, NmemError> {
+fn query_summaries(conn: &Connection, project: &str, limit: i64, before: Option<i64>) -> Result<Vec<SummaryRow>, NmemError> {
     let mut stmt = conn.prepare(
         "SELECT started_at, summary FROM sessions
          WHERE project = ?1 AND summary IS NOT NULL
+           AND (?3 IS NULL OR started_at < ?3)
          ORDER BY started_at DESC LIMIT ?2",
     )?;
     let rows = stmt
-        .query_map(params![project, limit], |row| {
+        .query_map(params![project, limit, before], |row| {
             let started_at: i64 = row.get(0)?;
             let summary_str: String = row.get(1)?;
             Ok((started_at, summary_str))
@@ -295,13 +299,13 @@ fn format_summaries(rows: &[SummaryRow]) -> String {
 
 /// Generate context injection markdown for a SessionStart event.
 /// Returns empty string if no observations exist.
-pub fn generate_context(conn: &Connection, project: &str, local_limit: i64, cross_limit: i64) -> Result<String, NmemError> {
+pub fn generate_context(conn: &Connection, project: &str, local_limit: i64, cross_limit: i64, before: Option<i64>) -> Result<String, NmemError> {
     register_udfs(conn)?;
 
-    let intent_rows = query_intents(conn, project, 10)?;
-    let summary_rows = query_summaries(conn, project, 10)?;
-    let local_rows = query_rows(conn, PROJECT_LOCAL_SQL, project, local_limit)?;
-    let cross_rows = query_rows(conn, CROSS_PROJECT_SQL, project, cross_limit)?;
+    let intent_rows = query_intents(conn, project, 10, before)?;
+    let summary_rows = query_summaries(conn, project, 10, before)?;
+    let local_rows = query_rows(conn, PROJECT_LOCAL_SQL, project, local_limit, before)?;
+    let cross_rows = query_rows(conn, CROSS_PROJECT_SQL, project, cross_limit, before)?;
 
     if intent_rows.is_empty() && summary_rows.is_empty() && local_rows.is_empty() && cross_rows.is_empty() {
         return Ok(String::new());
@@ -345,7 +349,7 @@ pub fn handle_context(db_path: &std::path::Path, args: &crate::cli::ContextArgs)
     let config = crate::config::load_config()?;
     let (local_limit, cross_limit) = crate::config::resolve_context_limits(&config, &project, false);
 
-    let ctx = generate_context(&conn, &project, local_limit, cross_limit)?;
+    let ctx = generate_context(&conn, &project, local_limit, cross_limit, None)?;
     if ctx.is_empty() {
         println!("No context available for project \"{project}\".");
     } else {

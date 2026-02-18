@@ -1,0 +1,7 @@
+[Unit]
+Description=nmem task dispatcher
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/nmem dispatch
+Environment=NMEM_KEY_FILE=%h/.nmem/key

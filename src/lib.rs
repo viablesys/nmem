@@ -22,6 +22,9 @@ pub mod s3_maintain;
 pub mod s3_purge;
 pub mod s3_sweep;
 
+// S4 Intelligence — future work, cross-session planning
+pub mod s4_dispatch;
+
 // S5 Policy — config, boundaries, identity
 pub mod s5_config;
 pub mod s5_filter;
@@ -39,6 +42,7 @@ pub use s14_transcript as transcript;
 pub use s3_maintain as maintain;
 pub use s3_purge as purge;
 pub use s3_sweep as sweep;
+pub use s4_dispatch as dispatch;
 pub use s5_config as config;
 pub use s5_filter as filter;
 pub use s5_project as project;

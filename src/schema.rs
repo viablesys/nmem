@@ -83,6 +83,23 @@ END;
         M::up(
             "ALTER TABLE observations ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;",
         ),
+        M::up(
+            "
+CREATE TABLE tasks (
+    id           INTEGER PRIMARY KEY,
+    created_at   INTEGER NOT NULL DEFAULT (unixepoch('now')),
+    status       TEXT NOT NULL DEFAULT 'pending',
+    prompt       TEXT NOT NULL,
+    project      TEXT,
+    cwd          TEXT,
+    tmux_target  TEXT,
+    started_at   INTEGER,
+    completed_at INTEGER,
+    error        TEXT
+);
+CREATE INDEX idx_tasks_status ON tasks(status, created_at);
+",
+        ),
     ])
 });
 

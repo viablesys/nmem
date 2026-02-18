@@ -34,6 +34,10 @@ pub enum Command {
     Unpin(PinArgs),
     /// Show what nmem would inject at session start
     Context(ContextArgs),
+    /// Queue a task for later execution
+    Queue(QueueArgs),
+    /// Check for pending tasks and dispatch to tmux
+    Dispatch(DispatchArgs),
 }
 
 #[derive(Parser)]
@@ -123,4 +127,33 @@ pub struct MaintainArgs {
     /// Run retention sweep (deletes expired observations per config)
     #[arg(long)]
     pub sweep: bool,
+}
+
+#[derive(Parser)]
+pub struct QueueArgs {
+    /// The task prompt
+    pub prompt: String,
+
+    /// Project scope (defaults to cwd-derived)
+    #[arg(long)]
+    pub project: Option<String>,
+
+    /// Working directory (defaults to current)
+    #[arg(long)]
+    pub cwd: Option<String>,
+}
+
+#[derive(Parser)]
+pub struct DispatchArgs {
+    /// Maximum concurrent running tasks (default 1)
+    #[arg(long, default_value = "1")]
+    pub max_concurrent: u32,
+
+    /// Show what would be dispatched without doing it
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// tmux session name (default "nmem")
+    #[arg(long, default_value = "nmem")]
+    pub tmux_session: String,
 }

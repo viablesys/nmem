@@ -43,6 +43,12 @@ pub struct SearchParams {
     /// Ranking order: "relevance" (BM25 only, default) or "blended" (BM25 + recency + type weight).
     #[serde(default, rename = "orderBy")]
     pub order_by: Option<String>,
+    /// Only include observations before this Unix timestamp.
+    #[serde(default)]
+    pub before: Option<i64>,
+    /// Only include observations after this Unix timestamp.
+    #[serde(default)]
+    pub after: Option<i64>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -71,6 +77,12 @@ pub struct SessionSummariesParams {
     /// Max results (default 10, max 50).
     #[serde(default)]
     pub limit: Option<i64>,
+    /// Only include sessions started before this Unix timestamp.
+    #[serde(default)]
+    pub before: Option<i64>,
+    /// Only include sessions started after this Unix timestamp.
+    #[serde(default)]
+    pub after: Option<i64>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -81,12 +93,60 @@ pub struct RecentContextParams {
     /// Max observations (default 30, max 100).
     #[serde(default)]
     pub limit: Option<i64>,
+    /// Only include observations before this Unix timestamp.
+    #[serde(default)]
+    pub before: Option<i64>,
+    /// Only include observations after this Unix timestamp.
+    #[serde(default)]
+    pub after: Option<i64>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 pub struct RegenerateContextParams {
     /// Project name (required). Use the project name from session start.
     pub project: String,
+    /// Only include data before this Unix timestamp. Produces "context as of time T".
+    #[serde(default)]
+    pub before: Option<i64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SessionTraceParams {
+    /// Session ID to trace.
+    pub session_id: String,
+    /// Only include prompts before this Unix timestamp.
+    #[serde(default)]
+    pub before: Option<i64>,
+    /// Only include prompts after this Unix timestamp.
+    #[serde(default)]
+    pub after: Option<i64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct FileHistoryParams {
+    /// File path to trace history for.
+    pub file_path: String,
+    /// Only include touches before this Unix timestamp.
+    #[serde(default)]
+    pub before: Option<i64>,
+    /// Only include touches after this Unix timestamp.
+    #[serde(default)]
+    pub after: Option<i64>,
+    /// Max sessions to return (default 10, max 50).
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct QueueTaskParams {
+    /// The task prompt to queue for later execution.
+    pub prompt: String,
+    /// Project scope. Defaults to current project.
+    #[serde(default)]
+    pub project: Option<String>,
+    /// Working directory for the task.
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 // --- Response types ---
@@ -129,6 +189,61 @@ struct SessionSummaryResult {
     project: String,
     started_at: i64,
     summary: serde_json::Value,
+}
+
+#[derive(Serialize)]
+struct SessionTraceResult {
+    session_id: String,
+    project: String,
+    started_at: i64,
+    ended_at: Option<i64>,
+    summary: Option<serde_json::Value>,
+    prompts: Vec<PromptTrace>,
+}
+
+#[derive(Serialize)]
+struct PromptTrace {
+    prompt_id: Option<i64>,
+    timestamp: i64,
+    source: String,
+    content: Option<String>,
+    observation_count: usize,
+    observations: Vec<ObservationSummary>,
+}
+
+#[derive(Serialize)]
+struct ObservationSummary {
+    id: i64,
+    timestamp: i64,
+    obs_type: String,
+    file_path: Option<String>,
+    content_preview: String,
+    is_pinned: bool,
+}
+
+#[derive(Serialize)]
+struct FileHistoryResult {
+    file_path: String,
+    sessions: Vec<FileSessionEntry>,
+}
+
+#[derive(Serialize)]
+struct FileSessionEntry {
+    session_id: String,
+    project: String,
+    started_at: i64,
+    summary_intent: Option<String>,
+    touches: Vec<FileTouch>,
+}
+
+#[derive(Serialize)]
+struct FileTouch {
+    observation_id: i64,
+    timestamp: i64,
+    obs_type: String,
+    content_preview: String,
+    prompt_content: Option<String>,
+    is_pinned: bool,
 }
 
 // --- Helpers ---
@@ -243,6 +358,8 @@ impl NmemServer {
                 WHERE observations_fts MATCH ?1
                   AND (?2 IS NULL OR s.project = ?2)
                   AND (?3 IS NULL OR o.obs_type = ?3)
+                  AND (?4 IS NULL OR o.timestamp < ?4)
+                  AND (?5 IS NULL OR o.timestamp > ?5)
             ),
             rank_bounds AS (
                 SELECT MIN(raw_rank) AS min_r, MAX(raw_rank) AS max_r FROM fts_matches
@@ -263,7 +380,7 @@ impl NmemServer {
             SELECT id, timestamp, obs_type, content_preview, file_path, session_id, is_pinned
             FROM scored
             ORDER BY (bm25_norm * 0.5 + recency * 0.3 + type_w * 0.2) DESC
-            LIMIT ?4 OFFSET ?5"
+            LIMIT ?6 OFFSET ?7"
         } else {
             "SELECT o.id, o.timestamp, o.obs_type,
                     SUBSTR(o.content, 1, 120) AS content_preview,
@@ -274,15 +391,17 @@ impl NmemServer {
              WHERE observations_fts MATCH ?1
                AND (?2 IS NULL OR s.project = ?2)
                AND (?3 IS NULL OR o.obs_type = ?3)
+               AND (?4 IS NULL OR o.timestamp < ?4)
+               AND (?5 IS NULL OR o.timestamp > ?5)
              ORDER BY f.rank
-             LIMIT ?4 OFFSET ?5"
+             LIMIT ?6 OFFSET ?7"
         };
 
         let mut stmt = db.prepare(sql).map_err(|e| db_err(&e))?;
 
         let results: Vec<SearchResult> = stmt
             .query_map(
-                rusqlite::params![params.query, params.project, params.obs_type, limit, offset],
+                rusqlite::params![params.query, params.project, params.obs_type, params.before, params.after, limit, offset],
                 |row| {
                     Ok(SearchResult {
                         id: row.get(0)?,
@@ -469,6 +588,8 @@ impl NmemServer {
                        CASE WHEN s.project = ?1 THEN 1.0 ELSE 0.3 END AS proj_w
                 FROM observations o
                 JOIN sessions s ON o.session_id = s.id
+                WHERE (?2 IS NULL OR o.timestamp < ?2)
+                  AND (?3 IS NULL OR o.timestamp > ?3)
             ),
             ranked AS (
                 SELECT *,
@@ -483,11 +604,11 @@ impl NmemServer {
                    tool_name, file_path, content, metadata, is_pinned, score
             FROM ranked WHERE rn = 1
             ORDER BY score DESC
-            LIMIT ?2";
+            LIMIT ?4";
 
             let mut stmt = db.prepare(sql).map_err(|e| db_err(&e))?;
             stmt.query_map(
-                rusqlite::params![params.project, limit],
+                rusqlite::params![params.project, params.before, params.after, limit],
                 row_to_scored_obs,
             )
             .map_err(|e| db_err(&e))?
@@ -506,6 +627,8 @@ impl NmemServer {
                            ELSE 0.17
                        END AS type_w
                 FROM observations o
+                WHERE (?1 IS NULL OR o.timestamp < ?1)
+                  AND (?2 IS NULL OR o.timestamp > ?2)
             ),
             ranked AS (
                 SELECT *,
@@ -520,10 +643,10 @@ impl NmemServer {
                    tool_name, file_path, content, metadata, is_pinned, score
             FROM ranked WHERE rn = 1
             ORDER BY score DESC
-            LIMIT ?1";
+            LIMIT ?3";
 
             let mut stmt = db.prepare(sql).map_err(|e| db_err(&e))?;
-            stmt.query_map(rusqlite::params![limit], row_to_scored_obs)
+            stmt.query_map(rusqlite::params![params.before, params.after, limit], row_to_scored_obs)
                 .map_err(|e| db_err(&e))?
                 .collect::<Result<_, _>>()
                 .map_err(|e| db_err(&e))?
@@ -540,7 +663,7 @@ impl NmemServer {
         let config = crate::s5_config::load_config().unwrap_or_default();
         let (local_limit, cross_limit) =
             crate::s5_config::resolve_context_limits(&config, &params.project, false);
-        let ctx = crate::s1_context::generate_context(&db, &params.project, local_limit, cross_limit)
+        let ctx = crate::s1_context::generate_context(&db, &params.project, local_limit, cross_limit, params.before)
             .map_err(|e| db_err(&e))?;
         if ctx.is_empty() {
             Ok(CallToolResult::success(vec![Content::text(format!(
@@ -559,25 +682,18 @@ impl NmemServer {
         let limit = clamp(params.limit, 10, 50);
         let db = self.db.lock().map_err(|e| db_err(&e))?;
 
-        let (sql, sql_params): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) =
-            if let Some(ref project) = params.project {
-                (
-                    "SELECT id, project, started_at, summary FROM sessions
-                     WHERE summary IS NOT NULL AND project = ?1
-                     ORDER BY started_at DESC LIMIT ?2",
-                    vec![
-                        Box::new(project.clone()) as Box<dyn rusqlite::types::ToSql>,
-                        Box::new(limit),
-                    ],
-                )
-            } else {
-                (
-                    "SELECT id, project, started_at, summary FROM sessions
-                     WHERE summary IS NOT NULL
-                     ORDER BY started_at DESC LIMIT ?1",
-                    vec![Box::new(limit) as Box<dyn rusqlite::types::ToSql>],
-                )
-            };
+        let sql = "SELECT id, project, started_at, summary FROM sessions
+                   WHERE summary IS NOT NULL
+                     AND (?1 IS NULL OR project = ?1)
+                     AND (?2 IS NULL OR started_at < ?2)
+                     AND (?3 IS NULL OR started_at > ?3)
+                   ORDER BY started_at DESC LIMIT ?4";
+        let sql_params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+            Box::new(params.project.clone()) as Box<dyn rusqlite::types::ToSql>,
+            Box::new(params.before),
+            Box::new(params.after),
+            Box::new(limit),
+        ];
 
         let mut stmt = db.prepare(sql).map_err(|e| db_err(&e))?;
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
@@ -602,6 +718,296 @@ impl NmemServer {
         let json = serde_json::to_string(&results).map_err(|e| db_err(&e))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
+
+    pub fn do_session_trace(
+        &self,
+        params: SessionTraceParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        let db = self.db.lock().map_err(|e| db_err(&e))?;
+
+        // 1. Session metadata
+        let session: (String, String, i64, Option<i64>, Option<String>) = db
+            .query_row(
+                "SELECT id, project, started_at, ended_at, summary FROM sessions WHERE id = ?1",
+                rusqlite::params![params.session_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => ErrorData::new(
+                    ErrorCode::INVALID_PARAMS,
+                    format!("session not found: {}", params.session_id),
+                    None,
+                ),
+                other => db_err(&other),
+            })?;
+
+        let summary: Option<serde_json::Value> =
+            session.4.as_deref().and_then(|s| serde_json::from_str(s).ok());
+
+        // 2. Prompts + observations via LEFT JOIN, plus orphan observations (NULL prompt_id)
+        let sql = "SELECT p.id AS prompt_id, p.timestamp AS prompt_ts, p.source, p.content AS prompt_content,
+                          o.id AS obs_id, o.timestamp AS obs_ts, o.obs_type, o.file_path,
+                          SUBSTR(o.content, 1, 120) AS obs_preview, o.is_pinned
+                   FROM prompts p
+                   LEFT JOIN observations o ON o.prompt_id = p.id
+                     AND (?2 IS NULL OR o.timestamp < ?2)
+                     AND (?3 IS NULL OR o.timestamp > ?3)
+                   WHERE p.session_id = ?1
+                     AND (?2 IS NULL OR p.timestamp < ?2)
+                     AND (?3 IS NULL OR p.timestamp > ?3)
+                   UNION ALL
+                   SELECT NULL, o.timestamp, 'system', NULL,
+                          o.id, o.timestamp, o.obs_type, o.file_path,
+                          SUBSTR(o.content, 1, 120), o.is_pinned
+                   FROM observations o
+                   WHERE o.session_id = ?1 AND o.prompt_id IS NULL
+                     AND (?2 IS NULL OR o.timestamp < ?2)
+                     AND (?3 IS NULL OR o.timestamp > ?3)
+                   ORDER BY prompt_ts ASC, obs_ts ASC";
+
+        let mut stmt = db.prepare(sql).map_err(|e| db_err(&e))?;
+
+        // Group rows into PromptTrace structs keyed by prompt_id (or None for system)
+        let mut prompts: Vec<PromptTrace> = Vec::new();
+        // Track the index of the current prompt being accumulated
+        let mut current_key: Option<Option<i64>> = None;
+
+        let rows = stmt
+            .query_map(
+                rusqlite::params![params.session_id, params.before, params.after],
+                |row| {
+                    let prompt_id: Option<i64> = row.get(0)?;
+                    let prompt_ts: i64 = row.get(1)?;
+                    let source: String = row.get(2)?;
+                    let prompt_content: Option<String> = row.get(3)?;
+                    let obs_id: Option<i64> = row.get(4)?;
+                    let obs_ts: Option<i64> = row.get(5)?;
+                    let obs_type: Option<String> = row.get(6)?;
+                    let file_path: Option<String> = row.get(7)?;
+                    let obs_preview: Option<String> = row.get(8)?;
+                    let is_pinned: Option<i64> = row.get(9)?;
+                    Ok((
+                        prompt_id,
+                        prompt_ts,
+                        source,
+                        prompt_content,
+                        obs_id,
+                        obs_ts,
+                        obs_type,
+                        file_path,
+                        obs_preview,
+                        is_pinned,
+                    ))
+                },
+            )
+            .map_err(|e| db_err(&e))?;
+
+        for row_result in rows {
+            let (
+                prompt_id,
+                prompt_ts,
+                source,
+                prompt_content,
+                obs_id,
+                obs_ts,
+                obs_type,
+                file_path,
+                obs_preview,
+                is_pinned,
+            ) = row_result.map_err(|e| db_err(&e))?;
+
+            let key = Some(prompt_id);
+            if current_key != key {
+                prompts.push(PromptTrace {
+                    prompt_id,
+                    timestamp: prompt_ts,
+                    source,
+                    content: prompt_content,
+                    observation_count: 0,
+                    observations: Vec::new(),
+                });
+                current_key = key;
+            }
+
+            if let (Some(oid), Some(ots), Some(otype), Some(preview)) =
+                (obs_id, obs_ts, obs_type, obs_preview)
+            {
+                let prompt = prompts.last_mut().unwrap();
+                prompt.observations.push(ObservationSummary {
+                    id: oid,
+                    timestamp: ots,
+                    obs_type: otype,
+                    file_path,
+                    content_preview: preview,
+                    is_pinned: is_pinned.unwrap_or(0) != 0,
+                });
+            }
+        }
+
+        // Fill observation_count
+        for p in &mut prompts {
+            p.observation_count = p.observations.len();
+        }
+
+        let result = SessionTraceResult {
+            session_id: session.0,
+            project: session.1,
+            started_at: session.2,
+            ended_at: session.3,
+            summary,
+            prompts,
+        };
+
+        let json = serde_json::to_string(&result).map_err(|e| db_err(&e))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    pub fn do_file_history(
+        &self,
+        params: FileHistoryParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        let limit = clamp(params.limit, 10, 50);
+        let db = self.db.lock().map_err(|e| db_err(&e))?;
+
+        let sql = "SELECT o.id AS obs_id, o.timestamp, o.obs_type,
+                          SUBSTR(o.content, 1, 120) AS content_preview,
+                          o.is_pinned, o.session_id,
+                          s.project, s.started_at, s.summary,
+                          p.content AS prompt_content
+                   FROM observations o
+                   JOIN sessions s ON o.session_id = s.id
+                   LEFT JOIN prompts p ON o.prompt_id = p.id AND p.source = 'user'
+                   WHERE o.file_path = ?1
+                     AND (?2 IS NULL OR o.timestamp < ?2)
+                     AND (?3 IS NULL OR o.timestamp > ?3)
+                   ORDER BY o.timestamp DESC
+                   LIMIT ?4";
+
+        let mut stmt = db.prepare(sql).map_err(|e| db_err(&e))?;
+
+        struct RawTouch {
+            obs_id: i64,
+            timestamp: i64,
+            obs_type: String,
+            content_preview: String,
+            is_pinned: bool,
+            session_id: String,
+            project: String,
+            started_at: i64,
+            summary_json: Option<String>,
+            prompt_content: Option<String>,
+        }
+
+        let touches: Vec<RawTouch> = stmt
+            .query_map(
+                rusqlite::params![params.file_path, params.before, params.after, limit],
+                |row| {
+                    Ok(RawTouch {
+                        obs_id: row.get(0)?,
+                        timestamp: row.get(1)?,
+                        obs_type: row.get(2)?,
+                        content_preview: row.get(3)?,
+                        is_pinned: row.get::<_, i64>(4)? != 0,
+                        session_id: row.get(5)?,
+                        project: row.get(6)?,
+                        started_at: row.get(7)?,
+                        summary_json: row.get(8)?,
+                        prompt_content: row.get(9)?,
+                    })
+                },
+            )
+            .map_err(|e| db_err(&e))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| db_err(&e))?;
+
+        // Group by session_id, preserving encounter order
+        let mut sessions: Vec<FileSessionEntry> = Vec::new();
+        let mut session_index: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+
+        for t in touches {
+            let idx = if let Some(&i) = session_index.get(&t.session_id) {
+                i
+            } else {
+                let intent = t.summary_json.as_deref().and_then(|s| {
+                    serde_json::from_str::<serde_json::Value>(s)
+                        .ok()
+                        .and_then(|v| v.get("intent")?.as_str().map(String::from))
+                });
+                let i = sessions.len();
+                sessions.push(FileSessionEntry {
+                    session_id: t.session_id.clone(),
+                    project: t.project,
+                    started_at: t.started_at,
+                    summary_intent: intent,
+                    touches: Vec::new(),
+                });
+                session_index.insert(t.session_id, i);
+                i
+            };
+
+            sessions[idx].touches.push(FileTouch {
+                observation_id: t.obs_id,
+                timestamp: t.timestamp,
+                obs_type: t.obs_type,
+                content_preview: t.content_preview,
+                prompt_content: t.prompt_content,
+                is_pinned: t.is_pinned,
+            });
+        }
+
+        let result = FileHistoryResult {
+            file_path: params.file_path,
+            sessions,
+        };
+
+        let json = serde_json::to_string(&result).map_err(|e| db_err(&e))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    pub fn do_queue_task(&self, params: QueueTaskParams) -> Result<CallToolResult, ErrorData> {
+        // Shell out to `nmem queue` to keep MCP server read-only.
+        // Same pattern as hooks calling `nmem record`.
+        let nmem_bin = std::env::current_exe().unwrap_or_else(|_| "nmem".into());
+
+        let mut cmd = std::process::Command::new(&nmem_bin);
+        cmd.arg("queue").arg(&params.prompt);
+
+        if let Some(ref project) = params.project {
+            cmd.arg("--project").arg(project);
+        }
+        if let Some(ref cwd) = params.cwd {
+            cmd.arg("--cwd").arg(cwd);
+        }
+
+        let output = cmd.output().map_err(|e| {
+            ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("failed to run nmem queue: {e}"),
+                None,
+            )
+        })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("nmem queue failed: {stderr}"),
+                None,
+            ));
+        }
+
+        let task_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let response = serde_json::json!({
+            "task_id": task_id.parse::<i64>().unwrap_or(0),
+            "status": "pending",
+            "prompt": params.prompt,
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string(&response).map_err(|e| db_err(&e))?,
+        )]))
+    }
 }
 
 // --- MCP tool wrappers (delegate to do_* methods) ---
@@ -620,7 +1026,7 @@ impl NmemServer {
     }
 
     #[tool(
-        description = "Search observations by full-text query. Returns ranked index with IDs and previews.",
+        description = "Search observations by full-text query. Returns ranked index with IDs and previews. Use optional before/after Unix timestamps to scope results to a time range.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn search(
@@ -662,7 +1068,7 @@ impl NmemServer {
     }
 
     #[tool(
-        description = "Session summaries generated by local LLM. Returns structured JSON with intent, completed work, files changed, and next steps.",
+        description = "Session summaries generated by local LLM. Returns structured JSON with intent, completed work, files changed, and next steps. Use optional before/after Unix timestamps to filter by session start time.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn session_summaries(
@@ -676,7 +1082,7 @@ impl NmemServer {
     }
 
     #[tool(
-        description = "Regenerate the full context injection (intents, session summaries, recent observations, cross-project pins) as markdown. Same output as SessionStart but with current data.",
+        description = "Regenerate the full context injection (intents, session summaries, recent observations, cross-project pins) as markdown. Same output as SessionStart but with current data. Use optional before Unix timestamp to produce context as of a past point in time.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn regenerate_context(
@@ -690,7 +1096,7 @@ impl NmemServer {
     }
 
     #[tool(
-        description = "Recent observations ranked by composite score (recency decay + type weight + project match). Deduped by file_path, keeping highest-scored entry per file.",
+        description = "Recent observations ranked by composite score (recency decay + type weight + project match). Deduped by file_path, keeping highest-scored entry per file. Use optional before/after Unix timestamps to window the results.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn recent_context(
@@ -700,6 +1106,48 @@ impl NmemServer {
         let start = std::time::Instant::now();
         let result = self.do_recent_context(p.0);
         record_query_metrics("recent_context", start);
+        result
+    }
+
+    #[tool(
+        description = "Drill into a session's structure. Returns the session's prompts in order, each with its observations. Use to understand what happened step-by-step within a session.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn session_trace(
+        &self,
+        p: Parameters<SessionTraceParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let start = std::time::Instant::now();
+        let result = self.do_session_trace(p.0);
+        record_query_metrics("session_trace", start);
+        result
+    }
+
+    #[tool(
+        description = "Trace a file's history across sessions. Returns every session that touched this file, with the intent behind each touch. Use to understand why a file was read or modified over time.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn file_history(
+        &self,
+        p: Parameters<FileHistoryParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let start = std::time::Instant::now();
+        let result = self.do_file_history(p.0);
+        record_query_metrics("file_history", start);
+        result
+    }
+
+    #[tool(
+        description = "Queue a task for later execution by the systemd-driven dispatcher. Tasks are dispatched into tmux panes running Claude Code. Returns the task ID.",
+        annotations(read_only_hint = false, open_world_hint = false)
+    )]
+    async fn queue_task(
+        &self,
+        p: Parameters<QueueTaskParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let start = std::time::Instant::now();
+        let result = self.do_queue_task(p.0);
+        record_query_metrics("queue_task", start);
         result
     }
 }

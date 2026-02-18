@@ -54,7 +54,7 @@ The handler uses `serde_json::Value::get()` to extract known fields and ignores 
 
 ## Query Protocol -- MCP Tools
 
-Four tools exposed via `nmem serve` (session-scoped stdio MCP server, read-only SQLite connection).
+Six tools exposed via `nmem serve` (session-scoped stdio MCP server, read-only SQLite connection).
 
 ### `search`
 
@@ -182,6 +182,80 @@ Recent observations for the current working context. MCP equivalent of SessionSt
 
 5. Deduplicated by `file_path` where `file_path IS NOT NULL` (keep highest-scored per path). Observations with NULL `file_path` (commands, errors, prompts) are never deduplicated — each is unique context.
 
+### `session_trace`
+
+Drill into a session's structure. Returns the session's prompts in order, each with its observations. Navigates the session → prompts → observations hierarchy that `timeline` (observation-anchored) and `session_summaries` (compressed) don't expose.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `session_id` | string | yes | -- | Session ID to trace. |
+| `before` | integer | no | NULL | Only include prompts/observations before this Unix timestamp. |
+| `after` | integer | no | NULL | Only include prompts/observations after this Unix timestamp. |
+
+**Returns:** JSON object with session metadata and prompts:
+
+```json
+{
+  "session_id": "d4f8a2b1-...", "project": "my-project",
+  "started_at": 1707400000, "ended_at": 1707403600,
+  "summary": { "intent": "fix auth bug", ... },
+  "prompts": [{
+    "prompt_id": 1, "timestamp": 1707400010, "source": "user",
+    "content": "Fix the login bug",
+    "observation_count": 3,
+    "observations": [{
+      "id": 42, "timestamp": 1707400020, "obs_type": "file_read",
+      "file_path": "/src/auth.rs", "content_preview": "Read /src/auth.rs",
+      "is_pinned": false
+    }]
+  }]
+}
+```
+
+Observations with NULL `prompt_id` (session-level events) appear as synthetic prompts with `source: "system"` and `prompt_id: null`.
+
+**SQL approach:** Single query using LEFT JOIN of prompts to observations, UNION ALL with orphan observations (NULL prompt_id), grouped in Rust by prompt_id. Temporal filters apply to both `p.timestamp` (in WHERE) and `o.timestamp` (in the JOIN condition) — a prompt inside the window still appears but without out-of-window observations.
+
+**Error: unknown session** → MCP error: "session not found: {id}".
+
+### `file_history`
+
+Trace a file's history across sessions. Returns every session that touched this file, grouped by session with the intent behind each touch.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `file_path` | string | yes | -- | File path to trace. |
+| `before` | integer | no | NULL | Only include touches before this Unix timestamp. |
+| `after` | integer | no | NULL | Only include touches after this Unix timestamp. |
+| `limit` | integer | no | 10 | Max observations returned. Capped at 50. |
+
+**Returns:** JSON object with file path and sessions:
+
+```json
+{
+  "file_path": "/src/auth.rs",
+  "sessions": [{
+    "session_id": "d4f8a2b1-...", "project": "my-project",
+    "started_at": 1707400000,
+    "summary_intent": "fix auth bug",
+    "touches": [{
+      "observation_id": 42, "timestamp": 1707400020,
+      "obs_type": "file_edit", "content_preview": "Edit /src/auth.rs: fix token...",
+      "prompt_content": "Fix the login bug",
+      "is_pinned": false
+    }]
+  }]
+}
+```
+
+`summary_intent` extracts only the `intent` field from the session's summary JSON. `prompt_content` joins with `prompts` filtered to `source = 'user'` — surfaces the human intent, not agent thinking blocks. Uses existing `idx_obs_file(file_path)` index.
+
+**Error: unknown file** → Empty sessions array `[]`, not an error.
+
 ### Error Handling
 
 MCP tools return errors via the standard MCP error response format. Specific cases:
@@ -196,6 +270,9 @@ MCP tools return errors via the standard MCP error response format. Specific cas
 | `timeline` | Anchor ID doesn't exist | MCP error: "anchor observation not found" |
 | `timeline` | Anchor exists but no surrounding context | Anchor returned with empty `before`/`after` arrays |
 | `recent_context` | No observations for project | Empty array `[]` |
+| `session_trace` | Session ID doesn't exist | MCP error: "session not found: {id}" |
+| `session_trace` | Session exists but no prompts in window | Empty `prompts` array |
+| `file_history` | File path not found in observations | Empty `sessions` array |
 
 Database errors (connection failure, corruption) return MCP internal errors with the SQLite error message. These should not expose file paths or internal state beyond what SQLite reports.
 
@@ -323,7 +400,7 @@ Some projects may want more or fewer injected observations, or suppress cross-pr
 
 ### Negative
 
-- **Four MCP tools is surface area.** One more than claude-mem's three. Mitigation: distinct purposes, no overlap.
+- **Six MCP tools is surface area.** Double claude-mem's three. Mitigation: distinct purposes at different abstraction levels — `search`/`get_observations` for content retrieval, `timeline`/`session_trace` for structural navigation, `recent_context`/`file_history` for contextual views.
 - **No streaming model.** Request-response only. Acceptable now, limits future live dashboards.
 - **Context injection is fire-and-forget.** No feedback on whether injected context was useful.
 
@@ -354,3 +431,4 @@ Some projects may want more or fewer injected observations, or suppress cross-pr
 | 2026-02-14 | 2.1 | **CLI query interface.** Added `nmem search` subcommand wrapping the same FTS5 query as MCP `search`. Three output modes: default JSON index, `--full` for complete observations, `--ids` for pipe-friendly ID lists. Filters: `--project`, `--type`, `--limit`. New module `src/s1_search.rs` with inline SQL (decoupled from s1_serve.rs MCP types). 7 integration tests. Harness independence section updated from aspirational to implemented. |
 | 2026-02-14 | 3.0 | **Context injection on SessionStart.** New module `src/s1_context.rs` with `generate_context()` emitting scored markdown tables to stdout. Project-local (20 rows) + cross-project (10 rows) sections. Recovery modes (`compact`/`clear`) expand to 30+15. Scoring: `exp_decay` recency (7d half-life) + type weight, deduped by file_path. Wired into `s1_record.rs::handle_session_start()` after commit+sweep, non-fatal. 5 integration tests + 7 unit tests. |
 | 2026-02-14 | 3.1 | **Action-weighted intent injection (resolves v1.2 annotation).** Added `## Recent Intents` section to context injection: joins `prompts → observations` via `prompt_id`, filters zero-action conversational turns (`HAVING COUNT > 0`), shows top 10 intents with action counts. New in `src/s1_context.rs`: `INTENTS_SQL`, `IntentRow`, `query_intents()`, `format_intents()`. 3 unit tests + 2 integration tests. No schema changes. |
+| 2026-02-17 | 4.0 | **Navigational tools: `session_trace` and `file_history`.** Two new read-only MCP tools filling the gap between observation-level (`timeline`) and summary-level (`session_summaries`) retrieval. `session_trace`: drill into session → prompts → observations hierarchy; temporal filters apply to both prompt and observation timestamps (observation filter in LEFT JOIN condition). `file_history`: cross-session file biography grouped by session with intent extraction from summary JSON; joins `prompts` filtered to `source='user'` for human intent. Tool count 4→6. Error handling table extended. 12 new integration tests. No schema changes. |
