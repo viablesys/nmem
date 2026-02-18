@@ -116,10 +116,10 @@ pub fn parse_schedule(input: &str) -> Result<i64, NmemError> {
     }
 
     // Raw unix timestamp
-    if let Ok(ts) = input.parse::<i64>() {
-        if ts > 1_000_000_000 {
-            return Ok(ts);
-        }
+    if let Ok(ts) = input.parse::<i64>()
+        && ts > 1_000_000_000
+    {
+        return Ok(ts);
     }
 
     // ISO-ish datetime: "2026-02-18", "2026-02-18T15:00", "2026-02-18 15:00:00"
@@ -206,7 +206,7 @@ pub fn parse_task_file(content: &str) -> TaskFile {
 
     // Find closing ---
     let after_first = &trimmed[3..];
-    let after_first = after_first.trim_start_matches(|c: char| c == '\r' || c == '\n');
+    let after_first = after_first.trim_start_matches(['\r', '\n']);
     if let Some(end) = after_first.find("\n---") {
         let frontmatter = &after_first[..end];
         let body = &after_first[end + 4..]; // skip \n---
@@ -260,7 +260,7 @@ pub fn handle_queue(db_path: &Path, args: &QueueArgs) -> Result<(), NmemError> {
 
     let project = args.project.clone().or_else(|| {
         cwd.as_deref()
-            .map(|c| crate::s5_project::derive_project(c))
+            .map(crate::s5_project::derive_project)
     });
 
     let run_after = parse_schedule(&args.after)?;
@@ -304,7 +304,7 @@ pub fn handle_dispatch(db_path: &Path, args: &DispatchArgs) -> Result<(), NmemEr
             .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()));
         let project = tf.project.or_else(|| {
             cwd.as_deref()
-                .map(|c| crate::s5_project::derive_project(c))
+                .map(crate::s5_project::derive_project)
         });
         let run_after: Option<i64> = tf
             .after

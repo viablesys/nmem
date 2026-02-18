@@ -62,12 +62,10 @@ fn normalize_command(raw: &str) -> String {
     let mut s = raw.to_string();
 
     // /home/*/ — strip user dir first (so subsequent prefix checks see relative paths)
-    if s.starts_with("/home/") {
-        if let Some(rest) = s.strip_prefix("/home/") {
-            if let Some(idx) = rest.find('/') {
-                s = rest[idx + 1..].to_string();
-            }
-        }
+    if let Some(rest) = s.strip_prefix("/home/")
+        && let Some(idx) = rest.find('/')
+    {
+        s = rest[idx + 1..].to_string();
     }
 
     // Strip common path prefixes
@@ -392,7 +390,7 @@ fn extract_error_signature(response: &str) -> String {
     response
         .lines()
         .find(|l| !l.trim().is_empty())
-        .map(|l| normalize_error_line(l))
+        .map(normalize_error_line)
         .unwrap_or_default()
 }
 
@@ -691,10 +689,10 @@ pub fn write_report(patterns: &[Pattern], output: &Path) -> Result<(), NmemError
         }
     }
 
-    if let Some(parent) = output.parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = output.parent()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent)?;
     }
     std::fs::write(output, md)?;
     Ok(())

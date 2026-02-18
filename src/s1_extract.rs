@@ -39,10 +39,10 @@ fn contains_git_cmd(cmd: &str, subcmd: &str) -> bool {
     for segment in cmd.split("&&").chain(cmd.split(';')) {
         let segment = segment.trim();
         let words: Vec<&str> = segment.split_whitespace().collect();
-        if let Some(pos) = words.iter().position(|&w| w == "git") {
-            if words[pos + 1..].iter().any(|&w| w == subcmd) {
-                return true;
-            }
+        if let Some(pos) = words.iter().position(|&w| w == "git")
+            && words[pos + 1..].contains(&subcmd)
+        {
+            return true;
         }
     }
     false
