@@ -27,6 +27,7 @@ fn run() -> Result<(), NmemError> {
         Command::Context(args) => nmem::context::handle_context(&db_path, &args),
         Command::Queue(args) => nmem::dispatch::handle_queue(&db_path, &args),
         Command::Dispatch(args) => nmem::dispatch::handle_dispatch(&db_path, &args),
+        Command::Task(args) => nmem::dispatch::handle_task(&db_path, &args),
     }
 }
 

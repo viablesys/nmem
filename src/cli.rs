@@ -38,6 +38,8 @@ pub enum Command {
     Queue(QueueArgs),
     /// Check for pending tasks and dispatch to tmux
     Dispatch(DispatchArgs),
+    /// View a task's status and output
+    Task(TaskArgs),
 }
 
 #[derive(Parser)]
@@ -144,11 +146,14 @@ pub struct QueueArgs {
 
     /// When to run: "5m", "2h", "1d", "tomorrow", "tonight", or ISO datetime
     #[arg(long)]
-    pub after: Option<String>,
+    pub after: String,
 }
 
 #[derive(Parser)]
 pub struct DispatchArgs {
+    /// Task file to queue and dispatch immediately
+    pub file: Option<PathBuf>,
+
     /// Maximum concurrent running tasks (default 1)
     #[arg(long, default_value = "1")]
     pub max_concurrent: u32,
@@ -160,4 +165,14 @@ pub struct DispatchArgs {
     /// tmux session name (default "nmem")
     #[arg(long, default_value = "nmem")]
     pub tmux_session: String,
+}
+
+#[derive(Parser)]
+pub struct TaskArgs {
+    /// Task ID
+    pub id: i64,
+
+    /// Show output only (for piping)
+    #[arg(long)]
+    pub output: bool,
 }

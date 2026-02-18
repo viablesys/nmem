@@ -22,7 +22,7 @@ fn queue_and_read_back() {
             prompt: "fix the auth bug".into(),
             project: Some("nmem".into()),
             cwd: Some("/tmp/workspace".into()),
-            after: None,
+            after: "1h".into(),
         },
     )
     .unwrap();
@@ -33,7 +33,7 @@ fn queue_and_read_back() {
             prompt: "add logging".into(),
             project: Some("nmem".into()),
             cwd: None,
-            after: None,
+            after: "1h".into(),
         },
     )
     .unwrap();
@@ -70,7 +70,7 @@ fn dispatch_dry_run_does_not_change_status() {
             prompt: "test task".into(),
             project: None,
             cwd: None,
-            after: None,
+            after: "1h".into(),
         },
     )
     .unwrap();
@@ -78,6 +78,7 @@ fn dispatch_dry_run_does_not_change_status() {
     handle_dispatch(
         &db_path,
         &DispatchArgs {
+            file: None,
             max_concurrent: 1,
             dry_run: true,
             tmux_session: "nmem-test".into(),
@@ -110,6 +111,7 @@ fn reap_marks_completed_when_pane_gone() {
     handle_dispatch(
         &db_path,
         &DispatchArgs {
+            file: None,
             max_concurrent: 1,
             dry_run: false,
             tmux_session: "nmem-test".into(),
@@ -142,7 +144,7 @@ fn queue_derives_project_from_cwd() {
                 "{}/workspace/nmem",
                 std::env::var("HOME").unwrap_or_default()
             )),
-            after: None,
+            after: "1h".into(),
         },
     )
     .unwrap();
@@ -165,7 +167,7 @@ fn dispatch_respects_capacity() {
             prompt: "task one".into(),
             project: None,
             cwd: None,
-            after: None,
+            after: "1h".into(),
         },
     )
     .unwrap();
@@ -175,7 +177,7 @@ fn dispatch_respects_capacity() {
             prompt: "task two".into(),
             project: None,
             cwd: None,
-            after: None,
+            after: "1h".into(),
         },
     )
     .unwrap();
@@ -218,4 +220,5 @@ fn schema_migration_creates_tasks_table() {
     assert!(columns.contains(&"completed_at".into()));
     assert!(columns.contains(&"error".into()));
     assert!(columns.contains(&"run_after".into()));
+    assert!(columns.contains(&"output_path".into()));
 }

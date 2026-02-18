@@ -1,7 +1,7 @@
-use crate::cli::{DispatchArgs, QueueArgs};
+use crate::cli::{DispatchArgs, QueueArgs, TaskArgs};
 use crate::db::open_db;
 use crate::NmemError;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -184,6 +184,72 @@ fn parse_iso_local(input: &str) -> Option<i64> {
     s.trim().parse().ok()
 }
 
+// --- Task file parsing ---
+
+#[derive(Debug, Default)]
+pub struct TaskFile {
+    pub project: Option<String>,
+    pub cwd: Option<String>,
+    pub after: Option<String>,
+    pub prompt: String,
+}
+
+pub fn parse_task_file(content: &str) -> TaskFile {
+    let mut tf = TaskFile::default();
+
+    // Check for frontmatter delimiters
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        tf.prompt = content.trim().to_string();
+        return tf;
+    }
+
+    // Find closing ---
+    let after_first = &trimmed[3..];
+    let after_first = after_first.trim_start_matches(|c: char| c == '\r' || c == '\n');
+    if let Some(end) = after_first.find("\n---") {
+        let frontmatter = &after_first[..end];
+        let body = &after_first[end + 4..]; // skip \n---
+
+        // Parse key: value lines
+        for line in frontmatter.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some((key, value)) = line.split_once(':') {
+                let key = key.trim().to_lowercase();
+                let value = value.trim().to_string();
+                if value.is_empty() {
+                    continue;
+                }
+                match key.as_str() {
+                    "project" => tf.project = Some(value),
+                    "cwd" => tf.cwd = Some(value),
+                    "after" => tf.after = Some(value),
+                    _ => {} // ignore unknown keys
+                }
+            }
+        }
+
+        tf.prompt = body.trim().to_string();
+    } else {
+        // No closing --- found, treat entire content as prompt
+        tf.prompt = content.trim().to_string();
+    }
+
+    tf
+}
+
+fn tasks_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    PathBuf::from(home).join(".nmem").join("tasks")
+}
+
+fn output_path_for_task(task_id: i64) -> PathBuf {
+    tasks_dir().join(format!("task-{task_id}.md"))
+}
+
 // --- Queue ---
 
 pub fn handle_queue(db_path: &Path, args: &QueueArgs) -> Result<(), NmemError> {
@@ -197,11 +263,7 @@ pub fn handle_queue(db_path: &Path, args: &QueueArgs) -> Result<(), NmemError> {
             .map(|c| crate::s5_project::derive_project(c))
     });
 
-    let run_after: Option<i64> = args
-        .after
-        .as_deref()
-        .map(parse_schedule)
-        .transpose()?;
+    let run_after = parse_schedule(&args.after)?;
 
     let conn = open_db(db_path)?;
 
@@ -211,9 +273,7 @@ pub fn handle_queue(db_path: &Path, args: &QueueArgs) -> Result<(), NmemError> {
     )?;
 
     let task_id = conn.last_insert_rowid();
-    if let Some(ts) = run_after {
-        eprintln!("nmem: task {task_id} scheduled for {ts}");
-    }
+    eprintln!("nmem: task {task_id} scheduled for {run_after}");
     println!("{task_id}");
     Ok(())
 }
@@ -230,6 +290,38 @@ struct TaskRow {
 }
 
 pub fn handle_dispatch(db_path: &Path, args: &DispatchArgs) -> Result<(), NmemError> {
+    // If a task file was provided, parse and queue it first
+    if let Some(file) = &args.file {
+        let content = std::fs::read_to_string(file)?;
+        let tf = parse_task_file(&content);
+
+        if tf.prompt.is_empty() {
+            return Err(NmemError::Config("task file has no prompt body".into()));
+        }
+
+        let cwd = tf
+            .cwd
+            .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()));
+        let project = tf.project.or_else(|| {
+            cwd.as_deref()
+                .map(|c| crate::s5_project::derive_project(c))
+        });
+        let run_after: Option<i64> = tf
+            .after
+            .as_deref()
+            .map(parse_schedule)
+            .transpose()?;
+
+        let conn = open_db(db_path)?;
+        conn.execute(
+            "INSERT INTO tasks (prompt, project, cwd, run_after) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![tf.prompt, project, cwd, run_after],
+        )?;
+        let task_id = conn.last_insert_rowid();
+        eprintln!("nmem: queued task {task_id} from {}", file.display());
+        drop(conn);
+    }
+
     let conn = open_db(db_path)?;
 
     // 1. Reap finished tasks
@@ -326,14 +418,26 @@ pub fn handle_dispatch(db_path: &Path, args: &DispatchArgs) -> Result<(), NmemEr
             tmux_send_keys(&target, &format!("cd {}", shell_escape(cwd)))?;
         }
 
-        // Build claude command — escape single quotes in prompt, exit pane when done
-        let escaped_prompt = task.prompt.replace('\'', "'\\''");
-        tmux_send_keys(&target, &format!("claude -p '{escaped_prompt}'; sleep 5 && exit"))?;
+        // Ensure output directory exists
+        let output_dir = tasks_dir();
+        std::fs::create_dir_all(&output_dir)?;
+        let output_path = output_path_for_task(task.id);
 
-        // Update task status
+        // Build claude command — escape single quotes in prompt, tee output, exit pane when done
+        let escaped_prompt = task.prompt.replace('\'', "'\\''");
+        let output_path_str = output_path.to_string_lossy();
+        tmux_send_keys(
+            &target,
+            &format!(
+                "claude -p '{escaped_prompt}' | tee '{}'; sleep 5 && exit",
+                output_path_str.replace('\'', "'\\''")
+            ),
+        )?;
+
+        // Update task status + output path
         conn.execute(
-            "UPDATE tasks SET status = 'running', started_at = unixepoch('now'), tmux_target = ?1 WHERE id = ?2",
-            rusqlite::params![target, task.id],
+            "UPDATE tasks SET status = 'running', started_at = unixepoch('now'), tmux_target = ?1, output_path = ?2 WHERE id = ?3",
+            rusqlite::params![target, output_path_str.as_ref(), task.id],
         )?;
 
         eprintln!(
@@ -342,6 +446,89 @@ pub fn handle_dispatch(db_path: &Path, args: &DispatchArgs) -> Result<(), NmemEr
             target,
             truncate_prompt(&task.prompt, 60)
         );
+    }
+
+    Ok(())
+}
+
+// --- Task view ---
+
+pub fn handle_task(db_path: &Path, args: &TaskArgs) -> Result<(), NmemError> {
+    let conn = open_db(db_path)?;
+
+    let row = conn.query_row(
+        "SELECT status, prompt, project, cwd, output_path, created_at, started_at, completed_at, error \
+         FROM tasks WHERE id = ?1",
+        [args.id],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, Option<i64>>(6)?,
+                row.get::<_, Option<i64>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+            ))
+        },
+    );
+
+    let (status, prompt, project, cwd, output_path, created_at, started_at, completed_at, error) =
+        match row {
+            Ok(r) => r,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                return Err(NmemError::Config(format!("task {} not found", args.id)));
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+    if args.output {
+        // Output-only mode for piping
+        if let Some(ref path) = output_path {
+            match std::fs::read_to_string(path) {
+                Ok(content) => print!("{content}"),
+                Err(e) => return Err(NmemError::Config(format!("cannot read output: {e}"))),
+            }
+        }
+        return Ok(());
+    }
+
+    // Full status display
+    println!("Task {}", args.id);
+    println!("  status:  {status}");
+    println!("  prompt:  {}", truncate_prompt(&prompt, 80));
+    if let Some(p) = &project {
+        println!("  project: {p}");
+    }
+    if let Some(c) = &cwd {
+        println!("  cwd:     {c}");
+    }
+    println!("  created: {created_at}");
+    if let Some(ts) = started_at {
+        println!("  started: {ts}");
+    }
+    if let Some(ts) = completed_at {
+        println!("  done:    {ts}");
+    }
+    if let Some(e) = &error {
+        println!("  error:   {e}");
+    }
+
+    if let Some(ref path) = output_path {
+        println!("  output:  {path}");
+        match std::fs::read_to_string(path) {
+            Ok(content) => {
+                println!("---");
+                print!("{content}");
+            }
+            Err(_) => {
+                println!("  (output file not yet available)");
+            }
+        }
+    } else {
+        println!("  output:  (none)");
     }
 
     Ok(())
@@ -386,7 +573,7 @@ mod tests {
             prompt: "fix the auth bug".into(),
             project: Some("nmem".into()),
             cwd: Some("/home/test/workspace/nmem".into()),
-            after: None,
+            after: "1h".into(),
         };
 
         handle_queue(&db_path, &args).unwrap();
@@ -448,7 +635,7 @@ mod tests {
             prompt: "scheduled task".into(),
             project: None,
             cwd: None,
-            after: Some("1h".into()),
+            after: "1h".into(),
         };
         handle_queue(&db_path, &args).unwrap();
 
@@ -477,6 +664,7 @@ mod tests {
         }
 
         let dispatch_args = DispatchArgs {
+            file: None,
             max_concurrent: 1,
             dry_run: true,
             tmux_session: "nmem-test".into(),
@@ -510,13 +698,14 @@ mod tests {
             prompt: "new task".into(),
             project: None,
             cwd: None,
-            after: None,
+            after: "1h".into(),
         };
         handle_queue(&db_path, &args).unwrap();
 
         // Dispatch with max_concurrent=1 — the running task's pane won't exist,
         // so it will be reaped, freeing a slot. This tests the reap-then-dispatch flow.
         let dispatch_args = DispatchArgs {
+            file: None,
             max_concurrent: 1,
             dry_run: true,
             tmux_session: "nmem".into(),
@@ -531,5 +720,77 @@ mod tests {
             })
             .unwrap();
         assert_eq!(status, "completed");
+    }
+
+    #[test]
+    fn parse_task_file_with_frontmatter() {
+        let content = "---\nproject: nmem\ncwd: /home/test/workspace\nafter: 5m\n---\n\nRefactor the search module";
+        let tf = parse_task_file(content);
+        assert_eq!(tf.project.as_deref(), Some("nmem"));
+        assert_eq!(tf.cwd.as_deref(), Some("/home/test/workspace"));
+        assert_eq!(tf.after.as_deref(), Some("5m"));
+        assert_eq!(tf.prompt, "Refactor the search module");
+    }
+
+    #[test]
+    fn parse_task_file_body_only() {
+        let content = "Just a plain prompt with no frontmatter";
+        let tf = parse_task_file(content);
+        assert!(tf.project.is_none());
+        assert!(tf.cwd.is_none());
+        assert!(tf.after.is_none());
+        assert_eq!(tf.prompt, "Just a plain prompt with no frontmatter");
+    }
+
+    #[test]
+    fn parse_task_file_partial_frontmatter() {
+        let content = "---\nproject: test\n---\nDo the thing";
+        let tf = parse_task_file(content);
+        assert_eq!(tf.project.as_deref(), Some("test"));
+        assert!(tf.cwd.is_none());
+        assert!(tf.after.is_none());
+        assert_eq!(tf.prompt, "Do the thing");
+    }
+
+    #[test]
+    fn parse_task_file_no_closing_delimiter() {
+        let content = "---\nproject: test\nThis is actually just text";
+        let tf = parse_task_file(content);
+        // No closing ---, treat entire content as prompt
+        assert!(tf.project.is_none());
+        assert_eq!(tf.prompt, content.trim());
+    }
+
+    #[test]
+    fn output_path_derivation() {
+        let path = output_path_for_task(42);
+        assert!(path.to_string_lossy().ends_with("tasks/task-42.md"));
+    }
+
+    #[test]
+    fn file_dispatch_inserts_task() {
+        let (_dir, db_path) = test_db_path();
+        let task_dir = tempfile::TempDir::new().unwrap();
+        let task_file = task_dir.path().join("test-task.md");
+        std::fs::write(&task_file, "---\nproject: test-proj\n---\nSay hello").unwrap();
+
+        let args = DispatchArgs {
+            file: Some(task_file),
+            max_concurrent: 1,
+            dry_run: true,
+            tmux_session: "nmem-test".into(),
+        };
+        handle_dispatch(&db_path, &args).unwrap();
+
+        let conn = Connection::open(&db_path).unwrap();
+        let (prompt, project): (String, Option<String>) = conn
+            .query_row(
+                "SELECT prompt, project FROM tasks WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(prompt, "Say hello");
+        assert_eq!(project.as_deref(), Some("test-proj"));
     }
 }
