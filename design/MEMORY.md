@@ -14,21 +14,21 @@
 | Module | File(s) | ADR | Summary |
 |--------|---------|-----|---------|
 | Schema | `src/schema.rs` | ADR-001 | SQLite with WAL, FTS5, 2 migrations (base + is_pinned) |
-| Record | `src/record.rs` | ADR-002 | Structured extraction from hook events (SessionStart, UserPromptSubmit, PostToolUse, Stop) |
-| Filter | `src/filter.rs` | ADR-007 | Secrets redaction — regex patterns + Shannon entropy, configurable |
-| Config | `src/config.rs` | ADR-005/007 | TOML config: retention policy, filter patterns, encryption key file |
-| Extract | `src/extract.rs` | ADR-002 | Tool classification, content extraction, file path resolution |
-| Project | `src/project.rs` | ADR-004 | Project derivation from cwd |
-| Purge | `src/purge.rs` | ADR-005 | 7 filter modes, secure delete, FTS5 sync, orphan cleanup |
-| Sweep | `src/sweep.rs` | ADR-005 | Type-aware retention, syntheses protection, pin-aware |
-| Maintain | `src/maintain.rs` | ADR-003 | Vacuum, WAL checkpoint, FTS5 integrity/rebuild, sweep trigger |
-| Search | `src/search.rs` | ADR-006 | FTS5 search CLI — index, full, ids modes |
-| Serve | `src/serve.rs` | ADR-006 | MCP server (rmcp) — search, get_observations, timeline, recent_context |
+| Record | `src/s1_record.rs` | ADR-002 | Structured extraction from hook events (SessionStart, UserPromptSubmit, PostToolUse, Stop) |
+| Filter | `src/s5_filter.rs` | ADR-007 | Secrets redaction — regex patterns + Shannon entropy, configurable |
+| Config | `src/s5_config.rs` | ADR-005/007 | TOML config: retention policy, filter patterns, encryption key file |
+| Extract | `src/s1_extract.rs` | ADR-002 | Tool classification, content extraction, file path resolution |
+| Project | `src/s5_project.rs` | ADR-004 | Project derivation from cwd |
+| Purge | `src/s3_purge.rs` | ADR-005 | 7 filter modes, secure delete, FTS5 sync, orphan cleanup |
+| Sweep | `src/s3_sweep.rs` | ADR-005 | Type-aware retention, syntheses protection, pin-aware |
+| Maintain | `src/s3_maintain.rs` | ADR-003 | Vacuum, WAL checkpoint, FTS5 integrity/rebuild, sweep trigger |
+| Search | `src/s1_search.rs` | ADR-006 | FTS5 search CLI — index, full, ids modes |
+| Serve | `src/s1_serve.rs` | ADR-006 | MCP server (rmcp) — search, get_observations, timeline, recent_context |
 | Status | `src/status.rs` | ADR-003 | DB health: size, counts, types, last session, encryption, pinned |
-| Pin | `src/pin.rs` | ADR-005 | Pin/unpin observations — exempt from retention sweeps |
+| Pin | `src/s1_pin.rs` | ADR-005 | Pin/unpin observations — exempt from retention sweeps |
 | DB | `src/db.rs` | ADR-001 | SQLCipher encryption, key management, migration, open/open_readonly |
 | CLI | `src/cli.rs` | ADR-003 | clap derive: record, serve, purge, maintain, status, search, encrypt, pin, unpin |
-| Transcript | `src/transcript.rs` | ADR-002 | Session signature generation |
+| Transcript | `src/s14_transcript.rs` | ADR-002 | Session signature generation |
 
 ### Not yet implemented
 - **S4 Synthesis** — LLM-based summarization of observation clusters (ADR-002 Q3)
