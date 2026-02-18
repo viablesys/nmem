@@ -104,8 +104,7 @@ pub fn parse_schedule(input: &str) -> Result<i64, NmemError> {
             if let Some(tonight) = today_at_hour(21) {
                 return Ok(if tonight > now { tonight } else { tonight + 86400 });
             }
-            // Fallback: 21:00 is roughly now + hours until 21:00
-            return Ok(now + 3600);
+            return Err(NmemError::Config("cannot determine 'tonight' — `date` command failed".into()));
         }
         _ => {}
     }
@@ -250,6 +249,10 @@ fn output_path_for_task(task_id: i64) -> PathBuf {
     tasks_dir().join(format!("task-{task_id}.md"))
 }
 
+fn prompt_path_for_task(task_id: i64) -> PathBuf {
+    tasks_dir().join(format!("task-{task_id}.prompt"))
+}
+
 // --- Queue ---
 
 pub fn handle_queue(db_path: &Path, args: &QueueArgs) -> Result<(), NmemError> {
@@ -280,13 +283,15 @@ pub fn handle_queue(db_path: &Path, args: &QueueArgs) -> Result<(), NmemError> {
 
 // --- Dispatch ---
 
-#[allow(dead_code)]
-struct TaskRow {
+struct ReapRow {
+    id: i64,
+    tmux_target: Option<String>,
+}
+
+struct PendingRow {
     id: i64,
     prompt: String,
-    project: Option<String>,
     cwd: Option<String>,
-    tmux_target: Option<String>,
 }
 
 pub fn handle_dispatch(db_path: &Path, args: &DispatchArgs) -> Result<(), NmemError> {
@@ -324,18 +329,15 @@ pub fn handle_dispatch(db_path: &Path, args: &DispatchArgs) -> Result<(), NmemEr
 
     let conn = open_db(db_path)?;
 
-    // 1. Reap finished tasks
-    let running: Vec<TaskRow> = {
+    // 1. Reap finished tasks — only need id and tmux_target
+    let running: Vec<ReapRow> = {
         let mut stmt = conn.prepare(
-            "SELECT id, prompt, project, cwd, tmux_target FROM tasks WHERE status = 'running'",
+            "SELECT id, tmux_target FROM tasks WHERE status = 'running'",
         )?;
         stmt.query_map([], |row| {
-            Ok(TaskRow {
+            Ok(ReapRow {
                 id: row.get(0)?,
-                prompt: row.get(1)?,
-                project: row.get(2)?,
-                cwd: row.get(3)?,
-                tmux_target: row.get(4)?,
+                tmux_target: row.get(1)?,
             })
         })?
         .collect::<Result<_, _>>()?
@@ -367,20 +369,19 @@ pub fn handle_dispatch(db_path: &Path, args: &DispatchArgs) -> Result<(), NmemEr
 
     let slots = args.max_concurrent - running_count;
 
-    // 3. Find pending tasks (only those past their run_after time)
-    let pending: Vec<TaskRow> = {
+    // 3. Find pending tasks past their run_after time.
+    // NULL run_after = immediate dispatch (no schedule specified).
+    let pending: Vec<PendingRow> = {
         let mut stmt = conn.prepare(
-            "SELECT id, prompt, project, cwd, tmux_target FROM tasks \
+            "SELECT id, prompt, cwd FROM tasks \
              WHERE status = 'pending' AND (run_after IS NULL OR run_after <= unixepoch('now')) \
              ORDER BY created_at ASC LIMIT ?1",
         )?;
         stmt.query_map([slots], |row| {
-            Ok(TaskRow {
+            Ok(PendingRow {
                 id: row.get(0)?,
                 prompt: row.get(1)?,
-                project: row.get(2)?,
-                cwd: row.get(3)?,
-                tmux_target: row.get(4)?,
+                cwd: row.get(2)?,
             })
         })?
         .collect::<Result<_, _>>()?
@@ -418,19 +419,23 @@ pub fn handle_dispatch(db_path: &Path, args: &DispatchArgs) -> Result<(), NmemEr
             tmux_send_keys(&target, &format!("cd {}", shell_escape(cwd)))?;
         }
 
-        // Ensure output directory exists
-        let output_dir = tasks_dir();
-        std::fs::create_dir_all(&output_dir)?;
-        let output_path = output_path_for_task(task.id);
+        // Ensure task directory exists
+        let task_dir = tasks_dir();
+        std::fs::create_dir_all(&task_dir)?;
 
-        // Build claude command — escape single quotes in prompt, tee output, exit pane when done
-        let escaped_prompt = task.prompt.replace('\'', "'\\''");
+        // Write prompt to file — avoids shell injection via tmux send-keys
+        let prompt_path = prompt_path_for_task(task.id);
+        std::fs::write(&prompt_path, &task.prompt)?;
+
+        let output_path = output_path_for_task(task.id);
+        let prompt_path_str = prompt_path.to_string_lossy();
         let output_path_str = output_path.to_string_lossy();
+
+        // Read prompt from file instead of inlining it in the shell command
         tmux_send_keys(
             &target,
             &format!(
-                "claude -p '{escaped_prompt}' | tee '{}'; sleep 5 && exit",
-                output_path_str.replace('\'', "'\\''")
+                "claude -p \"$(cat '{prompt_path_str}')\" | tee '{output_path_str}'; sleep 5 && exit",
             ),
         )?;
 
