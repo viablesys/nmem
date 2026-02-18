@@ -1,5 +1,5 @@
 use crate::db::register_udfs;
-use crate::summarize::SessionSummary;
+use crate::s14_summarize::SessionSummary;
 use crate::NmemError;
 use rusqlite::{Connection, params};
 

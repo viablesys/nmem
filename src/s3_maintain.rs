@@ -1,7 +1,7 @@
 use crate::cli::MaintainArgs;
-use crate::config::load_config;
+use crate::s5_config::load_config;
+use crate::s3_sweep::run_sweep;
 use crate::db::open_db;
-use crate::sweep::run_sweep;
 use crate::NmemError;
 use std::path::Path;
 

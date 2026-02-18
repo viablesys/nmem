@@ -1,5 +1,5 @@
-use crate::config::RetentionConfig;
-use crate::purge::{cleanup_orphans, post_purge_maintenance};
+use crate::s5_config::RetentionConfig;
+use crate::s3_purge::{cleanup_orphans, post_purge_maintenance};
 use crate::NmemError;
 use rusqlite::{Connection, params};
 use std::time::{SystemTime, UNIX_EPOCH};

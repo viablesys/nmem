@@ -20,17 +20,17 @@ cargo build --release
 ```
 
 **Must rebuild after changing:**
-- `record.rs` — hook event handling, observation storage
-- `extract.rs` — tool classification, content extraction
-- `filter.rs` — secret redaction patterns
-- `context.rs` — SessionStart context injection
-- `summarize.rs` — end-of-session summarization
-- `transcript.rs` — thinking block extraction
-- `config.rs` — config parsing (affects all hooks)
+- `s1_record.rs` — hook event handling, observation storage
+- `s1_extract.rs` — tool classification, content extraction
+- `s5_filter.rs` — secret redaction patterns
+- `s1_context.rs` — SessionStart context injection
+- `s14_summarize.rs` — end-of-session summarization
+- `s14_transcript.rs` — thinking block extraction
+- `s5_config.rs` — config parsing (affects all hooks)
 - `schema.rs` — DB migrations
 - `db.rs` — connection setup, encryption
 
-**Rebuild takes effect immediately for hooks** (each hook invocation is a fresh process). **MCP server (`serve.rs`) and CLI changes take effect next session** — the MCP server is a long-lived subprocess that restarts when a new Claude Code session starts.
+**Rebuild takes effect immediately for hooks** (each hook invocation is a fresh process). **MCP server (`s1_serve.rs`) and CLI changes take effect next session** — the MCP server is a long-lived subprocess that restarts when a new Claude Code session starts.
 
 **No rebuild needed for:**
 - `design/`, `TODO.md`, `CLAUDE.md` — docs
@@ -41,13 +41,13 @@ nmem is designed around Stafford Beer's Viable System Model. Every module maps t
 
 | System | Role in nmem | Modules |
 |--------|-------------|---------|
-| **S1** Operations | Capture, store, retrieve | `record.rs`, `extract.rs`, `serve.rs`, `search.rs`, `context.rs` |
-| **S1's S4** | Session summarization — S1's own intelligence layer | `summarize.rs`, `transcript.rs` |
-| **S2** Coordination | Dedup, ordering, concurrency | SQLite WAL, dedup checks in `record.rs` |
-| **S3** Control | Storage budgets, retention, compaction | `sweep.rs`, `maintain.rs`, `purge.rs` |
-| **S3*** Audit | Integrity checks | `maintain.rs` (FTS rebuild, integrity) |
+| **S1** Operations | Capture, store, retrieve | `s1_record.rs`, `s1_extract.rs`, `s1_serve.rs`, `s1_search.rs`, `s1_context.rs`, `s1_pin.rs` |
+| **S1's S4** | Session summarization — S1's own intelligence layer | `s14_summarize.rs`, `s14_transcript.rs` |
+| **S2** Coordination | Dedup, ordering, concurrency | SQLite WAL, dedup checks in `s1_record.rs` |
+| **S3** Control | Storage budgets, retention, compaction | `s3_sweep.rs`, `s3_maintain.rs`, `s3_purge.rs` |
+| **S3*** Audit | Integrity checks | `s3_maintain.rs` (FTS rebuild, integrity) |
 | **S4** Intelligence | Work unit detection, cross-session patterns | Designed, not implemented |
-| **S5** Policy | Config, identity, boundaries | `config.rs`, ADRs |
+| **S5** Policy | Config, identity, boundaries | `s5_config.rs`, `s5_filter.rs`, `s5_project.rs`, ADRs |
 
 **"S1's S4"** means S1 is itself a viable system (VSM recursion). S1's S4 is the intelligence layer *within* operations — session summarization that compresses what happened within a session. The outer S4 synthesizes *across* sessions. S1's S4 must work before the outer S4 can build on it.
 
@@ -71,27 +71,30 @@ Stop         → mark session ended, compute signature, WAL checkpoint
 
 ### Module map
 
-| Module | Role |
-|--------|------|
-| `main.rs` | CLI dispatch, `run()` entry point |
-| `cli.rs` | clap derive definitions only |
-| `record.rs` | Hook stdin → JSON → observation extraction + storage |
-| `serve.rs` | MCP server (`NmemServer`), tools: `search`, `get_observations`, `recent_context` |
-| `search.rs` | CLI search with BM25 + recency blended ranking |
-| `extract.rs` | `classify_tool()`, `classify_bash()`, `extract_content()`, `extract_file_path()` |
-| `summarize.rs` | End-of-session LLM summarization, VictoriaLogs streaming |
-| `filter.rs` | `SecretFilter` — regex patterns + Shannon entropy redaction |
-| `context.rs` | SessionStart context injection (intents + local/cross-project obs) |
-| `db.rs` | `open_db()`, SQLCipher key management, PRAGMAs |
-| `schema.rs` | `rusqlite_migration` definitions (2 migrations) |
-| `config.rs` | TOML config loading from `~/.nmem/config.toml` |
-| `project.rs` | Derive project name from cwd |
-| `sweep.rs` | Retention-based purge (per obs_type TTL, respects pins) |
-| `maintain.rs` | Vacuum, WAL checkpoint, FTS integrity/rebuild |
-| `purge.rs` | Manual purge by date/project/session/type/search |
-| `pin.rs` | Pin/unpin observations |
-| `transcript.rs` | Scan transcript for prompt tracking |
-| `metrics.rs` | Optional OTLP metrics export |
+Files are prefixed by VSM layer: `s1_` (Operations), `s14_` (S1's S4), `s3_` (Control), `s5_` (Policy). Unprefixed files are infrastructure.
+
+| Module | Layer | Role |
+|--------|-------|------|
+| `main.rs` | infra | CLI dispatch, `run()` entry point |
+| `cli.rs` | infra | clap derive definitions only |
+| `db.rs` | infra | `open_db()`, SQLCipher key management, PRAGMAs |
+| `schema.rs` | infra | `rusqlite_migration` definitions (2 migrations) |
+| `metrics.rs` | infra | Optional OTLP metrics export |
+| `status.rs` | infra | Status reporting |
+| `s1_record.rs` | S1 | Hook stdin → JSON → observation extraction + storage |
+| `s1_serve.rs` | S1 | MCP server (`NmemServer`), tools: `search`, `get_observations`, `recent_context` |
+| `s1_search.rs` | S1 | CLI search with BM25 + recency blended ranking |
+| `s1_extract.rs` | S1 | `classify_tool()`, `classify_bash()`, `extract_content()`, `extract_file_path()` |
+| `s1_context.rs` | S1 | SessionStart context injection (intents + local/cross-project obs) |
+| `s1_pin.rs` | S1 | Pin/unpin observations |
+| `s14_summarize.rs` | S1's S4 | End-of-session LLM summarization, VictoriaLogs streaming |
+| `s14_transcript.rs` | S1's S4 | Scan transcript for prompt tracking |
+| `s3_sweep.rs` | S3 | Retention-based purge (per obs_type TTL, respects pins) |
+| `s3_maintain.rs` | S3 | Vacuum, WAL checkpoint, FTS integrity/rebuild |
+| `s3_purge.rs` | S3 | Manual purge by date/project/session/type/search |
+| `s5_config.rs` | S5 | TOML config loading from `~/.nmem/config.toml` |
+| `s5_filter.rs` | S5 | `SecretFilter` — regex patterns + Shannon entropy redaction |
+| `s5_project.rs` | S5 | Derive project name from cwd |
 
 ## Database
 
@@ -123,10 +126,10 @@ LM Studio must have a model loaded for summarization to work. Default: `ibm/gran
 ## Key types
 
 - `NmemError` — `Database | Io | Json | Config` (in `lib.rs`)
-- `HookPayload` — deserialized hook JSON (in `record.rs`)
-- `SecretFilter` — `RegexSet` + entropy detection (in `filter.rs`)
-- `NmemConfig` — full config tree (in `config.rs`)
-- `NmemServer` — MCP server state, holds DB path (in `serve.rs`)
+- `HookPayload` — deserialized hook JSON (in `s1_record.rs`)
+- `SecretFilter` — `RegexSet` + entropy detection (in `s5_filter.rs`)
+- `NmemConfig` — full config tree (in `s5_config.rs`)
+- `NmemServer` — MCP server state, holds DB path (in `s1_serve.rs`)
 
 ## Design docs
 
@@ -148,11 +151,11 @@ ADRs in `design/ADR/`. Read before changing load-bearing decisions:
 |--------|------------|
 | `db.rs` | `rusqlite.md`, `sqlcipher.md` |
 | `schema.rs` | `rusqlite-migration.md` |
-| `search.rs` | `fts5.md`, `sqlite-retrieval-patterns.md` |
-| `serve.rs` | `rmcp.md`, `fts5.md` |
-| `record.rs`, `extract.rs` | `claude-code-hooks-events.md`, `serde-json.md` |
-| `filter.rs` | `regex.md` |
-| `context.rs` | `sqlite-retrieval-patterns.md` |
+| `s1_search.rs` | `fts5.md`, `sqlite-retrieval-patterns.md` |
+| `s1_serve.rs` | `rmcp.md`, `fts5.md` |
+| `s1_record.rs`, `s1_extract.rs` | `claude-code-hooks-events.md`, `serde-json.md` |
+| `s5_filter.rs` | `regex.md` |
+| `s1_context.rs` | `sqlite-retrieval-patterns.md` |
 | `cli.rs` | `clap.md` |
 | `metrics.rs` | `victoria-logging.md` |
 | `design/` | `meta-cognition.md`, `claude-code-plugins.md` |

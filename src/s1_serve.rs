@@ -537,10 +537,10 @@ impl NmemServer {
         params: RegenerateContextParams,
     ) -> Result<CallToolResult, ErrorData> {
         let db = self.db.lock().map_err(|e| db_err(&e))?;
-        let config = crate::config::load_config().unwrap_or_default();
+        let config = crate::s5_config::load_config().unwrap_or_default();
         let (local_limit, cross_limit) =
-            crate::config::resolve_context_limits(&config, &params.project, false);
-        let ctx = crate::context::generate_context(&db, &params.project, local_limit, cross_limit)
+            crate::s5_config::resolve_context_limits(&config, &params.project, false);
+        let ctx = crate::s1_context::generate_context(&db, &params.project, local_limit, cross_limit)
             .map_err(|e| db_err(&e))?;
         if ctx.is_empty() {
             Ok(CallToolResult::success(vec![Content::text(format!(
@@ -727,7 +727,7 @@ pub fn handle_serve(db_path: &Path) -> Result<(), NmemError> {
         .map_err(NmemError::Io)?;
 
     rt.block_on(async {
-        let config = crate::config::load_config().unwrap_or_default();
+        let config = crate::s5_config::load_config().unwrap_or_default();
         let provider = crate::metrics::init_meter_provider(&config.metrics);
 
         eprintln!("nmem: serve starting");

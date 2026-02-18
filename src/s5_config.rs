@@ -1,4 +1,4 @@
-use crate::filter::FilterParams;
+use crate::s5_filter::FilterParams;
 use crate::NmemError;
 use regex::Regex;
 use serde::Deserialize;

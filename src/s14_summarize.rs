@@ -1,4 +1,4 @@
-use crate::config::SummarizationConfig;
+use crate::s5_config::SummarizationConfig;
 use crate::NmemError;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};

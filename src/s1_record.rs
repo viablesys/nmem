@@ -1,11 +1,11 @@
-use crate::config::{load_config, resolve_filter_params, NmemConfig};
-use crate::context;
+use crate::s1_context;
+use crate::s1_extract::{classify_tool, extract_content, extract_file_path};
+use crate::s14_transcript::{get_current_prompt_id, scan_transcript};
+use crate::s3_sweep::run_sweep;
+use crate::s5_config::{load_config, resolve_filter_params, NmemConfig};
+use crate::s5_filter::{SecretFilter, redact_json_value_with};
+use crate::s5_project::derive_project;
 use crate::db::open_db;
-use crate::extract::{classify_tool, extract_content, extract_file_path};
-use crate::filter::{SecretFilter, redact_json_value_with};
-use crate::project::derive_project;
-use crate::sweep::run_sweep;
-use crate::transcript::{get_current_prompt_id, scan_transcript};
 use crate::NmemError;
 use rusqlite::{Connection, params};
 use serde::Deserialize;
@@ -24,6 +24,8 @@ struct HookPayload {
     tool_name: Option<String>,
     #[serde(default)]
     tool_input: Option<serde_json::Value>,
+    #[serde(default)]
+    tool_response: Option<String>,
     #[serde(default)]
     transcript_path: Option<String>,
     // SessionStart specific
@@ -116,8 +118,8 @@ fn handle_session_start(
 
     // Context injection — non-fatal, errors logged to stderr
     let is_recovery = matches!(source, "compact" | "clear");
-    let (local_limit, cross_limit) = crate::config::resolve_context_limits(config, project, is_recovery);
-    match context::generate_context(conn, project, local_limit, cross_limit) {
+    let (local_limit, cross_limit) = crate::s5_config::resolve_context_limits(config, project, is_recovery);
+    match s1_context::generate_context(conn, project, local_limit, cross_limit) {
         Ok(ctx) if !ctx.is_empty() => print!("{ctx}"),
         Ok(_) => {}
         Err(e) => eprintln!("nmem: context injection failed: {e}"),
@@ -162,6 +164,7 @@ fn handle_post_tool_use(
     conn: &Connection,
     payload: &HookPayload,
     filter: &SecretFilter,
+    source_event: &str,
 ) -> Result<(), NmemError> {
     let tool_name = match payload.tool_name.as_deref() {
         Some(n) => n,
@@ -187,7 +190,7 @@ fn handle_post_tool_use(
 
     let content = extract_content(tool_name, &tool_input);
     let obs_type = if tool_name == "Bash" {
-        crate::extract::classify_bash(&content)
+        crate::s1_extract::classify_bash(&content)
     } else {
         classify_tool(tool_name)
     };
@@ -197,10 +200,27 @@ fn handle_post_tool_use(
     let (filtered_content, content_redacted) = filter.redact(&content);
 
     // Build metadata and filter it
-    let mut metadata = serde_json::Value::Null;
+    let is_failure = source_event == "PostToolUseFailure";
+    let mut meta_obj = serde_json::Map::new();
+
     if content_redacted {
-        metadata = serde_json::json!({"redacted": true});
+        meta_obj.insert("redacted".into(), serde_json::Value::Bool(true));
     }
+
+    if is_failure {
+        meta_obj.insert("failed".into(), serde_json::Value::Bool(true));
+        if let Some(resp) = &payload.tool_response {
+            let truncated: String = resp.chars().take(2000).collect();
+            let (filtered_resp, _) = filter.redact(&truncated);
+            meta_obj.insert("response".into(), serde_json::Value::String(filtered_resp));
+        }
+    }
+
+    let mut metadata = if meta_obj.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::Object(meta_obj)
+    };
 
     // Filter secrets from metadata if it has content
     if metadata.is_object() {
@@ -225,7 +245,7 @@ fn handle_post_tool_use(
             prompt_id,
             ts,
             obs_type,
-            "PostToolUse",
+            source_event,
             tool_name,
             file_path,
             filtered_content,
@@ -327,7 +347,7 @@ fn handle_stop(conn: &Connection, payload: &HookPayload, config: &NmemConfig) ->
     tx.commit()?;
 
     // Summarize session — non-fatal
-    match crate::summarize::summarize_session(conn, &payload.session_id, &config.summarization) {
+    match crate::s14_summarize::summarize_session(conn, &payload.session_id, &config.summarization) {
         Ok(()) => {}
         Err(e) => eprintln!("nmem: summarization failed (non-fatal): {e}"),
     }
@@ -361,7 +381,8 @@ pub fn handle_record(db_path: &Path) -> Result<(), NmemError> {
     let result = match payload.hook_event_name.as_str() {
         "SessionStart" => handle_session_start(&conn, &payload, &config, &project),
         "UserPromptSubmit" => handle_user_prompt(&conn, &payload, &filter),
-        "PostToolUse" => handle_post_tool_use(&conn, &payload, &filter),
+        "PostToolUse" => handle_post_tool_use(&conn, &payload, &filter, "PostToolUse"),
+        "PostToolUseFailure" => handle_post_tool_use(&conn, &payload, &filter, "PostToolUseFailure"),
         "Stop" => handle_stop(&conn, &payload, &config),
         _ => Ok(()),
     };
@@ -417,7 +438,7 @@ fn record_metrics(
                     .build()
                     .add(1, &[KeyValue::new("project", project.to_string())]);
             }
-            "PostToolUse" => {
+            "PostToolUse" | "PostToolUseFailure" => {
                 let obs_type = classify_tool(payload.tool_name.as_deref().unwrap_or(""));
                 meter.u64_counter("nmem_observations_total").build().add(
                     1,
