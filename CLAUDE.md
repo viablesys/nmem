@@ -49,12 +49,12 @@ nmem is designed around Stafford Beer's Viable System Model. Every module maps t
 | **S2** Coordination | Dedup, ordering, concurrency | SQLite WAL, dedup checks in `s1_record.rs` |
 | **S3** Control | Storage budgets, retention, compaction | `s3_sweep.rs`, `s3_maintain.rs`, `s3_purge.rs` |
 | **S3*** Audit | Integrity checks | `s3_maintain.rs` (FTS rebuild, integrity) |
-| **S4** Intelligence | Task dispatch, work unit detection, cross-session patterns | `s4_dispatch.rs`; work unit detection designed |
+| **S4** Intelligence | Task dispatch, cross-session pattern detection, work unit detection | `s4_dispatch.rs`, `s3_learn.rs`; work unit detection designed |
 | **S5** Policy | Config, identity, boundaries | `s5_config.rs`, `s5_filter.rs`, `s5_project.rs`, ADRs |
 
 **"S1's S4"** means S1 is itself a viable system (VSM recursion). S1's S4 is the intelligence layer *within* operations — session summarization that compresses what happened within a session. The outer S4 synthesizes *across* sessions. S1's S4 must work before the outer S4 can build on it.
 
-**Current state**: S1 functional (S1's S4 validated), S2 functional, S3 manual, S4 partial (task dispatch functional, work unit detection designed). See `design/VSM.md` for full assessment.
+**Current state**: S1 functional (S1's S4 validated), S2 functional, S3 manual, S4 partial (task dispatch + cross-session pattern detection functional, work unit detection designed). See `design/VSM.md` for full assessment.
 
 ## Architecture
 
@@ -93,6 +93,7 @@ Files are prefixed by VSM layer: `s1_` (Operations), `s14_` (S1's S4), `s3_` (Co
 | `s1_pin.rs` | S1 | Pin/unpin observations |
 | `s14_summarize.rs` | S1's S4 | End-of-session LLM summarization, VictoriaLogs streaming |
 | `s14_transcript.rs` | S1's S4 | Scan transcript for prompt tracking |
+| `s3_learn.rs` | S4 | Cross-session pattern detection: failures, errors, intents, stuck loops |
 | `s4_dispatch.rs` | S4 | Task queue and systemd-driven dispatch to tmux |
 | `s3_sweep.rs` | S3 | Retention-based purge (per obs_type TTL, respects pins) |
 | `s3_maintain.rs` | S3 | Vacuum, WAL checkpoint, FTS integrity/rebuild |

@@ -314,16 +314,24 @@ This gives S4 the structured fields it needs for relational joins while keeping 
 
 ## Decision
 
-**Deferred.** This ADR captures the data model analysis. Decisions on Q1-Q4 will be made when S4 detection is prototyped.
+**Partially implemented.** Data model analysis informs ongoing S4 work. Decisions on Q2-Q4 (work unit schema, detection location, minimum viable S4) deferred until work unit detection is prototyped.
 
-**Immediate actions taken:**
+**Implemented:**
 - `PostToolUseFailure` handling added to `s1_record.rs` (Gap 6)
-- `tool_response` field added to `HookPayload` (Gap 1, partial)
+- `tool_response` field added to `HookPayload` as `Option<serde_json::Value>` (Gap 1, partial) — captures JSON responses from all tool types, not just strings
 - Hook registered in `settings.json`
+- **`nmem learn` — cross-session pattern detection (S4 inward-facing):** Four signal detectors operating on the observation + summary corpus:
+  1. Repeated failed commands — normalized grouping across sessions with exponential decay heat scoring
+  2. Unresolved investigations — files read across sessions but never edited (reference paths excluded)
+  3. Recurring error patterns — error signatures extracted from `metadata.response`, grouped across sessions
+  4. Repeated intents — session intent clustering via Jaccard similarity on keyword bags
+  5. **Cross-reference confirmation** — intent + failure/error session overlap (≥2 shared sessions) surfaces confirmed stuck loops
+- `tool_response` type fix: `Option<String>` → `Option<serde_json::Value>` so JSON responses are captured rather than silently dropped by serde default
 
-**Next actions (pre-decision):**
+**Next actions:**
 - Capture Bash `description` and Task `subagent_type` in metadata (Gaps 4, 5)
-- Prototype S4 detection query to validate that per-prompt tool composition produces clean phase signals from real data
+- Prototype S4 work unit detection query to validate that per-prompt tool composition produces clean phase signals from real data
+- Evaluate whether `nmem learn` patterns should feed into context injection (e.g., inject confirmed stuck loop warnings at SessionStart)
 
 ## References
 
@@ -340,3 +348,4 @@ This gives S4 the structured fields it needs for relational joins while keeping 
 |------|---------|---------|
 | 2026-02-17 | 0.1 | Initial draft. Gap analysis from live session. 8 gaps identified, 3 resolved (PostToolUseFailure, tool_response on failure, hook registration). 4 open questions. |
 | 2026-02-17 | 0.2 | Added Signal Multiplication section. Observations × Summaries as two-layer signal model. Feedback loop diagram. Per-summary-field S4 join paths. Revised Q2 work_units schema to include `learned` and `notes` fields for cross-session relational queries. |
+| 2026-02-18 | 0.3 | `nmem learn` implemented — first S4 inward-facing intelligence. Four signal detectors (failed commands, unresolved reads, recurring errors, repeated intents) with exponential decay heat scoring and cross-reference confirmation. `tool_response` type fixed to `Option<serde_json::Value>` for proper JSON capture. Gap 1 partially closed: failure responses now reliably captured, enabling error pattern detection across sessions. |

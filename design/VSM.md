@@ -91,13 +91,22 @@ S3* should be the immune system — detecting pathology before it becomes visibl
 
 ## S4 — Intelligence
 
-Adaptation, pattern recognition, future-oriented action. **Partial — task dispatch functional, work unit detection designed.**
+Adaptation, pattern recognition, future-oriented action. **Partial — task dispatch functional, cross-session pattern detection functional, work unit detection designed.**
 
 S4 answers: "what's changing, what should we do next, and how should we adapt?" It has two faces:
 
 **Outward-facing (initiating future work):** The task queue (`s4_dispatch.rs`) is S4's first concrete module. It queues work for future execution and dispatches it into tmux panes running Claude Code — each dispatched session is its own viable system (VSM recursion at the system level). A systemd timer provides the clock. This is indirect control: S4 decides *what* to do; the spawned session decides *how*.
 
-**Inward-facing (recognizing patterns):** Work unit detection and autonomous context management remain the core S4 algorithm — designed but not yet implemented. Context injection (`s1_context.rs`) has been restructured toward S4 principles — summaries are primary content, raw observations filtered to signal only (pinned + recent edits + git milestones). This is a step toward S4 but still mechanical: the same queries run every SessionStart regardless of session type or agent need. Concrete limitation: if a user switches between two features in the same project, context injection doesn't prioritize the feature being returned to — it's time-ordered, not relevance-ordered. True S4 context injection would adapt based on the session's first prompt or detected work unit.
+**Inward-facing (recognizing patterns):** `nmem learn` (`s3_learn.rs`) is S4's first inward-facing module — cross-session pattern detection that scans the full observation and summary corpus to surface:
+1. **Repeated failures** — same command failing across sessions, normalized and heat-scored
+2. **Recurring errors** — error signatures from `metadata.response` appearing across sessions
+3. **Repeated intents** — similar session intents clustered via Jaccard similarity on keyword bags
+4. **Unresolved investigations** — files read across sessions but never edited (reference paths excluded)
+5. **Confirmed stuck loops** — cross-reference of intent + failure/error session overlap (≥2 shared sessions)
+
+Heat scoring uses exponential decay (configurable half-life, default 7 days) normalized to 0-100. Output is `~/.nmem/learnings.md` — a structured report for collaborative review before merging insights into CLAUDE.md. This is pattern detection, not autonomous action — the report is a seed that requires human/agent judgment to act on.
+
+Work unit detection (per-prompt tool composition, phase transitions within sessions) and autonomous context management remain designed but not yet implemented. Context injection (`s1_context.rs`) has been restructured toward S4 principles — summaries are primary content, raw observations filtered to signal only (pinned + recent edits + git milestones). This is a step toward S4 but still mechanical: the same queries run every SessionStart regardless of session type or agent need. Concrete limitation: if a user switches between two features in the same project, context injection doesn't prioritize the feature being returned to — it's time-ordered, not relevance-ordered. True S4 context injection would adapt based on the session's first prompt or detected work unit.
 
 ### Core concept: the work unit
 
@@ -193,10 +202,10 @@ A mature S5 would:
 | S2 Coordination | Functional | Multi-agent would stress this |
 | S3 Control | Manual | Needs autonomous triggers |
 | S3* Audit | Minimal | Needs functional integrity checks |
-| S4 Intelligence | Partial | Task dispatch functional; work unit detection designed, platform constraints block autonomous context actuation |
+| S4 Intelligence | Partial | Task dispatch + cross-session pattern detection functional; work unit detection designed, platform constraints block autonomous context actuation |
 | S5 Policy | Static | No tension to resolve without active S4 inward-facing capabilities |
 
-S1 captures facts and produces agent-oriented session summaries. Context injection is now summary-primary — raw observation noise replaced with curated signal (summaries + pinned + recent edits + git milestones). S2 coordinates. S3 exists but doesn't self-trigger. S3* checks structure but not function. S4 has its first actuator — task dispatch spawns new viable systems (Claude Code sessions) via systemd timer — but its inward-facing capabilities (work unit detection, context management) remain designed. S5 has nothing to mediate yet. The organism records, compresses, selectively recalls, and can now initiate future work, but doesn't yet manage its own attention.
+S1 captures facts and produces agent-oriented session summaries. Context injection is now summary-primary — raw observation noise replaced with curated signal (summaries + pinned + recent edits + git milestones). S2 coordinates. S3 exists but doesn't self-trigger. S3* checks structure but not function. S4 now has both an outward actuator (task dispatch) and an inward sensor (`nmem learn` — cross-session pattern detection). Task dispatch spawns new viable systems; pattern detection surfaces stuck loops, recurring failures, and repeated investigations from the observation corpus. What remains designed: work unit detection (per-prompt phase transitions) and autonomous context management. S5 has nothing to mediate yet. The organism records, compresses, selectively recalls, initiates future work, and can now detect when it's stuck — but doesn't yet manage its own attention.
 
 ## Recurring Patterns
 
@@ -225,11 +234,11 @@ This pattern repeats wherever a higher system needs to interpret lower-system da
 
 1. ~~**S1's S4 (session summarization)**~~ — **Done (v2).** Agent-oriented summarization via local LLM. Thinking blocks feed `learned` field. Summaries streamed to VictoriaLogs. Remaining sub-gaps (PreCompact, rolling summaries, FTS5 indexing) tracked in TODO.md.
 2. ~~**S4 task dispatch**~~ — **Done.** Task queue with systemd-driven dispatch (`s4_dispatch.rs`). Queues future work, dispatches into tmux panes running Claude Code. Each dispatched session is its own viable system. MCP tool (`queue_task`) allows running sessions to queue follow-up work. Remaining gaps: task result capture, cancellation, dependencies, notifications.
-3. **S4 work unit detection** — highest priority for inward-facing S4. The core algorithm: recognize work unit boundaries from observation patterns (prompt:thinking:tool ratios, hot files, intent shifts). This is the intelligence that makes nmem a viable system. Implementation is consumer-independent — same algorithm whether actuated via Claude Code hooks or API.
+3. **S4 work unit detection** — highest priority for inward-facing S4. The core algorithm: recognize work unit boundaries from observation patterns (prompt:thinking:tool ratios, hot files, intent shifts). Cross-session pattern detection (`nmem learn`) is a step toward this — it detects patterns across sessions (stuck loops, recurring failures) but not within sessions (phase transitions). Work unit detection operates at a finer grain: per-prompt tool composition within a single session.
 4. **S4 context actuation** — depends on Claude Code platform evolution (issues #24252, #25689, #21132) or building an API-based harness. Without this, S4 can detect and summarize but not act autonomously on context.
 5. **S4 UI** — work-unit-oriented dashboard. S4's external interface for users. Shows current work unit, history, context health. Same data model as context injection.
 6. **S3 autonomy** — post-session hook or timer that checks storage and runs sweeps. The logic exists; wire a trigger.
 7. **S3* functional audits** — track extraction success rate, retrieval hit rate, filter accuracy. Surface in `nmem status`.
-8. **S4 cross-session synthesis** — cluster work unit summaries into patterns. Depends on work unit detection.
+8. **S4 cross-session synthesis** — cluster work unit summaries into patterns. `nmem learn` is a first step: it detects cross-session patterns from observations and summaries, but outputs a static report rather than feeding back into context injection. Next: integrate learnings into SessionStart context (warn about confirmed stuck loops) and cluster work unit summaries when available.
 9. **Multi-agent S2/S4** — networking, shared memory, cross-agent retrieval. Changes the nature of S2 coordination and gives S4 richer input.
 10. **S5 adaptive policy** — emerges naturally once S3 and S4 are both active and creating tension.
