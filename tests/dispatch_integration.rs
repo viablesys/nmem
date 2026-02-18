@@ -22,6 +22,7 @@ fn queue_and_read_back() {
             prompt: "fix the auth bug".into(),
             project: Some("nmem".into()),
             cwd: Some("/tmp/workspace".into()),
+            after: None,
         },
     )
     .unwrap();
@@ -32,6 +33,7 @@ fn queue_and_read_back() {
             prompt: "add logging".into(),
             project: Some("nmem".into()),
             cwd: None,
+            after: None,
         },
     )
     .unwrap();
@@ -68,6 +70,7 @@ fn dispatch_dry_run_does_not_change_status() {
             prompt: "test task".into(),
             project: None,
             cwd: None,
+            after: None,
         },
     )
     .unwrap();
@@ -139,6 +142,7 @@ fn queue_derives_project_from_cwd() {
                 "{}/workspace/nmem",
                 std::env::var("HOME").unwrap_or_default()
             )),
+            after: None,
         },
     )
     .unwrap();
@@ -161,6 +165,7 @@ fn dispatch_respects_capacity() {
             prompt: "task one".into(),
             project: None,
             cwd: None,
+            after: None,
         },
     )
     .unwrap();
@@ -170,6 +175,7 @@ fn dispatch_respects_capacity() {
             prompt: "task two".into(),
             project: None,
             cwd: None,
+            after: None,
         },
     )
     .unwrap();
@@ -211,4 +217,5 @@ fn schema_migration_creates_tasks_table() {
     assert!(columns.contains(&"started_at".into()));
     assert!(columns.contains(&"completed_at".into()));
     assert!(columns.contains(&"error".into()));
+    assert!(columns.contains(&"run_after".into()));
 }

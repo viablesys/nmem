@@ -100,6 +100,7 @@ CREATE TABLE tasks (
 CREATE INDEX idx_tasks_status ON tasks(status, created_at);
 ",
         ),
+        M::up("ALTER TABLE tasks ADD COLUMN run_after INTEGER;"),
     ])
 });
 

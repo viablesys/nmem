@@ -141,6 +141,10 @@ pub struct QueueArgs {
     /// Working directory (defaults to current)
     #[arg(long)]
     pub cwd: Option<String>,
+
+    /// When to run: "5m", "2h", "1d", "tomorrow", "tonight", or ISO datetime
+    #[arg(long)]
+    pub after: Option<String>,
 }
 
 #[derive(Parser)]

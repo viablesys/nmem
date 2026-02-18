@@ -147,6 +147,9 @@ pub struct QueueTaskParams {
     /// Working directory for the task.
     #[serde(default)]
     pub cwd: Option<String>,
+    /// When to run: "5m", "2h", "1d", "tomorrow", "tonight", or ISO datetime.
+    #[serde(default)]
+    pub after: Option<String>,
 }
 
 // --- Response types ---
@@ -978,6 +981,9 @@ impl NmemServer {
         }
         if let Some(ref cwd) = params.cwd {
             cmd.arg("--cwd").arg(cwd);
+        }
+        if let Some(ref after) = params.after {
+            cmd.arg("--after").arg(after);
         }
 
         let output = cmd.output().map_err(|e| {
