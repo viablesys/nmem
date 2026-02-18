@@ -40,6 +40,8 @@ pub enum Command {
     Dispatch(DispatchArgs),
     /// View a task's status and output
     Task(TaskArgs),
+    /// Detect cross-session patterns and write learnings report
+    Learn(LearnArgs),
 }
 
 #[derive(Parser)]
@@ -175,4 +177,19 @@ pub struct TaskArgs {
     /// Show output only (for piping)
     #[arg(long)]
     pub output: bool,
+}
+
+#[derive(Parser)]
+pub struct LearnArgs {
+    /// Output file (default: ~/.nmem/learnings.md)
+    #[arg(long, short)]
+    pub output: Option<PathBuf>,
+
+    /// Minimum sessions for a pattern to qualify (default: 3)
+    #[arg(long, default_value = "3")]
+    pub threshold: i64,
+
+    /// Half-life in hours for heat decay (default: 168 = 1 week)
+    #[arg(long, default_value = "168")]
+    pub half_life: f64,
 }

@@ -7,9 +7,11 @@ Cross-session memory for Claude Code. Captures observations (file reads, edits, 
 ```bash
 cargo build                    # debug
 cargo build --release          # optimized (opt-level=z, LTO, stripped)
-cargo test                     # all tests
+~/.cargo/bin/cargo test        # all tests — use full path (see below)
 NMEM_DB=/tmp/test.db nmem status   # test against throwaway DB
 ```
+
+**`cargo test` fails with exit 127?** Dispatched tmux sessions and some hook contexts don't inherit the user's PATH. Use `~/.cargo/bin/cargo` instead of bare `cargo`. This applies to all Cargo commands in non-interactive shells.
 
 ### When to rebuild release
 
