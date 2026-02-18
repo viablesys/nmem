@@ -148,6 +148,7 @@ ADRs in `design/ADR/`. Read before changing load-bearing decisions:
 - ADR-006: Interface protocol
 - ADR-007: Trust boundary and secrets filtering
 - ADR-008: Distribution and installation
+- ADR-010: Work unit detection — episodic memory (prompt-driven boundary detection, narrative construction)
 
 `design/DESIGN.md` has the overall design framing.
 
@@ -164,7 +165,7 @@ ADRs in `design/ADR/`. Read before changing load-bearing decisions:
 | `s1_context.rs` | `sqlite-retrieval-patterns.md` |
 | `cli.rs` | `clap.md` |
 | `metrics.rs` | `victoria-logging.md` |
-| `design/` | `meta-cognition.md`, `claude-code-plugins.md` |
+| `design/` | `meta-cognition.md`, `claude-code-plugins.md`, `episodic-memory.md` |
 
 ## Tracking
 

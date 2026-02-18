@@ -135,13 +135,28 @@ The boundary signal comes from the *longer* prompts where the user states new in
 
 ## Decision
 
-**Position B: prompt-driven detection with observation annotation.**
+**Position B: prompt-driven detection with narrative construction.**
 
 Rationale:
 1. The user is the viable system. Their prompts are the authoritative signal for intent changes. Detecting work units from tool patterns is inferring strategy from the ledger.
 2. The machinery exists. `s3_learn` already implements `intent_keywords()`, `jaccard()`, and keyword-bag clustering for inter-session patterns. The same functions work for intra-session boundary detection on consecutive prompts.
-3. Observation data serves the episode after detection, not during. Phase ratios, hot files, and failure counts *describe* the episode. They don't define it.
-4. The terse-prompt heuristic (short prompts = continuation) handles the adversarial case cleanly.
+3. The terse-prompt heuristic (short prompts = continuation) handles the adversarial case cleanly.
+
+### Episodes are stories
+
+An episode is not a time range with metadata. It is a story — a self-contained narrative with beginning, middle, and end.
+
+- **Beginning** — the user's intent prompt. The directive that opens the episode: what are we doing and why.
+- **Middle** — the dialogue. User prompts directing and reacting, agent prompts explaining and proposing, observations recording the actions taken between exchanges. Investigation, execution, failures, recoveries — the full back-and-forth of collaborative work.
+- **End** — resolution. A git commit (worth keeping), a new unrelated intent (the user moved on), or session end (interrupted).
+
+The episode is a dialogue, not a monologue. The user directs and the agent responds, but the agent's contributions are part of the narrative — it explains what it found, proposes approaches, reports failures, asks questions. The user reacts, redirects, confirms. The story emerges from their interleaving: user intent → agent investigation → agent report → user redirect → agent execution → resolution.
+
+Observations (tool calls, file operations) are the *actions* within this dialogue — what was done between exchanges. They provide the concrete detail: which files, which commands, what failed. But the narrative thread runs through both voices.
+
+This means boundary detection reads user prompts (the authoritative intent signal), but narrative construction draws from the full episode: user prompts, agent prompts (from `s14_transcript.rs` thinking block extraction), and the observation stream between them.
+
+The LLM is not optional. Keyword bags and SQL aggregates can detect boundaries and count observations, but they cannot produce a story. A story requires language — causality, sequence, intent, outcome compressed into a paragraph that the next session can use to reconstruct context. This is the same insight that validated S1's S4: narrative coherence requires language generation (VSM.md §S1).
 
 ### The detection algorithm
 
@@ -164,12 +179,14 @@ The episode's keyword bag grows as new prompts are added — it accumulates the 
 
 Gaps (time between prompts) serve as a secondary signal: lower the Jaccard threshold after a long gap (the user is more likely to have shifted after sleeping than after 30 seconds). But the verdict is always in the text.
 
-### Observation annotation
+### Narrative construction
 
-After episodes are identified, each gets annotated from the observation stream:
+After boundary detection identifies episodes, each one is constructed into a story. Two layers:
+
+**Structured skeleton** — SQL aggregation over the episode's prompt range:
 
 ```sql
--- Per-episode metadata, computed after boundary detection
+-- Structured facts for the episode
 SELECT
     COUNT(*) as obs_count,
     SUM(CASE WHEN obs_type IN ('file_read','search') THEN 1 ELSE 0 END) as investigate,
@@ -181,7 +198,13 @@ WHERE session_id = ?1
   AND prompt_id BETWEEN ?2 AND ?3  -- episode prompt range
 ```
 
-This gives each episode: hot files, phase character (investigate-heavy vs execute-heavy), failure count, duration. Descriptive, not prescriptive.
+This gives the facts: hot files, phase character, failure count, duration. Necessary but not sufficient.
+
+**Narrative summary** — LLM generation from the episode's full content:
+
+The episode's user prompts, agent prompts (including thinking blocks from `s14_transcript.rs`), and observation stream are passed to the local LLM. The output is the story: what was the intent, what happened, what was learned, how did it end. Same structured fields as session summaries (`intent`, `learned`, `completed`, `notes`) but at episode granularity.
+
+The narrative is what makes the episode usable as memory. The structured skeleton tells you "4 reads, 2 edits, 1 failure." The narrative tells you "tried to fix the auth bug by patching the token refresh, but the real issue was a stale mock in tests — updated the mock and tests passed." The next session needs the latter.
 
 ### s3_learn integration
 
@@ -227,13 +250,13 @@ CREATE TABLE work_units (
     session_id TEXT NOT NULL REFERENCES sessions(id),
     started_at INTEGER NOT NULL,
     ended_at INTEGER,
-    intent TEXT,                -- accumulated keywords or representative prompt
+    intent TEXT,                -- opening user prompt or LLM-derived intent
     first_prompt_id INTEGER,   -- prompt range start
     last_prompt_id INTEGER,    -- prompt range end
     hot_files TEXT,            -- JSON: distinct file_paths from observations
     phase_signature TEXT,      -- JSON: {investigate: N, execute: N, failures: N}
     obs_count INTEGER,
-    summary TEXT,              -- LLM-generated (optional, at session end)
+    summary TEXT,              -- LLM-generated narrative (the story)
     learned TEXT,              -- JSON array, from LLM or extracted from thinking blocks
     notes TEXT                 -- negative knowledge for this episode
 );
@@ -265,26 +288,32 @@ Deferred until episodes are generating data.
 
 Dispatched tasks (`s4_dispatch.rs`) have a single prompt and no user interaction. The entire session is one episode by definition — no intent shifts to detect. The episode inherits the task prompt as its intent. No special handling needed; the detection algorithm produces one episode per session when there's one user prompt.
 
-### Q4: Should the LLM generate episode summaries?
+### Q4: How does episode narrative generation work?
 
-S1's S4 (session summarization) already generates `intent`, `learned`, `completed`, `notes` at session end. Episode-level summaries would be the same fields at finer granularity. Options:
-- **No LLM for episodes.** Intent from accumulated keywords, hot files and phase from SQL. Cheaper, deterministic.
-- **LLM at session end.** After detection, pass each episode's prompt text + observation summary to granite for structured summary. Same cost model as session summaries but per-episode.
-- **LLM only for multi-prompt episodes.** Single-prompt episodes (most automated sessions, quick fixes) don't need narrative compression. Only episodes spanning 3+ prompts get LLM treatment.
+The LLM is not optional — the narrative is what makes an episode a story rather than a time range with tags. The question is when and how.
 
-Position C (threshold-based) seems right but deferred until episodes exist and we can measure the value-add.
+**Input:** Each episode's user prompts + agent prompts (including thinking blocks) + observation stream (tool calls, files, failures). This is the full dialogue that the story is told from.
+
+**Output:** Structured fields matching session summaries — `intent`, `learned`, `completed`, `notes` — but at episode granularity.
+
+**When:** At session end (Stop hook), after boundary detection. Same cost model as session summarization but per-episode. Single-prompt episodes (automated tasks, quick fixes) may not need LLM treatment — the task prompt IS the story. Multi-prompt episodes (3+) always get narrative generation.
+
+**Relationship to session summaries:** Session summaries are currently the unit of cross-session memory. Episode summaries are finer-grained stories within a session. A session summary could be generated *from* its episode summaries rather than from the raw observation stream — episodes first, session summary as synthesis. This inverts the current flow (session summary from raw data) but produces better results because each episode is already a coherent narrative.
 
 ## Consequences
 
 ### Positive
 - **Reads the signal at the source.** User prompts carry intent directly. No inference from downstream effects.
-- **Reuses existing machinery.** `intent_keywords()` and `jaccard()` from `s3_learn` work without modification.
-- **Unifies intra and inter-session.** Same algorithm, different timescale. Episodes within sessions, patterns across sessions.
-- **Observation data isn't wasted.** It annotates episodes with rich metadata (files, phases, failures) rather than driving detection.
+- **Reuses existing machinery.** `intent_keywords()` and `jaccard()` from `s3_learn` work without modification for boundary detection.
+- **Unifies intra and inter-session.** Same boundary algorithm, different timescale. Episodes within sessions, patterns across sessions.
+- **Episodes are stories.** Each episode is a self-contained narrative — beginning (intent), middle (dialogue + observations), end (resolution). The LLM constructs the story from the full episode content. This produces memory that a future session can actually use.
+- **Observations are the middle, not metadata.** The observation stream and agent prompts provide the body of the story. They don't annotate the episode — they constitute it.
+- **Session summaries can compose from episodes.** Instead of summarizing raw observations, a session summary can synthesize its episodes — each already a coherent narrative. Better input, better output.
 
 ### Negative
-- **Depends on prompt quality.** Users who type "do it" repeatedly give no signal. Terse-prompt heuristic mitigates but doesn't eliminate.
-- **Keyword bags are crude.** Semantic similarity isn't the same as keyword overlap. "Fix the auth bug" and "debug the login issue" share no keywords but are the same topic. A more sophisticated text comparison (embeddings, LLM classification) would catch this, at higher cost.
+- **Depends on prompt quality for boundaries.** Users who type "do it" repeatedly give no boundary signal. Terse-prompt heuristic mitigates but doesn't eliminate.
+- **Keyword bags are crude for boundary detection.** Semantic similarity isn't the same as keyword overlap. The narrative construction (LLM) compensates within episodes, but boundary detection itself remains lexical.
+- **LLM cost scales with episodes.** Each multi-prompt episode requires an LLM call at session end. Long sessions with many episodes mean more LLM calls. Mitigated by threshold (skip single-prompt episodes) and local model (granite, no API cost).
 - **Single-prompt sessions collapse to one episode.** No sub-session structure for automated tasks. Acceptable — the task prompt defines the intent.
 
 ## References
@@ -300,3 +329,4 @@ Position C (threshold-based) seems right but deferred until episodes exist and w
 | Date | Version | Changes |
 |------|---------|---------|
 | 2026-02-18 | 0.1 | Initial draft. Reframes work unit detection from observation-driven (ADR-009 design) to prompt-driven (user intent). VSM recursion analysis: user as external viable system, agent as user's S1. Two positions evaluated, Position B (prompt-driven) accepted. Detection algorithm, schema, s3_learn integration, 4 open questions. |
+| 2026-02-18 | 0.2 | Episodes are stories. Reframes observation data from post-hoc annotation to the middle of the narrative. The episode is a dialogue — user prompts directing, agent prompts explaining, observations recording actions. LLM narrative generation is constitutive, not optional. Q4 restructured from "should we?" to "how?". Session summaries can compose from episode narratives. |
