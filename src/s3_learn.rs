@@ -278,6 +278,278 @@ fn detect_unresolved_reads(
     Ok(patterns)
 }
 
+/// Detect recurring error patterns from failed command responses across sessions.
+fn detect_error_patterns(
+    conn: &Connection,
+    threshold: i64,
+    half_life: f64,
+) -> Result<Vec<Pattern>, NmemError> {
+    let now = now_secs();
+
+    // Fetch failed commands that have error responses in metadata.
+    let mut stmt = conn.prepare(
+        "SELECT json_extract(metadata, '$.response'), session_id, MAX(timestamp) as latest_ts
+         FROM observations
+         WHERE obs_type = 'command'
+           AND json_extract(metadata, '$.failed') = 1
+           AND json_extract(metadata, '$.response') IS NOT NULL
+         GROUP BY json_extract(metadata, '$.response'), session_id",
+    )?;
+
+    struct Row {
+        response: String,
+        session_id: String,
+        timestamp: i64,
+    }
+
+    let rows: Vec<Row> = stmt
+        .query_map([], |row| {
+            Ok(Row {
+                response: row.get(0)?,
+                session_id: row.get(1)?,
+                timestamp: row.get(2)?,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+
+    // Extract error signature from response text — first meaningful error line.
+    let mut groups: HashMap<String, HashMap<String, i64>> = HashMap::new();
+    let mut examples: HashMap<String, String> = HashMap::new();
+    for row in &rows {
+        let sig = extract_error_signature(&row.response);
+        if sig.is_empty() {
+            continue;
+        }
+        examples.entry(sig.clone()).or_insert_with(|| {
+            row.response.chars().take(200).collect()
+        });
+        groups
+            .entry(sig)
+            .or_default()
+            .entry(row.session_id.clone())
+            .and_modify(|ts| *ts = (*ts).max(row.timestamp))
+            .or_insert(row.timestamp);
+    }
+
+    let mut patterns: Vec<Pattern> = groups
+        .into_iter()
+        .filter(|(_, sessions)| sessions.len() as i64 >= threshold)
+        .map(|(sig, sessions)| {
+            let heat: f64 = sessions
+                .values()
+                .map(|ts| {
+                    let age_hours = (now - ts) as f64 / 3600.0;
+                    exp_decay(age_hours, half_life)
+                })
+                .sum();
+            let session_count = sessions.len() as i64;
+            let session_ids: Vec<String> = sessions.into_keys().collect();
+            let example = examples.get(&sig).cloned().unwrap_or_default();
+            Pattern {
+                kind: "recurring_error",
+                description: format!("`{}` across {session_count} sessions", short_cmd(&sig)),
+                normalized: sig,
+                session_count,
+                heat,
+                sessions: session_ids,
+                example,
+            }
+        })
+        .collect();
+
+    patterns.sort_by(|a, b| b.heat.partial_cmp(&a.heat).unwrap_or(std::cmp::Ordering::Equal));
+    patterns.truncate(20);
+    Ok(patterns)
+}
+
+/// Extract a normalized error signature from a response string.
+/// Looks for common error patterns and returns a short canonical form.
+fn extract_error_signature(response: &str) -> String {
+    for line in response.lines() {
+        let line = line.trim();
+        // "command not found" variants
+        if line.contains("not found") || line.contains("No such file") {
+            return normalize_error_line(line);
+        }
+        // Exit code patterns
+        if line.contains("exit code") || line.contains("exit status") {
+            return normalize_error_line(line);
+        }
+        // Compilation errors
+        if line.contains("error[E") || line.starts_with("error:") {
+            return normalize_error_line(line);
+        }
+        // Permission denied
+        if line.contains("Permission denied") || line.contains("EACCES") {
+            return normalize_error_line(line);
+        }
+        // Connection errors
+        if line.contains("Connection refused") || line.contains("ECONNREFUSED") {
+            return normalize_error_line(line);
+        }
+    }
+    // Fallback: first non-empty line, truncated
+    response
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| normalize_error_line(l))
+        .unwrap_or_default()
+}
+
+/// Normalize an error line: strip paths, PIDs, timestamps for grouping.
+fn normalize_error_line(line: &str) -> String {
+    let s = line.trim();
+    // Truncate to reasonable length
+    let s: String = s.chars().take(120).collect();
+    s
+}
+
+/// Detect repeated session intents from summaries.
+fn detect_repeated_intents(
+    conn: &Connection,
+    threshold: i64,
+    half_life: f64,
+) -> Result<Vec<Pattern>, NmemError> {
+    let now = now_secs();
+
+    // Fetch sessions with summaries that have intents.
+    let mut stmt = conn.prepare(
+        "SELECT id, started_at, json_extract(summary, '$.intent') as intent
+         FROM sessions
+         WHERE summary IS NOT NULL
+           AND json_extract(summary, '$.intent') IS NOT NULL",
+    )?;
+
+    struct Row {
+        session_id: String,
+        started_at: i64,
+        intent: String,
+    }
+
+    let rows: Vec<Row> = stmt
+        .query_map([], |row| {
+            Ok(Row {
+                session_id: row.get(0)?,
+                started_at: row.get(1)?,
+                intent: row.get(2)?,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Group similar intents using keyword bags + Jaccard similarity.
+    // Each intent becomes a set of keywords; intents with >= 0.5 overlap merge.
+    let bags: Vec<(usize, Vec<String>)> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (i, intent_keywords(&r.intent)))
+        .collect();
+
+    // Greedy clustering: for each intent, find or create a cluster.
+    let mut clusters: Vec<Vec<usize>> = Vec::new(); // cluster → row indices
+    let mut assigned = vec![false; rows.len()];
+
+    for (i, bag_i) in &bags {
+        if assigned[*i] {
+            continue;
+        }
+        let mut cluster = vec![*i];
+        assigned[*i] = true;
+
+        for (j, bag_j) in &bags {
+            if assigned[*j] {
+                continue;
+            }
+            if jaccard(bag_i, bag_j) >= 0.4 {
+                cluster.push(*j);
+                assigned[*j] = true;
+            }
+        }
+        clusters.push(cluster);
+    }
+
+    let mut patterns: Vec<Pattern> = clusters
+        .into_iter()
+        .filter(|c| c.len() as i64 >= threshold)
+        .map(|c| {
+            let heat: f64 = c
+                .iter()
+                .map(|&i| {
+                    let age_hours = (now - rows[i].started_at) as f64 / 3600.0;
+                    exp_decay(age_hours, half_life)
+                })
+                .sum();
+            let session_count = c.len() as i64;
+            let sessions: Vec<String> = c.iter().map(|&i| rows[i].session_id.clone()).collect();
+            // Use the most recent intent as the representative
+            let rep = c
+                .iter()
+                .max_by_key(|&&i| rows[i].started_at)
+                .copied()
+                .unwrap_or(c[0]);
+            let intent = rows[rep].intent.clone();
+            Pattern {
+                kind: "repeated_intent",
+                description: format!("similar intent across {session_count} sessions"),
+                normalized: short_intent(&intent),
+                session_count,
+                heat,
+                sessions,
+                example: intent,
+            }
+        })
+        .collect();
+
+    patterns.sort_by(|a, b| b.heat.partial_cmp(&a.heat).unwrap_or(std::cmp::Ordering::Equal));
+    patterns.truncate(20);
+    Ok(patterns)
+}
+
+const STOPWORDS: &[&str] = &[
+    "a", "an", "the", "and", "or", "to", "of", "in", "for", "with", "on", "at", "by", "from",
+    "is", "it", "this", "that", "be", "as", "are", "was", "were", "been", "do", "does", "did",
+    "will", "would", "could", "should", "may", "might", "can", "has", "have", "had", "not", "no",
+    "up", "out", "about", "into", "over", "after", "before",
+];
+
+/// Extract meaningful keywords from an intent string.
+fn intent_keywords(intent: &str) -> Vec<String> {
+    intent
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|w| w.len() > 2 && !STOPWORDS.contains(w))
+        .map(|w| w.to_string())
+        .collect()
+}
+
+/// Jaccard similarity between two keyword bags (as sorted unique sets).
+fn jaccard(a: &[String], b: &[String]) -> f64 {
+    if a.is_empty() && b.is_empty() {
+        return 0.0;
+    }
+    let set_a: std::collections::HashSet<&str> = a.iter().map(|s| s.as_str()).collect();
+    let set_b: std::collections::HashSet<&str> = b.iter().map(|s| s.as_str()).collect();
+    let intersection = set_a.intersection(&set_b).count();
+    let union = set_a.union(&set_b).count();
+    if union == 0 {
+        0.0
+    } else {
+        intersection as f64 / union as f64
+    }
+}
+
+/// Shorten an intent for display.
+fn short_intent(s: &str) -> String {
+    if s.len() > 80 {
+        format!("{}...", &s[..80])
+    } else {
+        s.to_string()
+    }
+}
+
 /// Paths that are read-only by nature — library docs, design docs, configs.
 /// Reading these repeatedly without editing is expected, not a signal.
 fn is_reference_path(path: &str) -> bool {
@@ -316,8 +588,19 @@ pub fn detect_patterns(
 ) -> Result<Vec<Pattern>, NmemError> {
     let mut all = detect_failed_commands(conn, threshold, half_life)?;
     all.extend(detect_unresolved_reads(conn, threshold, half_life)?);
+    all.extend(detect_recurring_errors(conn, threshold, half_life)?);
+    all.extend(detect_repeated_intents(conn, threshold, half_life)?);
     normalize_heat(&mut all);
     Ok(all)
+}
+
+/// Wrapper name matching the public API style.
+fn detect_recurring_errors(
+    conn: &Connection,
+    threshold: i64,
+    half_life: f64,
+) -> Result<Vec<Pattern>, NmemError> {
+    detect_error_patterns(conn, threshold, half_life)
 }
 
 /// Normalize raw heat to 0–100 relative to the hottest pattern.
@@ -336,13 +619,31 @@ pub fn write_report(patterns: &[Pattern], output: &Path) -> Result<(), NmemError
     let now = chrono_date();
     let failed: Vec<&Pattern> = patterns.iter().filter(|p| p.kind == "failed_command").collect();
     let unresolved: Vec<&Pattern> = patterns.iter().filter(|p| p.kind == "unresolved_read").collect();
+    let errors: Vec<&Pattern> = patterns.iter().filter(|p| p.kind == "recurring_error").collect();
+    let intents: Vec<&Pattern> = patterns.iter().filter(|p| p.kind == "repeated_intent").collect();
 
     let mut md = String::new();
     writeln!(md, "# nmem learnings — detected {now}").unwrap();
     writeln!(md).unwrap();
 
-    if failed.is_empty() && unresolved.is_empty() {
+    if failed.is_empty() && unresolved.is_empty() && errors.is_empty() && intents.is_empty() {
         writeln!(md, "No patterns detected above threshold.").unwrap();
+    }
+
+    // Cross-reference: find session overlap between intents and errors/failures.
+    let confirmed = find_confirmed(&intents, &failed, &errors);
+    if !confirmed.is_empty() {
+        writeln!(md, "## Confirmed stuck loops ({} patterns)", confirmed.len()).unwrap();
+        writeln!(md).unwrap();
+        writeln!(md, "Intent + failure/error co-occurring in the same sessions:").unwrap();
+        writeln!(md).unwrap();
+        for (intent, corroborating) in &confirmed {
+            writeln!(md, "### {} (heat: {})", intent.normalized, intent.heat as u32).unwrap();
+            writeln!(md, "Intent: {}", intent.example).unwrap();
+            writeln!(md, "Corroborated by: {}", corroborating.join(", ")).unwrap();
+            writeln!(md, "Sessions: {}", format_sessions(&intent.sessions)).unwrap();
+            writeln!(md).unwrap();
+        }
     }
 
     if !failed.is_empty() {
@@ -353,6 +654,28 @@ pub fn write_report(patterns: &[Pattern], output: &Path) -> Result<(), NmemError
             writeln!(md, "Normalized: `{}`", p.normalized).unwrap();
             writeln!(md, "Sessions: {}", format_sessions(&p.sessions)).unwrap();
             writeln!(md, "Example: `{}`", p.example).unwrap();
+            writeln!(md).unwrap();
+        }
+    }
+
+    if !errors.is_empty() {
+        writeln!(md, "## Recurring errors ({} patterns)", errors.len()).unwrap();
+        writeln!(md).unwrap();
+        for p in &errors {
+            writeln!(md, "### `{}` — {} sessions (heat: {})", short_cmd(&p.normalized), p.session_count, p.heat as u32).unwrap();
+            writeln!(md, "Sessions: {}", format_sessions(&p.sessions)).unwrap();
+            writeln!(md, "Example: `{}`", p.example).unwrap();
+            writeln!(md).unwrap();
+        }
+    }
+
+    if !intents.is_empty() {
+        writeln!(md, "## Repeated intents ({} patterns)", intents.len()).unwrap();
+        writeln!(md).unwrap();
+        for p in &intents {
+            writeln!(md, "### {} — {} sessions (heat: {})", p.normalized, p.session_count, p.heat as u32).unwrap();
+            writeln!(md, "Sessions: {}", format_sessions(&p.sessions)).unwrap();
+            writeln!(md, "Example: {}", p.example).unwrap();
             writeln!(md).unwrap();
         }
     }
@@ -375,6 +698,41 @@ pub fn write_report(patterns: &[Pattern], output: &Path) -> Result<(), NmemError
     }
     std::fs::write(output, md)?;
     Ok(())
+}
+
+/// Find intents that share sessions with failures or errors — confirmed stuck loops.
+fn find_confirmed<'a>(
+    intents: &[&'a Pattern],
+    failures: &[&Pattern],
+    errors: &[&Pattern],
+) -> Vec<(&'a Pattern, Vec<String>)> {
+    use std::collections::HashSet;
+
+    let mut confirmed = Vec::new();
+    for intent in intents {
+        let intent_sessions: HashSet<&str> = intent.sessions.iter().map(|s| s.as_str()).collect();
+        let mut corroborating = Vec::new();
+
+        for f in failures {
+            let f_sessions: HashSet<&str> = f.sessions.iter().map(|s| s.as_str()).collect();
+            let overlap = intent_sessions.intersection(&f_sessions).count();
+            if overlap >= 2 {
+                corroborating.push(format!("failure `{}`", short_cmd(&f.normalized)));
+            }
+        }
+        for e in errors {
+            let e_sessions: HashSet<&str> = e.sessions.iter().map(|s| s.as_str()).collect();
+            let overlap = intent_sessions.intersection(&e_sessions).count();
+            if overlap >= 2 {
+                corroborating.push(format!("error `{}`", short_cmd(&e.normalized)));
+            }
+        }
+
+        if !corroborating.is_empty() {
+            confirmed.push((*intent, corroborating));
+        }
+    }
+    confirmed
 }
 
 fn format_sessions(sessions: &[String]) -> String {
@@ -443,10 +801,12 @@ pub fn handle_learn(db_path: &Path, args: &LearnArgs) -> Result<(), NmemError> {
     write_report(&patterns, &output)?;
 
     let failed_count = patterns.iter().filter(|p| p.kind == "failed_command").count();
+    let error_count = patterns.iter().filter(|p| p.kind == "recurring_error").count();
+    let intent_count = patterns.iter().filter(|p| p.kind == "repeated_intent").count();
     let unresolved_count = patterns.iter().filter(|p| p.kind == "unresolved_read").count();
 
     eprintln!(
-        "nmem: {failed_count} repeated failures, {unresolved_count} unresolved reads → {}",
+        "nmem: {failed_count} failures, {error_count} errors, {intent_count} intents, {unresolved_count} unresolved → {}",
         output.display()
     );
 
@@ -699,5 +1059,175 @@ mod tests {
         assert!(is_diagnostic("export PATH=\"/foo\" && cargo test"));
         assert!(!is_diagnostic("cargo test"));
         assert!(!is_diagnostic("cargo build"));
+    }
+
+    #[test]
+    fn detects_recurring_error_patterns() {
+        let conn = setup_db();
+        for i in 0..3 {
+            let sid = format!("session-{i}");
+            insert_session(&conn, &sid);
+            insert_obs(
+                &conn,
+                &sid,
+                "command",
+                "cargo test",
+                None,
+                Some(r#"{"failed": true, "response": "error: cargo: command not found"}"#),
+            );
+        }
+
+        let patterns = detect_error_patterns(&conn, 3, 168.0).unwrap();
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0].kind, "recurring_error");
+        assert_eq!(patterns[0].session_count, 3);
+        assert!(patterns[0].normalized.contains("not found"));
+    }
+
+    #[test]
+    fn error_patterns_below_threshold_empty() {
+        let conn = setup_db();
+        for i in 0..2 {
+            let sid = format!("session-{i}");
+            insert_session(&conn, &sid);
+            insert_obs(
+                &conn,
+                &sid,
+                "command",
+                "cargo test",
+                None,
+                Some(r#"{"failed": true, "response": "error: cargo: command not found"}"#),
+            );
+        }
+
+        let patterns = detect_error_patterns(&conn, 3, 168.0).unwrap();
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn detects_repeated_intents() {
+        let conn = setup_db();
+        for i in 0..3 {
+            let sid = format!("session-{i}");
+            conn.execute(
+                "INSERT INTO sessions (id, project, started_at, summary) VALUES (?1, 'test', ?2, ?3)",
+                rusqlite::params![
+                    sid,
+                    1000 + i * 3600,
+                    format!(r#"{{"intent": "fix cargo test PATH issue in dispatched sessions"}}"#),
+                ],
+            ).unwrap();
+        }
+
+        let patterns = detect_repeated_intents(&conn, 3, 168.0).unwrap();
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0].kind, "repeated_intent");
+        assert_eq!(patterns[0].session_count, 3);
+    }
+
+    #[test]
+    fn similar_intents_cluster_together() {
+        let conn = setup_db();
+        let intents = [
+            "fix cargo test PATH issue in tmux dispatch",
+            "fix cargo test PATH problem in dispatched sessions",
+            "debug cargo test PATH failure in task dispatch",
+        ];
+        for (i, intent) in intents.iter().enumerate() {
+            let sid = format!("session-{i}");
+            conn.execute(
+                "INSERT INTO sessions (id, project, started_at, summary) VALUES (?1, 'test', ?2, ?3)",
+                rusqlite::params![sid, 1000 + i as i64 * 3600, format!(r#"{{"intent": "{intent}"}}"#)],
+            ).unwrap();
+        }
+
+        let patterns = detect_repeated_intents(&conn, 3, 168.0).unwrap();
+        assert_eq!(patterns.len(), 1, "similar intents should cluster into 1 pattern");
+        assert_eq!(patterns[0].session_count, 3);
+    }
+
+    #[test]
+    fn dissimilar_intents_stay_separate() {
+        let conn = setup_db();
+        let intents = [
+            "fix cargo test PATH issue",
+            "add new MCP server endpoint for search",
+            "refactor database schema migrations",
+        ];
+        for (i, intent) in intents.iter().enumerate() {
+            let sid = format!("session-{i}");
+            conn.execute(
+                "INSERT INTO sessions (id, project, started_at, summary) VALUES (?1, 'test', ?2, ?3)",
+                rusqlite::params![sid, 1000 + i as i64 * 3600, format!(r#"{{"intent": "{intent}"}}"#)],
+            ).unwrap();
+        }
+
+        // With threshold 3, none should qualify since they're all different
+        let patterns = detect_repeated_intents(&conn, 3, 168.0).unwrap();
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn jaccard_similarity_basic() {
+        let a: Vec<String> = vec!["cargo".into(), "test".into(), "path".into()];
+        let b: Vec<String> = vec!["cargo".into(), "test".into(), "fix".into()];
+        let sim = jaccard(&a, &b);
+        // intersection=2, union=4 → 0.5
+        assert!((sim - 0.5).abs() < 0.01);
+
+        // Identical sets → 1.0
+        assert!((jaccard(&a, &a) - 1.0).abs() < 0.01);
+
+        // Disjoint → 0.0
+        let c: Vec<String> = vec!["database".into(), "schema".into()];
+        assert!((jaccard(&a, &c) - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn intent_keywords_strips_stopwords() {
+        let kw = intent_keywords("fix the cargo test PATH issue in dispatched sessions");
+        assert!(kw.contains(&"fix".to_string()));
+        assert!(kw.contains(&"cargo".to_string()));
+        assert!(kw.contains(&"test".to_string()));
+        assert!(kw.contains(&"path".to_string()));
+        assert!(!kw.contains(&"the".to_string()));
+        assert!(!kw.contains(&"in".to_string()));
+    }
+
+    #[test]
+    fn extract_error_signature_finds_not_found() {
+        let sig = extract_error_signature("bash: cargo: command not found\nexit code 127");
+        assert!(sig.contains("not found"));
+    }
+
+    #[test]
+    fn extract_error_signature_finds_compilation_error() {
+        let sig = extract_error_signature("warning: unused variable\nerror[E0433]: failed to resolve");
+        assert!(sig.contains("error[E"));
+    }
+
+    #[test]
+    fn confirmed_stuck_loops_detected() {
+        let conn = setup_db();
+        let shared_sessions = vec!["s1".to_string(), "s2".to_string(), "s3".to_string()];
+
+        // Set up sessions with intents
+        for sid in &shared_sessions {
+            conn.execute(
+                "INSERT INTO sessions (id, project, started_at, summary) VALUES (?1, 'test', 1000, ?2)",
+                rusqlite::params![sid, r#"{"intent": "fix cargo test PATH issue"}"#],
+            ).unwrap();
+            insert_obs(&conn, sid, "command", "cargo test", None,
+                Some(r#"{"failed": true, "response": "cargo: command not found"}"#));
+        }
+
+        let patterns = detect_patterns(&conn, 3, 168.0).unwrap();
+        let intents: Vec<&Pattern> = patterns.iter().filter(|p| p.kind == "repeated_intent").collect();
+        let failures: Vec<&Pattern> = patterns.iter().filter(|p| p.kind == "failed_command").collect();
+        let errors: Vec<&Pattern> = patterns.iter().filter(|p| p.kind == "recurring_error").collect();
+
+        let confirmed = find_confirmed(&intents, &failures, &errors);
+        assert!(!confirmed.is_empty(), "should detect confirmed stuck loop");
+        assert!(!confirmed[0].1.is_empty(), "should have corroborating evidence");
     }
 }

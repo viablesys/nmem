@@ -25,7 +25,7 @@ struct HookPayload {
     #[serde(default)]
     tool_input: Option<serde_json::Value>,
     #[serde(default)]
-    tool_response: Option<String>,
+    tool_response: Option<serde_json::Value>,
     #[serde(default)]
     transcript_path: Option<String>,
     // SessionStart specific
@@ -210,7 +210,11 @@ fn handle_post_tool_use(
     if is_failure {
         meta_obj.insert("failed".into(), serde_json::Value::Bool(true));
         if let Some(resp) = &payload.tool_response {
-            let truncated: String = resp.chars().take(2000).collect();
+            let resp_str = match resp {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            let truncated: String = resp_str.chars().take(2000).collect();
             let (filtered_resp, _) = filter.redact(&truncated);
             meta_obj.insert("response".into(), serde_json::Value::String(filtered_resp));
         }
