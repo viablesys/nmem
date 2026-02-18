@@ -25,7 +25,7 @@ cargo build --release
 - `s1_record.rs` — hook event handling, observation storage
 - `s1_extract.rs` — tool classification, content extraction
 - `s5_filter.rs` — secret redaction patterns
-- `s1_context.rs` — SessionStart context injection
+- `s4_context.rs` — SessionStart context injection
 - `s1_4_summarize.rs` — end-of-session summarization
 - `s1_4_transcript.rs` — thinking block extraction
 - `s5_config.rs` — config parsing (affects all hooks)
@@ -44,12 +44,12 @@ nmem is designed around Stafford Beer's Viable System Model. Every module maps t
 
 | System | Role in nmem | Modules |
 |--------|-------------|---------|
-| **S1** Operations | Capture, store, retrieve | `s1_record.rs`, `s1_extract.rs`, `s1_serve.rs`, `s1_search.rs`, `s1_context.rs`, `s1_pin.rs` |
+| **S1** Operations | Capture, store, retrieve | `s1_record.rs`, `s1_extract.rs`, `s1_serve.rs`, `s1_search.rs`, `s1_pin.rs` |
 | **S1's S4** | Session summarization — S1's own intelligence layer | `s1_4_summarize.rs`, `s1_4_transcript.rs` |
 | **S2** Coordination | Dedup, ordering, concurrency | SQLite WAL, dedup checks in `s1_record.rs` |
 | **S3** Control | Storage budgets, retention, compaction | `s3_sweep.rs`, `s3_maintain.rs`, `s3_purge.rs` |
 | **S3*** Audit | Integrity checks | `s3_maintain.rs` (FTS rebuild, integrity) |
-| **S4** Intelligence | Task dispatch, cross-session pattern detection, work unit detection | `s4_dispatch.rs`, `s3_learn.rs`; work unit detection designed |
+| **S4** Intelligence | Context injection, task dispatch, cross-session pattern detection, work unit detection | `s4_context.rs`, `s4_dispatch.rs`, `s3_learn.rs`; work unit detection designed |
 | **S5** Policy | Config, identity, boundaries | `s5_config.rs`, `s5_filter.rs`, `s5_project.rs`, ADRs |
 
 **"S1's S4"** means S1 is itself a viable system (VSM recursion). S1's S4 is the intelligence layer *within* operations — session summarization that compresses what happened within a session. The outer S4 synthesizes *across* sessions. S1's S4 must work before the outer S4 can build on it.
@@ -89,7 +89,7 @@ Files are prefixed by VSM layer: `s1_` (Operations), `s1_4_` (S1's S4), `s3_` (C
 | `s1_serve.rs` | S1 | MCP server (`NmemServer`), tools: `search`, `get_observations`, `recent_context`, `queue_task`, etc. |
 | `s1_search.rs` | S1 | CLI search with BM25 + recency blended ranking |
 | `s1_extract.rs` | S1 | `classify_tool()`, `classify_bash()`, `extract_content()`, `extract_file_path()` |
-| `s1_context.rs` | S1 | SessionStart context injection (intents + local/cross-project obs) |
+| `s4_context.rs` | S4 | SessionStart context injection (intents + summaries + local/cross-project obs) |
 | `s1_pin.rs` | S1 | Pin/unpin observations |
 | `s1_4_summarize.rs` | S1's S4 | End-of-session LLM summarization, VictoriaLogs streaming |
 | `s1_4_transcript.rs` | S1's S4 | Scan transcript for prompt tracking |
@@ -162,7 +162,7 @@ ADRs in `design/ADR/`. Read before changing load-bearing decisions:
 | `s1_serve.rs` | `rmcp.md`, `fts5.md` |
 | `s1_record.rs`, `s1_extract.rs` | `claude-code-hooks-events.md`, `serde-json.md` |
 | `s5_filter.rs` | `regex.md` |
-| `s1_context.rs` | `sqlite-retrieval-patterns.md` |
+| `s4_context.rs` | `sqlite-retrieval-patterns.md`, `episodic-memory.md` |
 | `cli.rs` | `clap.md` |
 | `metrics.rs` | `victoria-logging.md` |
 | `design/` | `meta-cognition.md`, `claude-code-plugins.md`, `episodic-memory.md` |

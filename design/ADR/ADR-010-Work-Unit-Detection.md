@@ -322,7 +322,7 @@ The LLM is not optional — the narrative is what makes an episode a story rathe
 - ADR-009 — S4 data model, signal gaps, signal multiplication
 - `s3_learn.rs` — `intent_keywords()`, `jaccard()`, cross-session pattern detection
 - `s1_record.rs` — hook handler, UserPromptSubmit handling
-- `s1_context.rs` — context injection (consumer of episodes)
+- `s4_context.rs` — context injection (consumer of episodes)
 
 ## Revision History
 

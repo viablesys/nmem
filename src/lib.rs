@@ -6,7 +6,6 @@ pub mod schema;
 pub mod status;
 
 // S1 Operations — capture, store, retrieve
-pub mod s1_context;
 pub mod s1_extract;
 pub mod s1_pin;
 pub mod s1_record;
@@ -23,7 +22,8 @@ pub mod s3_maintain;
 pub mod s3_purge;
 pub mod s3_sweep;
 
-// S4 Intelligence — future work, cross-session planning
+// S4 Intelligence — context injection, task dispatch, cross-session patterns
+pub mod s4_context;
 pub mod s4_dispatch;
 
 // S5 Policy — config, boundaries, identity
@@ -32,7 +32,7 @@ pub mod s5_filter;
 pub mod s5_project;
 
 // Backward-compat aliases — external code (main.rs, tests) can use old names
-pub use s1_context as context;
+pub use s4_context as context;
 pub use s1_extract as extract;
 pub use s1_pin as pin;
 pub use s1_record as record;

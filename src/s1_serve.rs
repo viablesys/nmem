@@ -665,7 +665,7 @@ impl NmemServer {
         let config = crate::s5_config::load_config().unwrap_or_default();
         let (local_limit, cross_limit) =
             crate::s5_config::resolve_context_limits(&config, &params.project, false);
-        let ctx = crate::s1_context::generate_context(&db, &params.project, local_limit, cross_limit, params.before)
+        let ctx = crate::s4_context::generate_context(&db, &params.project, local_limit, cross_limit, params.before)
             .map_err(|e| db_err(&e))?;
         if ctx.is_empty() {
             Ok(CallToolResult::success(vec![Content::text(format!(
