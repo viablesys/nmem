@@ -27,6 +27,7 @@ cargo build --release
 - `s14_summarize.rs` — end-of-session summarization
 - `s14_transcript.rs` — thinking block extraction
 - `s5_config.rs` — config parsing (affects all hooks)
+- `s4_dispatch.rs` — task queue and dispatch logic
 - `schema.rs` — DB migrations
 - `db.rs` — connection setup, encryption
 
@@ -46,20 +47,21 @@ nmem is designed around Stafford Beer's Viable System Model. Every module maps t
 | **S2** Coordination | Dedup, ordering, concurrency | SQLite WAL, dedup checks in `s1_record.rs` |
 | **S3** Control | Storage budgets, retention, compaction | `s3_sweep.rs`, `s3_maintain.rs`, `s3_purge.rs` |
 | **S3*** Audit | Integrity checks | `s3_maintain.rs` (FTS rebuild, integrity) |
-| **S4** Intelligence | Work unit detection, cross-session patterns | Designed, not implemented |
+| **S4** Intelligence | Task dispatch, work unit detection, cross-session patterns | `s4_dispatch.rs`; work unit detection designed |
 | **S5** Policy | Config, identity, boundaries | `s5_config.rs`, `s5_filter.rs`, `s5_project.rs`, ADRs |
 
 **"S1's S4"** means S1 is itself a viable system (VSM recursion). S1's S4 is the intelligence layer *within* operations — session summarization that compresses what happened within a session. The outer S4 synthesizes *across* sessions. S1's S4 must work before the outer S4 can build on it.
 
-**Current state**: S1 functional (S1's S4 validated), S2 functional, S3 manual, S4 designed. See `design/VSM.md` for full assessment.
+**Current state**: S1 functional (S1's S4 validated), S2 functional, S3 manual, S4 partial (task dispatch functional, work unit detection designed). See `design/VSM.md` for full assessment.
 
 ## Architecture
 
-No daemon. Three process modes:
+No daemon. Four process modes:
 
 1. **Hook handler** (`nmem record`) — standalone process per hook event, reads JSON from stdin
 2. **MCP server** (`nmem serve`) — session-scoped subprocess on stdio, read-only queries
-3. **CLI** — manual search, maintenance, purge, pin/unpin
+3. **CLI** — manual search, maintenance, purge, pin/unpin, queue
+4. **Dispatcher** (`nmem dispatch`) — systemd timer-driven, reaps finished tasks and dispatches pending ones to tmux
 
 ### Hook event flow
 
@@ -71,24 +73,25 @@ Stop         → mark session ended, compute signature, WAL checkpoint
 
 ### Module map
 
-Files are prefixed by VSM layer: `s1_` (Operations), `s14_` (S1's S4), `s3_` (Control), `s5_` (Policy). Unprefixed files are infrastructure.
+Files are prefixed by VSM layer: `s1_` (Operations), `s14_` (S1's S4), `s3_` (Control), `s4_` (Intelligence), `s5_` (Policy). Unprefixed files are infrastructure.
 
 | Module | Layer | Role |
 |--------|-------|------|
 | `main.rs` | infra | CLI dispatch, `run()` entry point |
 | `cli.rs` | infra | clap derive definitions only |
 | `db.rs` | infra | `open_db()`, SQLCipher key management, PRAGMAs |
-| `schema.rs` | infra | `rusqlite_migration` definitions (2 migrations) |
+| `schema.rs` | infra | `rusqlite_migration` definitions (3 migrations) |
 | `metrics.rs` | infra | Optional OTLP metrics export |
 | `status.rs` | infra | Status reporting |
 | `s1_record.rs` | S1 | Hook stdin → JSON → observation extraction + storage |
-| `s1_serve.rs` | S1 | MCP server (`NmemServer`), tools: `search`, `get_observations`, `recent_context` |
+| `s1_serve.rs` | S1 | MCP server (`NmemServer`), tools: `search`, `get_observations`, `recent_context`, `queue_task`, etc. |
 | `s1_search.rs` | S1 | CLI search with BM25 + recency blended ranking |
 | `s1_extract.rs` | S1 | `classify_tool()`, `classify_bash()`, `extract_content()`, `extract_file_path()` |
 | `s1_context.rs` | S1 | SessionStart context injection (intents + local/cross-project obs) |
 | `s1_pin.rs` | S1 | Pin/unpin observations |
 | `s14_summarize.rs` | S1's S4 | End-of-session LLM summarization, VictoriaLogs streaming |
 | `s14_transcript.rs` | S1's S4 | Scan transcript for prompt tracking |
+| `s4_dispatch.rs` | S4 | Task queue and systemd-driven dispatch to tmux |
 | `s3_sweep.rs` | S3 | Retention-based purge (per obs_type TTL, respects pins) |
 | `s3_maintain.rs` | S3 | Vacuum, WAL checkpoint, FTS integrity/rebuild |
 | `s3_purge.rs` | S3 | Manual purge by date/project/session/type/search |
@@ -100,7 +103,7 @@ Files are prefixed by VSM layer: `s1_` (Operations), `s14_` (S1's S4), `s3_` (Co
 
 SQLite with `bundled-sqlcipher`. DB at `~/.nmem/nmem.db` (override: `--db` or `NMEM_DB`).
 
-Three tables: `sessions`, `prompts`, `observations` + external FTS5 indexes (`observations_fts`, `prompts_fts`). Full schema in `design/SCHEMA.md`. Schema versioned via `rusqlite_migration` `user_version` PRAGMA.
+Four tables: `sessions`, `prompts`, `observations`, `tasks` + external FTS5 indexes (`observations_fts`, `prompts_fts`). Full schema in `design/SCHEMA.md`. Schema versioned via `rusqlite_migration` `user_version` PRAGMA.
 
 Key PRAGMAs: `journal_mode=WAL`, `synchronous=NORMAL`, `busy_timeout=5000`, `foreign_keys=ON`.
 
@@ -210,6 +213,9 @@ These are live during the session via the nmem MCP server:
 | `session_summaries` | Structured JSON summaries of past sessions — intent, learned, completed, next_steps, files_edited, notes. |
 | `timeline` | Observations surrounding an anchor point within the same session. |
 | `regenerate_context` | Re-run context injection with current data (same as SessionStart output). |
+| `session_trace` | Drill into a session's prompts and observations in order. |
+| `file_history` | Trace a file's history across sessions with intent context. |
+| `queue_task` | Queue a task for later dispatch into a tmux Claude Code session (S4). |
 
 ### Query patterns
 

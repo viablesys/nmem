@@ -23,9 +23,19 @@ End-of-session summarization via local LLM (granite-4-h-tiny on LM Studio). Stop
 - **Engine abstraction**: `summarize.rs` speaks the OpenAI chat completions protocol, which covers LM Studio, Ollama, vLLM, llama.cpp, and OpenAI itself. But the engine is hardcoded — no trait boundary for swapping to non-OpenAI protocols (Anthropic API, in-process model, deterministic template). Abstract when a second engine is needed (rule of three).
 - **Dedicated summaries table**: v1 stores in `sessions.summary` column. If rolling/per-prompt summaries are added, a dedicated table with structured fields and FTS5 will be needed.
 
-## S4 — Designed, blocked on platform
+## S4 — Partial (task dispatch functional, work unit detection designed)
 
-### Work unit detection (core S4 algorithm)
+### Task dispatch — functional
+Task queue with systemd-driven dispatch (`s4_dispatch.rs`). Queues work via CLI (`nmem queue`) or MCP tool (`queue_task`), dispatches into tmux panes running Claude Code on a 60s heartbeat (`nmem dispatch` via systemd timer). Each dispatched session is its own viable system — S4 initiates, the session operates autonomously.
+
+**Remaining gaps:**
+- **Task result capture**: No way to know what a dispatched session produced. The task is marked "completed" when its tmux pane exits, but the outcome (success/failure, what was changed) isn't captured. Linking a task to the session it spawned (via session_id) would close this loop.
+- **Task cancellation**: No `cancel` subcommand or MCP tool. Running tasks can only be stopped by manually killing the tmux pane.
+- **Task dependencies/chaining**: Tasks are independent. No way to express "run B after A completes" or "run B only if A succeeded."
+- **Completion notification**: No signal when a dispatched task finishes. The user must check manually or wait for the next session's context injection.
+- **Task listing**: No `nmem tasks` CLI to show pending/running/completed tasks. Currently requires direct SQL.
+
+### Work unit detection (core S4 algorithm — inward-facing)
 Recognize work unit boundaries from the observation stream. A work unit is a bounded chunk of coherent work: intent (prompt) → investigation (reads/searches) → execution (edits/commands) → completion (pattern resets). The signal is the ratio of user prompts : thinking blocks : tool calls, combined with hot file tracking and intent analysis. Detection logic runs on every hook fire as cheap SQL queries over current session observations. LLM summarization runs only at detected boundaries.
 
 **Status**: Designed. Implementation is consumer-independent — same algorithm for Claude Code hooks or API harness.
