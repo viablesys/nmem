@@ -196,6 +196,29 @@ A mature S5 would:
 
 S1 captures facts and produces agent-oriented session summaries. Context injection is now summary-primary — raw observation noise replaced with curated signal (summaries + pinned + recent edits + git milestones). S2 coordinates. S3 exists but doesn't self-trigger. S3* checks structure but not function. S4 is designed (work unit detection, context management, UI) but blocked on platform actuation — nmem has eyes but no hands for context control. S5 has nothing to mediate yet. The organism records, compresses, and selectively recalls, but doesn't yet manage its own attention.
 
+## Recurring Patterns
+
+### Views as inter-system channels
+
+Higher VSM systems observe lower systems without requiring the lower system to change. The implementation pattern: **SQL views over lower-system tables**.
+
+A higher system (e.g. S4) needs derived signals from a lower system (e.g. S1). Two options:
+
+1. **Table** — S1 writes to a signals table on every hook fire. This couples S1 to S4: S1 must know what S4 needs, and S4's requirements shape S1's write path. Inverts the VSM hierarchy.
+2. **View** — S4 defines a view over S1's existing tables. S1 captures facts without knowing S4 exists. S4 reads S1 through its own lens. No coupling.
+
+The view is the *channel* — S4's sensory input from S1. The higher system's own *table* (e.g. `work_units`) stores its conclusions. Both are needed, but they serve different roles:
+
+| Mechanism | VSM role | Example |
+|-----------|----------|---------|
+| Lower-system tables | Operations data | `observations`, `prompts`, `sessions` |
+| Views over those tables | Inter-system channel | `prompt_signals` (S4 observing S1) |
+| Higher-system tables | Higher system's state | `work_units` (S4's conclusions) |
+
+The view is defined and created by the higher system's own code, not in shared infrastructure (`schema.rs`). S4 creates its views at startup; `schema.rs` stays ignorant of S4's concerns. The schema owns the base tables — each system owns its own derived views.
+
+This pattern repeats wherever a higher system needs to interpret lower-system data: S3 observing S1 for retention decisions, S3* auditing S1 for integrity, S5 reading S3 and S4 to mediate policy.
+
 ## What closes the loop
 
 1. ~~**S1's S4 (session summarization)**~~ — **Done (v2).** Agent-oriented summarization via local LLM. Thinking blocks feed `learned` field. Summaries streamed to VictoriaLogs. Remaining sub-gaps (PreCompact, rolling summaries, FTS5 indexing) tracked in TODO.md.
