@@ -154,7 +154,7 @@ The episode is a dialogue, not a monologue. The user directs and the agent respo
 
 Observations (tool calls, file operations) are the *actions* within this dialogue — what was done between exchanges. They provide the concrete detail: which files, which commands, what failed. But the narrative thread runs through both voices.
 
-This means boundary detection reads user prompts (the authoritative intent signal), but narrative construction draws from the full episode: user prompts, agent prompts (from `s14_transcript.rs` thinking block extraction), and the observation stream between them.
+This means boundary detection reads user prompts (the authoritative intent signal), but narrative construction draws from the full episode: user prompts, agent prompts (from `s1_4_transcript.rs` thinking block extraction), and the observation stream between them.
 
 The LLM is not optional. Keyword bags and SQL aggregates can detect boundaries and count observations, but they cannot produce a story. A story requires language — causality, sequence, intent, outcome compressed into a paragraph that the next session can use to reconstruct context. This is the same insight that validated S1's S4: narrative coherence requires language generation (VSM.md §S1).
 
@@ -202,7 +202,7 @@ This gives the facts: hot files, phase character, failure count, duration. Neces
 
 **Narrative summary** — LLM generation from the episode's full content:
 
-The episode's user prompts, agent prompts (including thinking blocks from `s14_transcript.rs`), and observation stream are passed to the local LLM. The output is the story: what was the intent, what happened, what was learned, how did it end. Same structured fields as session summaries (`intent`, `learned`, `completed`, `notes`) but at episode granularity.
+The episode's user prompts, agent prompts (including thinking blocks from `s1_4_transcript.rs`), and observation stream are passed to the local LLM. The output is the story: what was the intent, what happened, what was learned, how did it end. Same structured fields as session summaries (`intent`, `learned`, `completed`, `notes`) but at episode granularity.
 
 The narrative is what makes the episode usable as memory. The structured skeleton tells you "4 reads, 2 edits, 1 failure." The narrative tells you "tried to fix the auth bug by patching the token refresh, but the real issue was a stale mock in tests — updated the mock and tests passed." The next session needs the latter.
 

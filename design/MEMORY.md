@@ -28,7 +28,7 @@
 | Pin | `src/s1_pin.rs` | ADR-005 | Pin/unpin observations — exempt from retention sweeps |
 | DB | `src/db.rs` | ADR-001 | SQLCipher encryption, key management, migration, open/open_readonly |
 | CLI | `src/cli.rs` | ADR-003 | clap derive: record, serve, purge, maintain, status, search, encrypt, pin, unpin |
-| Transcript | `src/s14_transcript.rs` | ADR-002 | Session signature generation |
+| Transcript | `src/s1_4_transcript.rs` | ADR-002 | Session signature generation |
 
 ### Not yet implemented
 - **S4 Synthesis** — LLM-based summarization of observation clusters (ADR-002 Q3)

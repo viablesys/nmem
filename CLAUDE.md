@@ -26,8 +26,8 @@ cargo build --release
 - `s1_extract.rs` — tool classification, content extraction
 - `s5_filter.rs` — secret redaction patterns
 - `s1_context.rs` — SessionStart context injection
-- `s14_summarize.rs` — end-of-session summarization
-- `s14_transcript.rs` — thinking block extraction
+- `s1_4_summarize.rs` — end-of-session summarization
+- `s1_4_transcript.rs` — thinking block extraction
 - `s5_config.rs` — config parsing (affects all hooks)
 - `s4_dispatch.rs` — task queue and dispatch logic
 - `schema.rs` — DB migrations
@@ -45,7 +45,7 @@ nmem is designed around Stafford Beer's Viable System Model. Every module maps t
 | System | Role in nmem | Modules |
 |--------|-------------|---------|
 | **S1** Operations | Capture, store, retrieve | `s1_record.rs`, `s1_extract.rs`, `s1_serve.rs`, `s1_search.rs`, `s1_context.rs`, `s1_pin.rs` |
-| **S1's S4** | Session summarization — S1's own intelligence layer | `s14_summarize.rs`, `s14_transcript.rs` |
+| **S1's S4** | Session summarization — S1's own intelligence layer | `s1_4_summarize.rs`, `s1_4_transcript.rs` |
 | **S2** Coordination | Dedup, ordering, concurrency | SQLite WAL, dedup checks in `s1_record.rs` |
 | **S3** Control | Storage budgets, retention, compaction | `s3_sweep.rs`, `s3_maintain.rs`, `s3_purge.rs` |
 | **S3*** Audit | Integrity checks | `s3_maintain.rs` (FTS rebuild, integrity) |
@@ -75,7 +75,7 @@ Stop         → mark session ended, compute signature, WAL checkpoint
 
 ### Module map
 
-Files are prefixed by VSM layer: `s1_` (Operations), `s14_` (S1's S4), `s3_` (Control), `s4_` (Intelligence), `s5_` (Policy). Unprefixed files are infrastructure.
+Files are prefixed by VSM layer: `s1_` (Operations), `s1_4_` (S1's S4), `s3_` (Control), `s4_` (Intelligence), `s5_` (Policy). Unprefixed files are infrastructure.
 
 | Module | Layer | Role |
 |--------|-------|------|
@@ -91,8 +91,8 @@ Files are prefixed by VSM layer: `s1_` (Operations), `s14_` (S1's S4), `s3_` (Co
 | `s1_extract.rs` | S1 | `classify_tool()`, `classify_bash()`, `extract_content()`, `extract_file_path()` |
 | `s1_context.rs` | S1 | SessionStart context injection (intents + local/cross-project obs) |
 | `s1_pin.rs` | S1 | Pin/unpin observations |
-| `s14_summarize.rs` | S1's S4 | End-of-session LLM summarization, VictoriaLogs streaming |
-| `s14_transcript.rs` | S1's S4 | Scan transcript for prompt tracking |
+| `s1_4_summarize.rs` | S1's S4 | End-of-session LLM summarization, VictoriaLogs streaming |
+| `s1_4_transcript.rs` | S1's S4 | Scan transcript for prompt tracking |
 | `s3_learn.rs` | S4 | Cross-session pattern detection: failures, errors, intents, stuck loops |
 | `s4_dispatch.rs` | S4 | Task queue and systemd-driven dispatch to tmux |
 | `s3_sweep.rs` | S3 | Retention-based purge (per obs_type TTL, respects pins) |

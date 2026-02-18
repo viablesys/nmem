@@ -1,6 +1,6 @@
 use crate::s1_context;
 use crate::s1_extract::{classify_tool, extract_content, extract_file_path};
-use crate::s14_transcript::{get_current_prompt_id, scan_transcript};
+use crate::s1_4_transcript::{get_current_prompt_id, scan_transcript};
 use crate::s3_sweep::run_sweep;
 use crate::s5_config::{load_config, resolve_filter_params, NmemConfig};
 use crate::s5_filter::{SecretFilter, redact_json_value_with};
@@ -351,7 +351,7 @@ fn handle_stop(conn: &Connection, payload: &HookPayload, config: &NmemConfig) ->
     tx.commit()?;
 
     // Summarize session — non-fatal
-    match crate::s14_summarize::summarize_session(conn, &payload.session_id, &config.summarization) {
+    match crate::s1_4_summarize::summarize_session(conn, &payload.session_id, &config.summarization) {
         Ok(()) => {}
         Err(e) => eprintln!("nmem: summarization failed (non-fatal): {e}"),
     }

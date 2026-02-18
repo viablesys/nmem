@@ -14,8 +14,8 @@ pub mod s1_search;
 pub mod s1_serve;
 
 // S1's S4 — session intelligence (VSM recursion within S1)
-pub mod s14_summarize;
-pub mod s14_transcript;
+pub mod s1_4_summarize;
+pub mod s1_4_transcript;
 
 // S3 Control — retention, compaction, integrity
 pub mod s3_learn;
@@ -38,8 +38,8 @@ pub use s1_pin as pin;
 pub use s1_record as record;
 pub use s1_search as search;
 pub use s1_serve as serve;
-pub use s14_summarize as summarize;
-pub use s14_transcript as transcript;
+pub use s1_4_summarize as summarize;
+pub use s1_4_transcript as transcript;
 pub use s3_learn as learn;
 pub use s3_maintain as maintain;
 pub use s3_purge as purge;
