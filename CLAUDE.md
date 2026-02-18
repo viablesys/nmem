@@ -187,6 +187,50 @@ Observation classification vocabulary. Bash commands are sub-classified by `clas
 | `mcp_call` | `*__*` tools | External tool |
 | `tool_other` | Unknown tools | Uncategorized |
 
+## Using nmem (the feedback loop)
+
+nmem is recording this session. It also contains observations and session summaries from all previous sessions on this project. **Use it before re-deriving solutions.**
+
+### When to query nmem
+
+- **Before investigating a bug** — search for past failures on the same file or module. Previous sessions may have already diagnosed and fixed similar issues.
+- **Before making a design decision** — search for past `learned` entries in session summaries. Decisions, trade-offs, and conclusions from prior sessions should not be re-derived.
+- **When picking up unfamiliar code** — use `recent_context` or `session_summaries` to see what recent sessions did and why.
+- **When a build or test fails unexpectedly** — search for past failures with the same error pattern. The fix may already be in the observation history.
+
+### Available MCP tools
+
+These are live during the session via the nmem MCP server:
+
+| Tool | Use for |
+|------|---------|
+| `search` | FTS5 full-text search over observations. Supports AND/OR/NOT, phrases, prefix. Filter by project, obs_type. |
+| `get_observations` | Fetch full observation details by ID (after finding IDs via search). |
+| `recent_context` | Recent observations ranked by composite score (recency + type weight + project match). Deduped by file_path. |
+| `session_summaries` | Structured JSON summaries of past sessions — intent, learned, completed, next_steps, files_edited, notes. |
+| `timeline` | Observations surrounding an anchor point within the same session. |
+| `regenerate_context` | Re-run context injection with current data (same as SessionStart output). |
+
+### Query patterns
+
+```
+# What was learned about a topic?
+search: "summarization" or "context injection"
+
+# What failed recently?
+search with obs_type filter: "cargo test" filtered to command obs_type
+
+# What decisions were made on this module?
+session_summaries filtered to this project, then read `learned` fields
+
+# What files were hot in recent sessions?
+recent_context shows file_path with scores
+```
+
+### The principle
+
+nmem captures what you do. Session summaries compress what you learned. Context injection feeds it back to the next session. But the automatic injection is limited (top N summaries, time-ordered). **Targeted queries are more powerful than passive injection** — when you have a specific question, search for it rather than hoping it was injected.
+
 ## Conventions
 
 - nmem serves the agent, not the user — summaries optimize for context reconstruction by the next AI session
