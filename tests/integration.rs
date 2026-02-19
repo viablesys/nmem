@@ -1227,9 +1227,10 @@ fn search_invalid_order_by_fails() {
 }
 
 // --- Context injection intent tests ---
+// (Intents section removed in favor of episodes — these tests verify the new flow)
 
 #[test]
-fn context_injection_shows_intents() {
+fn context_injection_no_intents_section() {
     let dir = TempDir::new().unwrap();
     let db = dir.path().join("test.db");
 
@@ -1241,7 +1242,7 @@ fn context_injection_shows_intents() {
     post_tool_use(&db, "int-seed", "Bash", r#"{"command":"cargo test"}"#);
     stop(&db, "int-seed");
 
-    // New session — should see intents
+    // New session — should NOT have intents section (removed)
     let out = nmem_cmd(&db)
         .arg("record")
         .write_stdin(
@@ -1251,37 +1252,8 @@ fn context_injection_shows_intents() {
         .success();
 
     let stdout = String::from_utf8_lossy(&out.get_output().stdout);
-    assert!(stdout.contains("## Recent Intents"), "should contain intents section");
-    assert!(stdout.contains("Fix the login bug"), "should show the user prompt");
-    assert!(stdout.contains("3 actions"), "should show action count");
-}
-
-#[test]
-fn context_injection_filters_zero_action_intents() {
-    let dir = TempDir::new().unwrap();
-    let db = dir.path().join("test.db");
-
-    // Seed session: one prompt with actions, one without
-    session_start(&db, "int-zero");
-    user_prompt(&db, "int-zero", "Do the real work");
-    post_tool_use(&db, "int-zero", "Bash", r#"{"command":"cargo build"}"#);
-
-    // Second prompt with no tool calls following it
-    user_prompt(&db, "int-zero", "yes");
-    stop(&db, "int-zero");
-
-    // New session
-    let out = nmem_cmd(&db)
-        .arg("record")
-        .write_stdin(
-            r#"{"session_id":"int-zero2","cwd":"/home/test/workspace/myproj","hook_event_name":"SessionStart"}"#,
-        )
-        .assert()
-        .success();
-
-    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
-    assert!(stdout.contains("Do the real work"), "prompt with actions should appear");
-    assert!(!stdout.contains("\"yes\""), "zero-action prompt should be filtered out");
+    assert!(!stdout.contains("## Recent Intents"), "intents section should not exist");
+    assert!(stdout.contains("# nmem context"), "should still produce context");
 }
 
 // --- Context config tests ---
@@ -1407,10 +1379,9 @@ fn context_injection_on_session_start() {
     let stdout = String::from_utf8_lossy(&out.get_output().stdout);
     assert!(stdout.contains("# nmem context"), "should contain context header");
     assert!(stdout.contains("## myproj"), "should contain project section");
-    assert!(stdout.contains("file_edit"), "should contain file_edit observation");
+    assert!(stdout.contains("/src/auth.rs"), "should contain edited file path");
     // Commands only appear if pinned or git commit/push — generic commands are filtered out
     assert!(!stdout.contains("cargo test"), "generic commands should not appear in context");
-    assert!(stdout.contains("| ID |"), "should contain table header");
 }
 
 #[test]
@@ -1529,5 +1500,133 @@ fn context_injection_shows_pinned() {
     assert!(stdout.contains("# nmem context"), "should produce context");
     // Find the row with important-cmd and verify it has pin marker
     let line = stdout.lines().find(|l| l.contains("important-cmd")).expect("should find important-cmd row");
-    assert!(line.contains("*"), "pinned observation should have * marker");
+    assert!(line.contains("(pinned)"), "pinned observation should have (pinned) marker");
+}
+
+// --- Episode context injection tests ---
+
+#[test]
+fn context_injection_shows_episodes() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    // Seed session with prompt + tool uses
+    session_start(&db, "ep-seed");
+    user_prompt(&db, "ep-seed", "Fix the authentication bug in the login handler");
+    post_tool_use(&db, "ep-seed", "Read", r#"{"file_path":"/src/auth.rs"}"#);
+    post_tool_use(&db, "ep-seed", "Edit", r#"{"file_path":"/src/auth.rs"}"#);
+    stop(&db, "ep-seed");
+
+    // Insert work_units directly (episodes are normally detected at Stop time)
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        conn.execute(
+            "INSERT INTO work_units (session_id, started_at, intent, obs_count, hot_files, phase_signature)
+             VALUES ('ep-seed', ?1, 'fix authentication bug', 5, '[\"src/auth.rs\",\"src/handler.rs\"]', '{\"investigate\":2,\"execute\":3,\"failures\":0}')",
+            [now - 600],
+        ).unwrap();
+    }
+
+    // New session — should see episodes section
+    let out = nmem_cmd(&db)
+        .arg("record")
+        .write_stdin(
+            r#"{"session_id":"ep-new","cwd":"/home/test/workspace/myproj","hook_event_name":"SessionStart"}"#,
+        )
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    assert!(stdout.contains("## Recent Episodes"), "should contain episodes section");
+    assert!(stdout.contains("fix authentication bug"), "should show episode intent");
+    assert!(stdout.contains("5 obs"), "should show observation count");
+    assert!(stdout.contains("execute"), "should show phase character");
+    assert!(stdout.contains("src/auth.rs"), "should show hot files");
+}
+
+#[test]
+fn context_injection_episode_fallback() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    // Seed session — old enough to be outside episode window but with summary
+    session_start(&db, "fb-seed");
+    post_tool_use(&db, "fb-seed", "Edit", r#"{"file_path":"/src/main.rs"}"#);
+    stop(&db, "fb-seed");
+
+    // Directly insert an old session summary (simulate LLM summarization)
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let old_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64 - 300000; // ~3.5 days ago
+
+        conn.execute(
+            "INSERT INTO sessions (id, project, started_at, summary) VALUES ('fb-old', 'myproj', ?1, ?2)",
+            rusqlite::params![
+                old_ts,
+                r#"{"intent":"Add user notifications","completed":["Added notification endpoint"],"learned":["WebSocket preferred over polling"],"next_steps":["Run cargo test"],"files_read":[],"files_edited":[],"notes":null}"#
+            ],
+        ).unwrap();
+    }
+
+    // New session — old session should appear as session summary (no episodes for it)
+    let out = nmem_cmd(&db)
+        .arg("record")
+        .write_stdin(
+            r#"{"session_id":"fb-new","cwd":"/home/test/workspace/myproj","hook_event_name":"SessionStart"}"#,
+        )
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    assert!(stdout.contains("## Session Summaries"), "should contain session summaries for old sessions");
+    assert!(stdout.contains("Add user notifications"), "should show old session intent");
+    assert!(stdout.contains("WebSocket preferred"), "should show learned items");
+}
+
+#[test]
+fn context_injection_suggested_tasks() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    // Seed session with summary that has next_steps
+    session_start(&db, "st-seed");
+    post_tool_use(&db, "st-seed", "Edit", r#"{"file_path":"/src/main.rs"}"#);
+    stop(&db, "st-seed");
+
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64 - 3600;
+
+        conn.execute(
+            "UPDATE sessions SET started_at = ?1, summary = ?2 WHERE id = 'st-seed'",
+            rusqlite::params![
+                ts,
+                r#"{"intent":"Implement feature X","completed":["Added endpoint"],"learned":[],"next_steps":["Run cargo test after changes","Update documentation"],"files_read":[],"files_edited":[],"notes":null}"#
+            ],
+        ).unwrap();
+    }
+
+    // New session — should see suggested tasks
+    let out = nmem_cmd(&db)
+        .arg("record")
+        .write_stdin(
+            r#"{"session_id":"st-new","cwd":"/home/test/workspace/myproj","hook_event_name":"SessionStart"}"#,
+        )
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    assert!(stdout.contains("## Suggested Tasks"), "should contain suggested tasks section");
+    assert!(stdout.contains("Run cargo test after changes"), "should show next step from summary");
+    assert!(stdout.contains("Update documentation"), "should show second next step");
 }

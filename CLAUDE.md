@@ -70,6 +70,7 @@ No daemon. Four process modes:
 
 ```
 SessionStart → create session row, inject context into stdout
+               Context: intents → episodes (within 48h window) → fallback summaries (older) → suggested tasks → obs table
 PostToolUse  → extract observation from tool_input/tool_response, dedup, write
 Stop         → mark session ended, compute signature, detect episodes, summarize, WAL checkpoint
 ```
@@ -90,7 +91,7 @@ Files are prefixed by VSM layer: `s1_` (Operations), `s1_4_` (S1's S4), `s3_` (C
 | `s1_serve.rs` | S1 | MCP server (`NmemServer`), tools: `search`, `get_observations`, `recent_context`, `queue_task`, etc. |
 | `s1_search.rs` | S1 | CLI search with BM25 + recency blended ranking |
 | `s1_extract.rs` | S1 | `classify_tool()`, `classify_bash()`, `extract_content()`, `extract_file_path()` |
-| `s4_context.rs` | S4 | SessionStart context injection (intents + summaries + local/cross-project obs) |
+| `s4_context.rs` | S4 | SessionStart context injection (intents + episodes + fallback summaries + suggested tasks + obs table) |
 | `s1_pin.rs` | S1 | Pin/unpin observations |
 | `s1_4_summarize.rs` | S1's S4 | End-of-session LLM summarization, VictoriaLogs streaming |
 | `s1_4_transcript.rs` | S1's S4 | Scan transcript for prompt tracking |
@@ -118,7 +119,7 @@ Encryption key resolution: `NMEM_KEY` env → `encryption.key_file` in config �
 
 `~/.nmem/config.toml` (override: `NMEM_CONFIG` env).
 
-Sections: `[filter]` (secret patterns, entropy), `[projects.<name>]` (sensitivity, context limits), `[encryption]` (key_file), `[retention]` (per-type TTL in days), `[metrics]` (OTLP endpoint), `[summarization]` (enabled, endpoint, model, timeout).
+Sections: `[filter]` (secret patterns, entropy), `[projects.<name>]` (sensitivity, context limits, `context_episode_window_hours`), `[encryption]` (key_file), `[retention]` (per-type TTL in days), `[metrics]` (OTLP endpoint), `[summarization]` (enabled, endpoint, model, timeout).
 
 ## External services
 
@@ -242,7 +243,7 @@ recent_context shows file_path with scores
 
 ### The principle
 
-nmem captures what you do. Session summaries compress what you learned. Context injection feeds it back to the next session. But the automatic injection is limited (top N summaries, time-ordered). **Targeted queries are more powerful than passive injection** — when you have a specific question, search for it rather than hoping it was injected.
+nmem captures what you do. Episodes compress recent work into intent-driven units with phase character and hot files. Session summaries compress older sessions. Context injection feeds both back: episodes for the last 48 hours, session summaries as fallback for older sessions. Suggested tasks surface `next_steps` from summaries and episode narratives. **Targeted queries are more powerful than passive injection** — when you have a specific question, search for it rather than hoping it was injected.
 
 ## Conventions
 

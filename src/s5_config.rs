@@ -81,6 +81,9 @@ pub struct ProjectConfig {
     /// Takes precedence over `context_cross_limit` when true.
     #[serde(default)]
     pub suppress_cross_project: bool,
+    /// Episode window in hours for context injection (default: 48).
+    /// Episodes within this window replace session summaries.
+    pub context_episode_window_hours: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone, Copy, PartialEq, Eq)]
@@ -178,6 +181,17 @@ pub fn resolve_context_limits(config: &NmemConfig, project: &str, is_recovery: b
             .unwrap_or(if is_recovery { 15 } else { 10 })
     };
     (local, cross)
+}
+
+/// Resolve episode window in seconds from config.
+/// Project override takes precedence, otherwise default 48 hours.
+pub fn resolve_episode_window(config: &NmemConfig, project: &str) -> i64 {
+    let hours = config
+        .projects
+        .get(project)
+        .and_then(|p| p.context_episode_window_hours)
+        .unwrap_or(48);
+    hours as i64 * 3600
 }
 
 /// Merge global config + project-specific settings into FilterParams.
