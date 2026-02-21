@@ -2,6 +2,7 @@ use crate::s4_context;
 use crate::s1_extract::{classify_tool, extract_content, extract_file_path};
 use crate::s1_4_transcript::{get_current_prompt_id, scan_transcript};
 use crate::s2_classify;
+use crate::s2_scope;
 use crate::s3_sweep::run_sweep;
 use crate::s5_config::{load_config, resolve_filter_params, NmemConfig};
 use crate::s5_filter::{SecretFilter, redact_json_value_with};
@@ -243,11 +244,27 @@ fn handle_post_tool_use(
     }
 
     // Classify phase (think/act) — non-fatal, None if model not loaded
-    let phase = s2_classify::classify(&filtered_content).map(|p| p.label);
+    let phase_result = s2_classify::classify(&filtered_content);
+    let phase = phase_result.as_ref().map(|p| p.label);
+
+    // Register classifier run for provenance tracking
+    let classifier_run_id = phase_result
+        .as_ref()
+        .and_then(|p| {
+            s2_classify::ensure_classifier_run(&tx, "think-act", p.model_hash, None, None, None).ok()
+        });
+
+    // Classify scope (converge/diverge) — non-fatal, None if model not loaded
+    let scope_result = s2_scope::classify_scope(&filtered_content);
+    let scope = scope_result.as_ref().map(|s| s.label);
+    let scope_run_id = scope_result.as_ref().and_then(|s| {
+        s2_classify::ensure_classifier_run(&tx, "converge-diverge", s.model_hash, None, None, None)
+            .ok()
+    });
 
     tx.execute(
-        "INSERT INTO observations (session_id, prompt_id, timestamp, obs_type, source_event, tool_name, file_path, content, metadata, phase)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO observations (session_id, prompt_id, timestamp, obs_type, source_event, tool_name, file_path, content, metadata, phase, classifier_run_id, scope, scope_run_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             payload.session_id,
             prompt_id,
@@ -259,6 +276,9 @@ fn handle_post_tool_use(
             filtered_content,
             metadata_str,
             phase,
+            classifier_run_id,
+            scope,
+            scope_run_id,
         ],
     )?;
 

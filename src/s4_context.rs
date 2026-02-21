@@ -86,6 +86,8 @@ struct PhaseInfo {
     investigate: i64,
     execute: i64,
     failures: i64,
+    diverge: i64,
+    converge: i64,
 }
 
 fn query_episodes(conn: &Connection, project: &str, window_secs: i64, limit: i64, before: Option<i64>) -> Result<Vec<EpisodeRow>, NmemError> {
@@ -129,6 +131,8 @@ fn query_episodes(conn: &Connection, project: &str, window_secs: i64, limit: i64
                 investigate: phase_val.get("investigate").and_then(|v| v.as_i64()).unwrap_or(0),
                 execute: phase_val.get("execute").and_then(|v| v.as_i64()).unwrap_or(0),
                 failures: phase_val.get("failures").and_then(|v| v.as_i64()).unwrap_or(0),
+                diverge: phase_val.get("diverge").and_then(|v| v.as_i64()).unwrap_or(0),
+                converge: phase_val.get("converge").and_then(|v| v.as_i64()).unwrap_or(0),
             };
             let session_intent = session_summary_json.and_then(|json| {
                 serde_json::from_str::<SessionSummary>(&json).ok().map(|s| s.intent)
@@ -156,11 +160,27 @@ fn phase_label(phase: &PhaseInfo) -> String {
     } else {
         "mixed"
     };
-    if phase.failures > 0 {
-        format!("{base}+failures")
+
+    let scope = if phase.diverge > 0 || phase.converge > 0 {
+        if phase.diverge > phase.converge {
+            Some("diverge")
+        } else if phase.converge > phase.diverge {
+            Some("converge")
+        } else {
+            None
+        }
     } else {
-        base.to_string()
+        None
+    };
+
+    let mut label = base.to_string();
+    if let Some(s) = scope {
+        label = format!("{label}→{s}");
     }
+    if phase.failures > 0 {
+        label = format!("{label}+failures");
+    }
+    label
 }
 
 fn format_episodes(rows: &[EpisodeRow]) -> String {
@@ -657,7 +677,7 @@ mod tests {
             intent: "fix the authentication bug in the login handler".into(),
             obs_count: 5,
             hot_files: vec!["src/auth.rs".into(), "src/handler.rs".into()],
-            phase_signature: PhaseInfo { investigate: 2, execute: 3, failures: 0 },
+            phase_signature: PhaseInfo { investigate: 2, execute: 3, failures: 0, diverge: 0, converge: 0 },
             summary: None,
             session_intent: None,
         }];
@@ -676,7 +696,7 @@ mod tests {
             intent: "https://github.com/foo/bar/blob/main/doc.md".into(),
             obs_count: 10,
             hot_files: vec![],
-            phase_signature: PhaseInfo { investigate: 5, execute: 5, failures: 0 },
+            phase_signature: PhaseInfo { investigate: 5, execute: 5, failures: 0, diverge: 0, converge: 0 },
             summary: None,
             session_intent: Some("Implement Bayesian surprise in episodic memory".into()),
         }];
@@ -692,7 +712,7 @@ mod tests {
             intent: "yes".into(),
             obs_count: 8,
             hot_files: vec![],
-            phase_signature: PhaseInfo { investigate: 0, execute: 8, failures: 0 },
+            phase_signature: PhaseInfo { investigate: 0, execute: 8, failures: 0, diverge: 0, converge: 0 },
             summary: None,
             session_intent: Some("Refactor dispatch queue logic".into()),
         }];
@@ -707,7 +727,7 @@ mod tests {
             intent: "debug the test".into(),
             obs_count: 3,
             hot_files: vec![],
-            phase_signature: PhaseInfo { investigate: 3, execute: 1, failures: 2 },
+            phase_signature: PhaseInfo { investigate: 3, execute: 1, failures: 2, diverge: 0, converge: 0 },
             summary: None,
             session_intent: None,
         }];
@@ -722,7 +742,7 @@ mod tests {
             intent: "fix auth".into(),
             obs_count: 4,
             hot_files: vec![],
-            phase_signature: PhaseInfo { investigate: 1, execute: 1, failures: 0 },
+            phase_signature: PhaseInfo { investigate: 1, execute: 1, failures: 0, diverge: 0, converge: 0 },
             summary: Some(r#"{"learned":["stale mocks cause failures","update mock first"]}"#.into()),
             session_intent: None,
         }];
@@ -732,10 +752,13 @@ mod tests {
 
     #[test]
     fn phase_label_variants() {
-        assert_eq!(phase_label(&PhaseInfo { investigate: 5, execute: 2, failures: 0 }), "investigate");
-        assert_eq!(phase_label(&PhaseInfo { investigate: 2, execute: 5, failures: 0 }), "execute");
-        assert_eq!(phase_label(&PhaseInfo { investigate: 3, execute: 3, failures: 0 }), "mixed");
-        assert_eq!(phase_label(&PhaseInfo { investigate: 5, execute: 2, failures: 1 }), "investigate+failures");
+        assert_eq!(phase_label(&PhaseInfo { investigate: 5, execute: 2, failures: 0, diverge: 0, converge: 0 }), "investigate");
+        assert_eq!(phase_label(&PhaseInfo { investigate: 2, execute: 5, failures: 0, diverge: 0, converge: 0 }), "execute");
+        assert_eq!(phase_label(&PhaseInfo { investigate: 3, execute: 3, failures: 0, diverge: 0, converge: 0 }), "mixed");
+        assert_eq!(phase_label(&PhaseInfo { investigate: 5, execute: 2, failures: 1, diverge: 0, converge: 0 }), "investigate+failures");
+        assert_eq!(phase_label(&PhaseInfo { investigate: 5, execute: 2, failures: 0, diverge: 3, converge: 1 }), "investigate→diverge");
+        assert_eq!(phase_label(&PhaseInfo { investigate: 2, execute: 5, failures: 0, diverge: 1, converge: 4 }), "execute→converge");
+        assert_eq!(phase_label(&PhaseInfo { investigate: 5, execute: 2, failures: 1, diverge: 2, converge: 5 }), "investigate→converge+failures");
     }
 
     #[test]

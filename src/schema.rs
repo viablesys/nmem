@@ -123,6 +123,28 @@ CREATE INDEX idx_wu_session ON work_units(session_id);
 ",
         ),
         M::up("ALTER TABLE observations ADD COLUMN phase TEXT;"),
+        M::up(
+            "
+CREATE TABLE classifier_runs (
+    id          INTEGER PRIMARY KEY,
+    created_at  INTEGER NOT NULL DEFAULT (unixepoch('now')),
+    name        TEXT NOT NULL,
+    model_hash  TEXT NOT NULL,
+    corpus_size INTEGER,
+    cv_accuracy REAL,
+    metadata    TEXT
+);
+CREATE INDEX idx_cr_name ON classifier_runs(name, created_at);
+
+ALTER TABLE observations ADD COLUMN classifier_run_id INTEGER REFERENCES classifier_runs(id);
+",
+        ),
+        M::up(
+            "
+ALTER TABLE observations ADD COLUMN scope TEXT;
+ALTER TABLE observations ADD COLUMN scope_run_id INTEGER REFERENCES classifier_runs(id);
+",
+        ),
     ])
 });
 

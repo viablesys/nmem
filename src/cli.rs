@@ -44,6 +44,8 @@ pub enum Command {
     Learn(LearnArgs),
     /// Backfill phase classification for observations with NULL phase
     Backfill(BackfillArgs),
+    /// Backfill scope classification for observations with NULL scope
+    BackfillScope(BackfillArgs),
 }
 
 #[derive(Parser)]
@@ -55,6 +57,30 @@ pub struct BackfillArgs {
     /// Dry run — show counts but don't update
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Training corpus size (recorded in classifier_runs)
+    #[arg(long)]
+    pub corpus_size: Option<i64>,
+
+    /// Cross-validation accuracy (recorded in classifier_runs)
+    #[arg(long)]
+    pub cv_accuracy: Option<f64>,
+
+    /// Extra notes for the classifier run metadata JSON
+    #[arg(long)]
+    pub notes: Option<String>,
+}
+
+impl BackfillArgs {
+    /// Build optional metadata JSON from CLI args.
+    pub fn metadata_json(&self) -> Option<String> {
+        let mut obj = serde_json::Map::new();
+        obj.insert("source".into(), serde_json::Value::String("backfill".into()));
+        if let Some(notes) = &self.notes {
+            obj.insert("notes".into(), serde_json::Value::String(notes.clone()));
+        }
+        Some(serde_json::to_string(&serde_json::Value::Object(obj)).unwrap())
+    }
 }
 
 #[derive(Parser)]

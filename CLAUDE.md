@@ -25,6 +25,7 @@ cargo build --release
 - `s1_record.rs` — hook event handling, observation storage
 - `s1_extract.rs` — tool classification, content extraction
 - `s2_classify.rs` — think/act phase classification
+- `s2_scope.rs` — converge/diverge scope classification
 - `s5_filter.rs` — secret redaction patterns
 - `s4_context.rs` — SessionStart context injection
 - `s1_4_summarize.rs` — end-of-session summarization
@@ -48,7 +49,7 @@ nmem is designed around Stafford Beer's Viable System Model. Every module maps t
 |--------|-------------|---------|
 | **S1** Operations | Capture, store, retrieve | `s1_record.rs`, `s1_extract.rs`, `s1_serve.rs`, `s1_search.rs`, `s1_pin.rs` |
 | **S1's S4** | Session summarization — S1's own intelligence layer | `s1_4_summarize.rs`, `s1_4_transcript.rs` |
-| **S2** Coordination | Dedup, ordering, classification | SQLite WAL, dedup checks in `s1_record.rs`, `s2_classify.rs` |
+| **S2** Coordination | Dedup, ordering, classification | SQLite WAL, dedup checks in `s1_record.rs`, `s2_classify.rs`, `s2_scope.rs` |
 | **S3** Control | Storage budgets, retention, compaction | `s3_sweep.rs`, `s3_maintain.rs`, `s3_purge.rs` |
 | **S3*** Audit | Integrity checks | `s3_maintain.rs` (FTS rebuild, integrity) |
 | **S4** Intelligence | Context injection, task dispatch, cross-session pattern detection, episodic memory | `s4_context.rs`, `s4_dispatch.rs`, `s4_memory.rs`, `s3_learn.rs` |
@@ -93,6 +94,7 @@ Files are prefixed by VSM layer: `s1_` (Operations), `s1_4_` (S1's S4), `s3_` (C
 | `s1_search.rs` | S1 | CLI search with BM25 + recency blended ranking |
 | `s1_extract.rs` | S1 | `classify_tool()`, `classify_bash()`, `extract_content()`, `extract_file_path()` |
 | `s2_classify.rs` | S2 | Think/act phase classifier — TF-IDF + LinearSVC inference from exported JSON model |
+| `s2_scope.rs` | S2 | Converge/diverge scope classifier — same architecture as s2_classify, separate model |
 | `s4_context.rs` | S4 | SessionStart context injection (intents + episodes + fallback summaries + suggested tasks + obs table) |
 | `s1_pin.rs` | S1 | Pin/unpin observations |
 | `s1_4_summarize.rs` | S1's S4 | End-of-session LLM summarization, VictoriaLogs streaming |
@@ -111,7 +113,7 @@ Files are prefixed by VSM layer: `s1_` (Operations), `s1_4_` (S1's S4), `s3_` (C
 
 SQLite with `bundled-sqlcipher`. DB at `~/.nmem/nmem.db` (override: `--db` or `NMEM_DB`).
 
-Five tables: `sessions`, `prompts`, `observations`, `tasks`, `work_units` + external FTS5 indexes (`observations_fts`, `prompts_fts`). Full schema in `design/SCHEMA.md`. Schema versioned via `rusqlite_migration` `user_version` PRAGMA.
+Five tables: `sessions`, `prompts`, `observations`, `tasks`, `work_units` + `classifier_runs` + external FTS5 indexes (`observations_fts`, `prompts_fts`). Full schema in `design/SCHEMA.md`. Schema versioned via `rusqlite_migration` `user_version` PRAGMA (9 migrations).
 
 Key PRAGMAs: `journal_mode=WAL`, `synchronous=NORMAL`, `busy_timeout=5000`, `foreign_keys=ON`.
 
@@ -155,6 +157,7 @@ ADRs in `design/ADR/`. Read before changing load-bearing decisions:
 - ADR-008: Distribution and installation
 - ADR-010: Work unit detection — episodic memory (prompt-driven boundary detection, narrative construction)
 - ADR-011: Phase classification — S2 text classifier (synthetic data + TF-IDF/LinearSVC, Rust inference, 98.8% CV)
+- ADR-013: Scope classification — converge/diverge dimension (same architecture as ADR-011, orthogonal to think/act)
 
 `design/DESIGN.md` has the overall design framing.
 
@@ -167,7 +170,7 @@ ADRs in `design/ADR/`. Read before changing load-bearing decisions:
 | `s1_search.rs` | `fts5.md`, `sqlite-retrieval-patterns.md` |
 | `s1_serve.rs` | `rmcp.md`, `fts5.md` |
 | `s1_record.rs`, `s1_extract.rs` | `claude-code-hooks-events.md`, `serde-json.md` |
-| `s2_classify.rs` | `sklearn-text-classification.md`, `serde-json.md` |
+| `s2_classify.rs`, `s2_scope.rs` | `sklearn-text-classification.md`, `serde-json.md` |
 | `s5_filter.rs` | `regex.md` |
 | `s4_context.rs` | `sqlite-retrieval-patterns.md`, `episodic-memory.md` |
 | `s4_memory.rs` | `episodic-memory.md`, `sqlite-retrieval-patterns.md` |

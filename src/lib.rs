@@ -14,6 +14,7 @@ pub mod s1_serve;
 
 // S2 Coordination — classification, dedup
 pub mod s2_classify;
+pub mod s2_scope;
 
 // S1's S4 — session intelligence (VSM recursion within S1)
 pub mod s1_4_summarize;

@@ -107,6 +107,18 @@ Stub — five open questions, no decisions. Blocks `nmem init`, binary packaging
 
 **Why**: Claude Code marketplace/plugin packaging mechanics are unknown. Can't finalize distribution without understanding the target.
 
+### Scope classifier augmentation strategy
+The converge/diverge scope classifier (ADR-013) achieves 71.4% CV on real data — functional but below the 80% floor that think/act meets. The bottleneck is augmentation quality: word-dropout transforms don't add decision-boundary signal, so 5478 augmented entries perform no better than 870 base entries on held-out data. Think/act reached 98.8% because 10x LLM-generated paraphrases added genuine semantic variety.
+
+**Strategies to investigate:**
+1. **LLM-generated paraphrases** — the think/act pipeline used parallel agents to generate 10 paraphrases per entry. The scope augmentation agents were launched but timed out generating Python scripts. Retry with more constrained prompts (output JSON directly, no scripts).
+2. **Feature engineering** — include `obs_type` as an explicit feature alongside text. `file_edit` is strongly converge-biased, `web_search` is diverge-biased. A combined text+metadata model may capture what text alone misses.
+3. **Sequential context** — pair each observation's text with the previous observation's text or obs_type. Converge/diverge depends on what happened before (re-reading a file = converge; first read = diverge).
+4. **Larger base corpus** — data volume was the primary lever for think/act (176→7648). Current scope base is 870 entries. Extract and label 2000+ observations from the growing DB.
+5. **Active learning** — classify with the current model, surface low-confidence predictions for manual correction, retrain.
+
+**Trigger**: Scope model accuracy demonstrably affects episode quality or context injection decisions. Current 71% may be sufficient at the episode aggregation level.
+
 ## Low priority
 
 ### Per-project retention overrides

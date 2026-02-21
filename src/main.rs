@@ -30,6 +30,7 @@ fn run() -> Result<(), NmemError> {
         Command::Task(args) => nmem::dispatch::handle_task(&db_path, &args),
         Command::Learn(args) => nmem::learn::handle_learn(&db_path, &args),
         Command::Backfill(args) => nmem::s2_classify::handle_backfill(&db_path, &args),
+        Command::BackfillScope(args) => nmem::s2_scope::handle_backfill_scope(&db_path, &args),
     }
 }
 

@@ -189,15 +189,18 @@ fn annotate_episode(conn: &Connection, episode: &Episode) -> Result<WorkUnitRow,
 
     // Phase signature: use classifier labels (think/act) when available,
     // fall back to obs_type heuristic for old unclassified observations.
-    let (investigate, execute, failures) = {
+    // Also aggregate scope (converge/diverge) from classifier labels.
+    let (investigate, execute, failures, diverge, converge) = {
         let mut stmt = conn.prepare(
-            "SELECT phase, obs_type, COUNT(*) FROM observations
+            "SELECT phase, obs_type, scope, COUNT(*) FROM observations
              WHERE session_id = ?1
                AND prompt_id >= ?2 AND prompt_id <= ?3
-             GROUP BY phase, obs_type",
+             GROUP BY phase, obs_type, scope",
         )?;
         let mut inv = 0i64;
         let mut exe = 0i64;
+        let mut div = 0i64;
+        let mut conv = 0i64;
 
         let mut rows = stmt.query(params![
             episode.session_id,
@@ -207,7 +210,8 @@ fn annotate_episode(conn: &Connection, episode: &Episode) -> Result<WorkUnitRow,
         while let Some(row) = rows.next()? {
             let phase: Option<String> = row.get(0)?;
             let obs_type: String = row.get(1)?;
-            let count: i64 = row.get(2)?;
+            let scope: Option<String> = row.get(2)?;
+            let count: i64 = row.get(3)?;
             match phase.as_deref() {
                 Some("think") => inv += count,
                 Some("act") => exe += count,
@@ -217,6 +221,11 @@ fn annotate_episode(conn: &Connection, episode: &Episode) -> Result<WorkUnitRow,
                     "file_edit" | "file_write" | "git_commit" | "git_push" | "command" => exe += count,
                     _ => {}
                 },
+                _ => {}
+            }
+            match scope.as_deref() {
+                Some("diverge") => div += count,
+                Some("converge") => conv += count,
                 _ => {}
             }
         }
@@ -231,7 +240,7 @@ fn annotate_episode(conn: &Connection, episode: &Episode) -> Result<WorkUnitRow,
             |r| r.get(0),
         )?;
 
-        (inv, exe, fail)
+        (inv, exe, fail, div, conv)
     };
 
     let obs_count: i64 = conn.query_row(
@@ -247,6 +256,8 @@ fn annotate_episode(conn: &Connection, episode: &Episode) -> Result<WorkUnitRow,
         "investigate": investigate,
         "execute": execute,
         "failures": failures,
+        "diverge": diverge,
+        "converge": converge,
     })
     .to_string();
 
