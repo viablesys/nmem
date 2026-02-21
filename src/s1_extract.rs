@@ -154,8 +154,8 @@ fn parse_git_commit_response(response: &str, meta: &mut Map<String, Value>) {
     for line in response.lines() {
         let line = line.trim();
         // [branch hash] Commit message
-        if line.starts_with('[') {
-            if let Some(bracket_end) = line.find(']') {
+        if line.starts_with('[')
+            && let Some(bracket_end) = line.find(']') {
                 let inside = &line[1..bracket_end];
                 // "branch hash" or "branch (root-commit) hash"
                 let parts: Vec<&str> = inside.split_whitespace().collect();
@@ -171,7 +171,6 @@ fn parse_git_commit_response(response: &str, meta: &mut Map<String, Value>) {
                     meta.insert("commit_message".into(), Value::String(message));
                 }
             }
-        }
         // N files changed, X insertions(+), Y deletions(-)
         if line.contains("changed") && (line.contains("insertion") || line.contains("deletion")) {
             let mut files = 0u32;
@@ -212,8 +211,8 @@ fn parse_git_push_response(response: &str, meta: &mut Map<String, Value>) {
     for line in response.lines() {
         let line = line.trim();
         // To https://github.com/org/repo.git
-        if line.starts_with("To ") {
-            meta.insert("remote_url".into(), Value::String(line[3..].into()));
+        if let Some(url) = line.strip_prefix("To ") {
+            meta.insert("remote_url".into(), Value::String(url.into()));
         }
         // oldhash..newhash  branch -> branch
         if line.contains("..") && line.contains("->") {
@@ -221,14 +220,13 @@ fn parse_git_push_response(response: &str, meta: &mut Map<String, Value>) {
             if !parts.is_empty() {
                 meta.insert("hash_range".into(), Value::String(parts[0].into()));
             }
-            if let Some(arrow_pos) = parts.iter().position(|&w| w == "->") {
-                if arrow_pos > 0 {
+            if let Some(arrow_pos) = parts.iter().position(|&w| w == "->")
+                && arrow_pos > 0 {
                     meta.insert(
                         "branch".into(),
                         Value::String(parts[arrow_pos - 1].into()),
                     );
                 }
-            }
         }
     }
 }

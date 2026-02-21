@@ -240,12 +240,10 @@ pub fn classify_scope(text: &str) -> Option<Scope> {
         } else {
             ("converge", prob as f32)
         }
+    } else if model.classes.first().is_some_and(|c| c == "converge") {
+        ("converge", (1.0 - prob) as f32)
     } else {
-        if model.classes.first().is_some_and(|c| c == "converge") {
-            ("converge", (1.0 - prob) as f32)
-        } else {
-            ("diverge", (1.0 - prob) as f32)
-        }
+        ("diverge", (1.0 - prob) as f32)
     };
 
     Some(Scope {

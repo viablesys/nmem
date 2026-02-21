@@ -218,10 +218,10 @@ fn format_episodes(rows: &[EpisodeRow]) -> String {
             out.push_str(&format!("  - Files: {files}\n"));
         }
 
-        if i < 3 {
-            if let Some(summary) = &row.summary {
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(summary) {
-                    if let Some(learned) = val.get("learned") {
+        if i < 3
+            && let Some(summary) = &row.summary
+                && let Ok(val) = serde_json::from_str::<serde_json::Value>(summary)
+                    && let Some(learned) = val.get("learned") {
                         let learned_items = match learned {
                             serde_json::Value::Array(arr) => arr
                                 .iter()
@@ -236,9 +236,6 @@ fn format_episodes(rows: &[EpisodeRow]) -> String {
                             out.push_str(&format!("  - Learned: {learned_items}\n"));
                         }
                     }
-                }
-            }
-        }
     }
     out
 }
@@ -352,8 +349,8 @@ fn query_suggested_tasks(conn: &Connection, project: &str, limit: i64) -> Result
         if tasks.len() >= limit as usize {
             break;
         }
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(ep_summary) {
-            if let Some(serde_json::Value::Array(steps)) = val.get("next_steps") {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(ep_summary)
+            && let Some(serde_json::Value::Array(steps)) = val.get("next_steps") {
                 for step in steps.iter().filter_map(|v| v.as_str()) {
                     if tasks.len() >= limit as usize {
                         break;
@@ -363,7 +360,6 @@ fn query_suggested_tasks(conn: &Connection, project: &str, limit: i64) -> Result
                     }
                 }
             }
-        }
     }
 
     Ok(tasks)

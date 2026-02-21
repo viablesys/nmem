@@ -225,14 +225,13 @@ fn handle_post_tool_use(
     }
 
     // Extract structured git metadata from tool_response
-    if matches!(obs_type, "git_commit" | "git_push") {
-        if let Some(ref resp) = response_str {
+    if matches!(obs_type, "git_commit" | "git_push")
+        && let Some(ref resp) = response_str {
             let git_meta = extract_git_metadata(obs_type, resp);
             for (k, v) in git_meta {
                 meta_obj.insert(k, v);
             }
         }
-    }
 
     let mut metadata = if meta_obj.is_empty() {
         serde_json::Value::Null
@@ -314,6 +313,7 @@ fn handle_post_tool_use(
 
 const VLOGS_ENDPOINT: &str = "http://localhost:9428/insert/jsonline";
 
+#[allow(clippy::too_many_arguments)]
 fn stream_observation_to_logs(
     session_id: &str,
     project: &str,
@@ -349,9 +349,9 @@ fn stream_observation_to_logs(
     }
 
     // Merge git-specific fields into the log record
-    if matches!(obs_type, "git_commit" | "git_push") {
-        if let Some(ms) = metadata_str {
-            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(ms) {
+    if matches!(obs_type, "git_commit" | "git_push")
+        && let Some(ms) = metadata_str
+            && let Ok(meta) = serde_json::from_str::<serde_json::Value>(ms) {
                 for key in &["commit_hash", "commit_message", "branch", "files_changed",
                              "insertions", "deletions", "remote_url", "hash_range"] {
                     if let Some(v) = meta.get(*key) {
@@ -359,8 +359,6 @@ fn stream_observation_to_logs(
                     }
                 }
             }
-        }
-    }
 
     let body = format!("{}\n", record);
     let agent = ureq::Agent::new_with_config(
@@ -381,9 +379,9 @@ fn build_log_message(
     metadata_str: &Option<String>,
 ) -> String {
     // For git commits, show "[hash] message" instead of the raw command
-    if obs_type == "git_commit" {
-        if let Some(ms) = metadata_str {
-            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(ms) {
+    if obs_type == "git_commit"
+        && let Some(ms) = metadata_str
+            && let Ok(meta) = serde_json::from_str::<serde_json::Value>(ms) {
                 let hash = meta.get("commit_hash").and_then(|v| v.as_str()).unwrap_or("?");
                 let msg = meta.get("commit_message").and_then(|v| v.as_str()).unwrap_or("");
                 let stats = format!(
@@ -393,18 +391,14 @@ fn build_log_message(
                 );
                 return format!("git_commit: [{hash}] {msg} ({stats})");
             }
-        }
-    }
-    if obs_type == "git_push" {
-        if let Some(ms) = metadata_str {
-            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(ms) {
+    if obs_type == "git_push"
+        && let Some(ms) = metadata_str
+            && let Ok(meta) = serde_json::from_str::<serde_json::Value>(ms) {
                 let range = meta.get("hash_range").and_then(|v| v.as_str()).unwrap_or("?");
                 let branch = meta.get("branch").and_then(|v| v.as_str()).unwrap_or("?");
                 let remote = meta.get("remote_url").and_then(|v| v.as_str()).unwrap_or("?");
                 return format!("git_push: {range} {branch} → {remote}");
             }
-        }
-    }
     // Default: file_path or content preview
     if let Some(fp) = file_path {
         format!("{obs_type}: {fp}")
