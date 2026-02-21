@@ -1,6 +1,7 @@
 use crate::s4_context;
 use crate::s1_extract::{classify_tool, extract_content, extract_file_path};
 use crate::s1_4_transcript::{get_current_prompt_id, scan_transcript};
+use crate::s2_classify;
 use crate::s3_sweep::run_sweep;
 use crate::s5_config::{load_config, resolve_filter_params, NmemConfig};
 use crate::s5_filter::{SecretFilter, redact_json_value_with};
@@ -241,9 +242,12 @@ fn handle_post_tool_use(
         eprintln!("nmem: redacted potential secret from {obs_type} observation");
     }
 
+    // Classify phase (think/act) — non-fatal, None if model not loaded
+    let phase = s2_classify::classify(&filtered_content).map(|p| p.label);
+
     tx.execute(
-        "INSERT INTO observations (session_id, prompt_id, timestamp, obs_type, source_event, tool_name, file_path, content, metadata)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO observations (session_id, prompt_id, timestamp, obs_type, source_event, tool_name, file_path, content, metadata, phase)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             payload.session_id,
             prompt_id,
@@ -254,6 +258,7 @@ fn handle_post_tool_use(
             file_path,
             filtered_content,
             metadata_str,
+            phase,
         ],
     )?;
 

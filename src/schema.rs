@@ -122,6 +122,7 @@ CREATE TABLE work_units (
 CREATE INDEX idx_wu_session ON work_units(session_id);
 ",
         ),
+        M::up("ALTER TABLE observations ADD COLUMN phase TEXT;"),
     ])
 });
 

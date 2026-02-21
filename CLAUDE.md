@@ -24,6 +24,7 @@ cargo build --release
 **Must rebuild after changing:**
 - `s1_record.rs` — hook event handling, observation storage
 - `s1_extract.rs` — tool classification, content extraction
+- `s2_classify.rs` — think/act phase classification
 - `s5_filter.rs` — secret redaction patterns
 - `s4_context.rs` — SessionStart context injection
 - `s1_4_summarize.rs` — end-of-session summarization
@@ -47,7 +48,7 @@ nmem is designed around Stafford Beer's Viable System Model. Every module maps t
 |--------|-------------|---------|
 | **S1** Operations | Capture, store, retrieve | `s1_record.rs`, `s1_extract.rs`, `s1_serve.rs`, `s1_search.rs`, `s1_pin.rs` |
 | **S1's S4** | Session summarization — S1's own intelligence layer | `s1_4_summarize.rs`, `s1_4_transcript.rs` |
-| **S2** Coordination | Dedup, ordering, concurrency | SQLite WAL, dedup checks in `s1_record.rs` |
+| **S2** Coordination | Dedup, ordering, classification | SQLite WAL, dedup checks in `s1_record.rs`, `s2_classify.rs` |
 | **S3** Control | Storage budgets, retention, compaction | `s3_sweep.rs`, `s3_maintain.rs`, `s3_purge.rs` |
 | **S3*** Audit | Integrity checks | `s3_maintain.rs` (FTS rebuild, integrity) |
 | **S4** Intelligence | Context injection, task dispatch, cross-session pattern detection, episodic memory | `s4_context.rs`, `s4_dispatch.rs`, `s4_memory.rs`, `s3_learn.rs` |
@@ -71,7 +72,7 @@ No daemon. Four process modes:
 ```
 SessionStart → create session row, inject context into stdout
                Context: intents → episodes (within 48h window) → fallback summaries (older) → suggested tasks → obs table
-PostToolUse  → extract observation from tool_input/tool_response, dedup, write
+PostToolUse  → extract observation from tool_input/tool_response, classify phase (think/act), dedup, write
 Stop         → mark session ended, compute signature, detect episodes, summarize, WAL checkpoint
 ```
 
@@ -84,13 +85,14 @@ Files are prefixed by VSM layer: `s1_` (Operations), `s1_4_` (S1's S4), `s3_` (C
 | `main.rs` | infra | CLI dispatch, `run()` entry point |
 | `cli.rs` | infra | clap derive definitions only |
 | `db.rs` | infra | `open_db()`, SQLCipher key management, PRAGMAs |
-| `schema.rs` | infra | `rusqlite_migration` definitions (6 migrations) |
+| `schema.rs` | infra | `rusqlite_migration` definitions (7 migrations) |
 | `metrics.rs` | infra | Optional OTLP metrics export |
 | `status.rs` | infra | Status reporting |
-| `s1_record.rs` | S1 | Hook stdin → JSON → observation extraction + storage |
+| `s1_record.rs` | S1 | Hook stdin → JSON → observation extraction + phase classification + storage |
 | `s1_serve.rs` | S1 | MCP server (`NmemServer`), tools: `search`, `get_observations`, `recent_context`, `queue_task`, etc. |
 | `s1_search.rs` | S1 | CLI search with BM25 + recency blended ranking |
 | `s1_extract.rs` | S1 | `classify_tool()`, `classify_bash()`, `extract_content()`, `extract_file_path()` |
+| `s2_classify.rs` | S2 | Think/act phase classifier — TF-IDF + LinearSVC inference from exported JSON model |
 | `s4_context.rs` | S4 | SessionStart context injection (intents + episodes + fallback summaries + suggested tasks + obs table) |
 | `s1_pin.rs` | S1 | Pin/unpin observations |
 | `s1_4_summarize.rs` | S1's S4 | End-of-session LLM summarization, VictoriaLogs streaming |
@@ -152,6 +154,7 @@ ADRs in `design/ADR/`. Read before changing load-bearing decisions:
 - ADR-007: Trust boundary and secrets filtering
 - ADR-008: Distribution and installation
 - ADR-010: Work unit detection — episodic memory (prompt-driven boundary detection, narrative construction)
+- ADR-011: Phase classification — S2 text classifier (synthetic data + TF-IDF/LinearSVC, Rust inference, 98.8% CV)
 
 `design/DESIGN.md` has the overall design framing.
 
@@ -164,6 +167,7 @@ ADRs in `design/ADR/`. Read before changing load-bearing decisions:
 | `s1_search.rs` | `fts5.md`, `sqlite-retrieval-patterns.md` |
 | `s1_serve.rs` | `rmcp.md`, `fts5.md` |
 | `s1_record.rs`, `s1_extract.rs` | `claude-code-hooks-events.md`, `serde-json.md` |
+| `s2_classify.rs` | `sklearn-text-classification.md`, `serde-json.md` |
 | `s5_filter.rs` | `regex.md` |
 | `s4_context.rs` | `sqlite-retrieval-patterns.md`, `episodic-memory.md` |
 | `s4_memory.rs` | `episodic-memory.md`, `sqlite-retrieval-patterns.md` |

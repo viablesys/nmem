@@ -187,13 +187,14 @@ fn annotate_episode(conn: &Connection, episode: &Episode) -> Result<WorkUnitRow,
         .collect::<Result<_, _>>()?
     };
 
-    // Phase signature: count by obs_type category
+    // Phase signature: use classifier labels (think/act) when available,
+    // fall back to obs_type heuristic for old unclassified observations.
     let (investigate, execute, failures) = {
         let mut stmt = conn.prepare(
-            "SELECT obs_type, COUNT(*) FROM observations
+            "SELECT phase, obs_type, COUNT(*) FROM observations
              WHERE session_id = ?1
                AND prompt_id >= ?2 AND prompt_id <= ?3
-             GROUP BY obs_type",
+             GROUP BY phase, obs_type",
         )?;
         let mut inv = 0i64;
         let mut exe = 0i64;
@@ -204,15 +205,18 @@ fn annotate_episode(conn: &Connection, episode: &Episode) -> Result<WorkUnitRow,
             episode.last_prompt_id,
         ])?;
         while let Some(row) = rows.next()? {
-            let obs_type: String = row.get(0)?;
-            let count: i64 = row.get(1)?;
-            match obs_type.as_str() {
-                "file_read" | "search" | "web_search" | "web_fetch" => inv += count,
-                "file_edit" | "file_write" | "git_commit" | "git_push" => exe += count,
-                "command" => {
-                    // Commands could be either — count as execute
-                    exe += count;
-                }
+            let phase: Option<String> = row.get(0)?;
+            let obs_type: String = row.get(1)?;
+            let count: i64 = row.get(2)?;
+            match phase.as_deref() {
+                Some("think") => inv += count,
+                Some("act") => exe += count,
+                // NULL phase: fall back to obs_type heuristic for old data
+                None => match obs_type.as_str() {
+                    "file_read" | "search" | "web_search" | "web_fetch" => inv += count,
+                    "file_edit" | "file_write" | "git_commit" | "git_push" | "command" => exe += count,
+                    _ => {}
+                },
                 _ => {}
             }
         }
@@ -686,8 +690,38 @@ mod tests {
         assert!(hot_files.contains(&"/src/handler.rs".to_string()));
 
         let phase: serde_json::Value = serde_json::from_str(&annotated.phase_signature).unwrap();
-        assert_eq!(phase["investigate"], 2); // 2 file_reads
-        assert_eq!(phase["execute"], 2); // 2 file_edits
+        assert_eq!(phase["investigate"], 2); // 2 file_reads (NULL phase → obs_type fallback)
+        assert_eq!(phase["execute"], 2); // 2 file_edits (NULL phase → obs_type fallback)
+    }
+
+    #[test]
+    fn annotate_uses_classifier_phase_over_obs_type() {
+        let conn = setup_db();
+        insert_session(&conn, "s1");
+
+        let p1 = insert_prompt(&conn, "s1", 1000, "investigate the auth module");
+
+        // file_read with phase="think" — classifier agrees with obs_type
+        insert_obs_with_prompt(&conn, "s1", p1, 1001, "file_read", Some("/src/auth.rs"));
+        // file_read with phase="act" — classifier overrides obs_type
+        // (e.g., reading a file to verify a fix is act, not think)
+        insert_obs_with_prompt(&conn, "s1", p1, 1002, "file_read", Some("/src/handler.rs"));
+        conn.execute("UPDATE observations SET phase = 'act' WHERE timestamp = 1002", []).unwrap();
+        // file_edit with phase="think" — classifier overrides obs_type
+        // (e.g., adding a debug print to investigate)
+        insert_obs_with_prompt(&conn, "s1", p1, 1003, "file_edit", Some("/src/auth.rs"));
+        conn.execute("UPDATE observations SET phase = 'think' WHERE timestamp = 1003", []).unwrap();
+        // command with no phase — falls back to obs_type (execute)
+        insert_obs_with_prompt(&conn, "s1", p1, 1004, "command", None);
+
+        let episodes = detect_episodes(&conn, "s1").unwrap();
+        let annotated = annotate_episode(&conn, &episodes[0]).unwrap();
+
+        let phase: serde_json::Value = serde_json::from_str(&annotated.phase_signature).unwrap();
+        // think: file_read(NULL→fallback) + file_edit(phase=think) = 2
+        // act: file_read(phase=act) + command(NULL→fallback) = 2
+        assert_eq!(phase["investigate"], 2);
+        assert_eq!(phase["execute"], 2);
     }
 
     #[test]

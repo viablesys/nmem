@@ -42,6 +42,19 @@ pub enum Command {
     Task(TaskArgs),
     /// Detect cross-session patterns and write learnings report
     Learn(LearnArgs),
+    /// Backfill phase classification for observations with NULL phase
+    Backfill(BackfillArgs),
+}
+
+#[derive(Parser)]
+pub struct BackfillArgs {
+    /// Batch size for commits (default 500)
+    #[arg(long, default_value = "500")]
+    pub batch_size: usize,
+
+    /// Dry run — show counts but don't update
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Parser)]
