@@ -151,6 +151,16 @@ pub struct QueueTaskParams {
     pub after: String,
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct CurrentStanceParams {
+    /// Optional session ID. Defaults to the most recent session.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// EMA alpha for smoothing (default 0.08). Lower = smoother.
+    #[serde(default)]
+    pub alpha: Option<f64>,
+}
+
 // --- Response types ---
 
 #[derive(Serialize)]
@@ -246,6 +256,56 @@ struct FileTouch {
     content_preview: String,
     prompt_content: Option<String>,
     is_pinned: bool,
+}
+
+#[derive(Serialize)]
+struct QuadrantCounts {
+    think_diverge: QuadrantEntry,
+    think_converge: QuadrantEntry,
+    act_diverge: QuadrantEntry,
+    act_converge: QuadrantEntry,
+}
+
+#[derive(Serialize)]
+struct QuadrantEntry {
+    count: i64,
+    pct: f64,
+}
+
+#[derive(Serialize)]
+struct CurrentSignal {
+    phase: f64,
+    scope: f64,
+    stance: String,
+}
+
+#[derive(Serialize)]
+struct TrendSignal {
+    phase_5: f64,
+    phase_20: f64,
+    scope_5: f64,
+    scope_20: f64,
+    phase_direction: String,
+    scope_direction: String,
+}
+
+#[derive(Serialize)]
+struct RecentShift {
+    at_observation: i64,
+    from: String,
+    to: String,
+    minutes_ago: f64,
+}
+
+#[derive(Serialize)]
+struct StanceResult {
+    session_id: String,
+    observation_count: i64,
+    quadrants: QuadrantCounts,
+    current: CurrentSignal,
+    trend: TrendSignal,
+    recent_shifts: Vec<RecentShift>,
+    guidance: String,
 }
 
 // --- Helpers ---
@@ -1011,6 +1071,251 @@ impl NmemServer {
             serde_json::to_string(&response).map_err(|e| db_err(&e))?,
         )]))
     }
+    pub fn do_current_stance(
+        &self,
+        params: CurrentStanceParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        let alpha = params.alpha.unwrap_or(0.08).clamp(0.01, 1.0);
+        let db = self.db.lock().map_err(|e| db_err(&e))?;
+
+        // 1. Resolve session
+        let session_id: String = if let Some(sid) = params.session_id {
+            sid
+        } else {
+            db.query_row(
+                "SELECT id FROM sessions ORDER BY started_at DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => ErrorData::new(
+                    ErrorCode::INVALID_PARAMS,
+                    "no sessions found",
+                    None,
+                ),
+                other => db_err(&other),
+            })?
+        };
+
+        // 2. Quadrant counts
+        let mut quad_stmt = db
+            .prepare(
+                "SELECT phase, scope, COUNT(*) FROM observations
+                 WHERE session_id = ?1 AND phase IS NOT NULL AND scope IS NOT NULL
+                 GROUP BY phase, scope",
+            )
+            .map_err(|e| db_err(&e))?;
+
+        let mut td: i64 = 0;
+        let mut tc: i64 = 0;
+        let mut ad: i64 = 0;
+        let mut ac: i64 = 0;
+
+        let mut rows = quad_stmt
+            .query(rusqlite::params![session_id])
+            .map_err(|e| db_err(&e))?;
+        while let Some(row) = rows.next().map_err(|e| db_err(&e))? {
+            let phase: String = row.get(0).map_err(|e| db_err(&e))?;
+            let scope: String = row.get(1).map_err(|e| db_err(&e))?;
+            let count: i64 = row.get(2).map_err(|e| db_err(&e))?;
+            match (phase.as_str(), scope.as_str()) {
+                ("think", "diverge") => td = count,
+                ("think", "converge") => tc = count,
+                ("act", "diverge") => ad = count,
+                ("act", "converge") => ac = count,
+                _ => {}
+            }
+        }
+        drop(rows);
+
+        let total = td + tc + ad + ac;
+        if total == 0 {
+            return Ok(CallToolResult::success(vec![Content::text(
+                serde_json::json!({
+                    "session_id": session_id,
+                    "observation_count": 0,
+                    "guidance": "No classified observations yet. Stance analysis requires phase and scope labels."
+                })
+                .to_string(),
+            )]));
+        }
+
+        let pct = |n: i64| (n as f64 / total as f64 * 100.0 * 10.0).round() / 10.0;
+
+        // 3. Full sequence for EMA
+        let mut seq_stmt = db
+            .prepare(
+                "SELECT phase, scope, timestamp FROM observations
+                 WHERE session_id = ?1 AND phase IS NOT NULL AND scope IS NOT NULL
+                 ORDER BY timestamp ASC",
+            )
+            .map_err(|e| db_err(&e))?;
+
+        struct ObsPoint {
+            phase_val: f64,  // -1 = think, +1 = act
+            scope_val: f64,  // -1 = diverge, +1 = converge
+            timestamp: i64,
+        }
+
+        let points: Vec<ObsPoint> = seq_stmt
+            .query_map(rusqlite::params![session_id], |row| {
+                let phase: String = row.get(0)?;
+                let scope: String = row.get(1)?;
+                let timestamp: i64 = row.get(2)?;
+                Ok(ObsPoint {
+                    phase_val: if phase == "act" { 1.0 } else { -1.0 },
+                    scope_val: if scope == "converge" { 1.0 } else { -1.0 },
+                    timestamp,
+                })
+            })
+            .map_err(|e| db_err(&e))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| db_err(&e))?;
+
+        // 4. Compute EMA over full sequence
+        let mut ema_phase = points[0].phase_val;
+        let mut ema_scope = points[0].scope_val;
+        // Store EMA values for shift detection
+        let mut ema_history: Vec<(f64, f64, i64)> = Vec::with_capacity(points.len());
+        ema_history.push((ema_phase, ema_scope, points[0].timestamp));
+
+        for p in &points[1..] {
+            ema_phase = alpha * p.phase_val + (1.0 - alpha) * ema_phase;
+            ema_scope = alpha * p.scope_val + (1.0 - alpha) * ema_scope;
+            ema_history.push((ema_phase, ema_scope, p.timestamp));
+        }
+
+        // 5. Short/medium window averages
+        let n = points.len();
+        let avg = |vals: &[ObsPoint], count: usize, f: fn(&ObsPoint) -> f64| -> f64 {
+            let start = if vals.len() > count { vals.len() - count } else { 0 };
+            let slice = &vals[start..];
+            if slice.is_empty() {
+                return 0.0;
+            }
+            slice.iter().map(&f).sum::<f64>() / slice.len() as f64
+        };
+
+        let phase_5 = avg(&points, 5, |p| p.phase_val);
+        let phase_20 = avg(&points, 20, |p| p.phase_val);
+        let scope_5 = avg(&points, 5, |p| p.scope_val);
+        let scope_20 = avg(&points, 20, |p| p.scope_val);
+
+        let direction = |short: f64, medium: f64, pos_label: &str, neg_label: &str| -> String {
+            let diff = short - medium;
+            if diff.abs() < 0.2 {
+                "stable".to_string()
+            } else if diff > 0.0 {
+                format!("shifting_{pos_label}")
+            } else {
+                format!("shifting_{neg_label}")
+            }
+        };
+
+        let phase_direction = direction(phase_5, phase_20, "act", "think");
+        let scope_direction = direction(scope_5, scope_20, "converge", "diverge");
+
+        // Stance label from current EMA
+        let stance = match (ema_phase >= 0.0, ema_scope >= 0.0) {
+            (true, true) => "act+converge",
+            (true, false) => "act+diverge",
+            (false, true) => "think+converge",
+            (false, false) => "think+diverge",
+        };
+
+        // 6. Detect recent scope zero-crossings (last 50 observations)
+        let now_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let mut recent_shifts: Vec<RecentShift> = Vec::new();
+        let scan_start = n.saturating_sub(50);
+        for i in (scan_start + 1)..n {
+            let prev_scope = ema_history[i - 1].1;
+            let curr_scope = ema_history[i].1;
+            // Zero crossing in scope dimension
+            if (prev_scope >= 0.0) != (curr_scope >= 0.0) {
+                let prev_phase = ema_history[i - 1].0;
+                let curr_phase = ema_history[i].0;
+                let from_stance = match (prev_phase >= 0.0, prev_scope >= 0.0) {
+                    (true, true) => "act+converge",
+                    (true, false) => "act+diverge",
+                    (false, true) => "think+converge",
+                    (false, false) => "think+diverge",
+                };
+                let to_stance = match (curr_phase >= 0.0, curr_scope >= 0.0) {
+                    (true, true) => "act+converge",
+                    (true, false) => "act+diverge",
+                    (false, true) => "think+converge",
+                    (false, false) => "think+diverge",
+                };
+                let minutes_ago =
+                    ((now_ts - ema_history[i].2) as f64 / 60.0 * 10.0).round() / 10.0;
+                recent_shifts.push(RecentShift {
+                    at_observation: i as i64,
+                    from: from_stance.to_string(),
+                    to: to_stance.to_string(),
+                    minutes_ago,
+                });
+            }
+        }
+        // Keep only last 5 shifts
+        if recent_shifts.len() > 5 {
+            let drain_to = recent_shifts.len() - 5;
+            recent_shifts.drain(..drain_to);
+        }
+
+        // 7. Compute guidance
+        let guidance = if scope_5 < 0.0 && scope_20 > 0.0 {
+            "Scope shifting toward diverge — new work unit may be starting. Check `session_summaries` for prior `next_steps`. Run `file_history` on new files before editing.".to_string()
+        } else if ema_phase < -0.5 {
+            "Deep investigation phase. Search nmem for prior conclusions before re-deriving — `search` for the topic or `session_summaries` for `learned` entries.".to_string()
+        } else if ema_phase > 0.5
+            && ema_scope > 0.5
+            && phase_direction == "stable"
+            && scope_direction == "stable"
+        {
+            "Focused implementation run. Stance is stable — no retrieval action needed unless you encounter an unfamiliar file.".to_string()
+        } else if (scope_5 > 0.0) != (scope_20 > 0.0) {
+            if scope_5 < 0.0 {
+                "Scope reversal detected (entering diverge). Check prior `next_steps` via `session_summaries`. Run `file_history` on new files.".to_string()
+            } else {
+                "Scope reversal detected (entering converge). Verify approach wasn't previously abandoned — `search` for the pattern name.".to_string()
+            }
+        } else {
+            "Mixed stance. No strong retrieval signal — use judgment.".to_string()
+        };
+
+        let result = StanceResult {
+            session_id,
+            observation_count: total,
+            quadrants: QuadrantCounts {
+                think_diverge: QuadrantEntry { count: td, pct: pct(td) },
+                think_converge: QuadrantEntry { count: tc, pct: pct(tc) },
+                act_diverge: QuadrantEntry { count: ad, pct: pct(ad) },
+                act_converge: QuadrantEntry { count: ac, pct: pct(ac) },
+            },
+            current: CurrentSignal {
+                phase: (ema_phase * 100.0).round() / 100.0,
+                scope: (ema_scope * 100.0).round() / 100.0,
+                stance: stance.to_string(),
+            },
+            trend: TrendSignal {
+                phase_5: (phase_5 * 100.0).round() / 100.0,
+                phase_20: (phase_20 * 100.0).round() / 100.0,
+                scope_5: (scope_5 * 100.0).round() / 100.0,
+                scope_20: (scope_20 * 100.0).round() / 100.0,
+                phase_direction,
+                scope_direction,
+            },
+            recent_shifts,
+            guidance,
+        };
+
+        let json = serde_json::to_string(&result).map_err(|e| db_err(&e))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
 }
 
 // --- MCP tool wrappers (delegate to do_* methods) ---
@@ -1151,6 +1456,20 @@ impl NmemServer {
         let start = std::time::Instant::now();
         let result = self.do_queue_task(p.0);
         record_query_metrics("queue_task", start);
+        result
+    }
+
+    #[tool(
+        description = "Returns the current session's stance (phase × scope) with trend analysis and retrieval guidance. Call this periodically to orient your retrieval strategy. The `guidance` field tells you what nmem tools to use based on your current cognitive trajectory. When scope trends toward diverge, prior sessions' next_steps become relevant. When in deep think, search for prior conclusions. When in sustained act+converge, no retrieval action needed unless encountering new files.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn current_stance(
+        &self,
+        p: Parameters<CurrentStanceParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let start = std::time::Instant::now();
+        let result = self.do_current_stance(p.0);
+        record_query_metrics("current_stance", start);
         result
     }
 }

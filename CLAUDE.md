@@ -133,6 +133,7 @@ Sections: `[filter]` (secret patterns, entropy), `[projects.<name>]` (sensitivit
 | VictoriaMetrics | 8428 | OTLP metrics ingestion (Prometheus-compatible) |
 | VictoriaLogs | 9428 | Structured log ingestion (jsonline) — session summaries streamed here |
 | Grafana | 3000 | Dashboard at `nmem-memory-pipeline` UID, auth `admin:admin` |
+| viz | 37778 | Local visualization server (`~/workspace/viz/viz.py`) — POST plotly/mermaid/graphviz/markdown/svg/html to `/api/vizs`, real-time SSE, Python stdlib only |
 
 LM Studio must have a model loaded for summarization to work. Default: `ibm/granite-4-h-tiny`. All services are localhost, all streaming is non-fatal (failures don't block hooks).
 
@@ -205,16 +206,68 @@ Observation classification vocabulary. Bash commands are sub-classified by `clas
 | `mcp_call` | `*__*` tools | External tool |
 | `tool_other` | Unknown tools | Uncategorized |
 
+## Stance (phase × scope)
+
+Every observation is classified on two orthogonal dimensions at write time:
+
+- **Phase**: `think` (reasoning, investigating) vs `act` (editing, committing, executing)
+- **Scope**: `diverge` (exploring, broadening) vs `converge` (narrowing, completing)
+
+Together these form four **stance** quadrants:
+
+| Stance | Character | Typical obs_types |
+|--------|-----------|-------------------|
+| think+diverge | Exploring, investigating | file_read, search, web_search |
+| think+converge | Reasoning toward solution | command (builds/tests), search (targeted) |
+| act+diverge | Executing exploratory work | file_edit (refactoring), task_spawn |
+| act+converge | Executing toward solution | file_edit (implementation), git_commit, git_push |
+
+### Observed distributions
+
+Across 3000+ observations: act+diverge 41%, act+converge 34%, think+diverge 14%, think+converge 11%. Sessions are act-heavy — the agent spends most time executing. The scope dimension oscillates more than phase, reflecting investigation/implementation cycles within a session.
+
+### Session stance analysis
+
+A session's stance trajectory reveals its cognitive rhythm. EMA-smoothed (alpha≈0.08) phase and scope signals over the observation sequence show:
+
+- **Sustained act+converge plateaus** — focused implementation runs
+- **Dips into think+diverge** — investigation phases, design decisions, debugging
+- **Scope oscillation** — the agent alternates between broadening (search, read) and narrowing (edit, commit) more frequently than it shifts between think and act
+- **Stance shifts correlate with episode boundaries** — a shift from converge to diverge often marks a new unit of work
+
+Query stance data for a session:
+```sql
+SELECT phase, scope, obs_type, COUNT(*) as n
+FROM observations
+WHERE session_id = '<id>' AND phase IS NOT NULL AND scope IS NOT NULL
+GROUP BY phase, scope, obs_type ORDER BY n DESC;
+```
+
 ## Using nmem (the feedback loop)
 
 nmem is recording this session. It also contains observations and session summaries from all previous sessions on this project. **Use it before re-deriving solutions.**
 
-### When to query nmem
+### Retrieval triggers
 
-- **Before investigating a bug** — search for past failures on the same file or module. Previous sessions may have already diagnosed and fixed similar issues.
-- **Before making a design decision** — search for past `learned` entries in session summaries. Decisions, trade-offs, and conclusions from prior sessions should not be re-derived.
-- **When picking up unfamiliar code** — use `recent_context` or `session_summaries` to see what recent sessions did and why.
-- **When a build or test fails unexpectedly** — search for past failures with the same error pattern. The fix may already be in the observation history.
+The automatic context injection at session start provides baseline continuity. But passive injection is not enough — the agent must actively query nmem at specific decision points. The rules below are keyed to stance transitions and task types. **Treat these as mandatory, not advisory.**
+
+#### Stance-triggered retrieval
+
+| Trigger | What to do | Tool |
+|---------|-----------|------|
+| **Entering think+diverge on an unfamiliar file** | Check if prior sessions touched this file and why | `file_history` |
+| **Entering think+diverge on a design question** | Search for prior `learned` entries on the topic — decisions should not be re-derived | `session_summaries` + read `learned` fields |
+| **Entering think+converge after investigation** | Before committing to an approach, check if prior sessions tried and abandoned it | `search` for the approach/pattern name |
+| **Build or test failure** | Search for the error pattern — the fix may already be in history | `search` filtered to `command` obs_type |
+| **First edit to a module this session** | Check recent context for that file — what was the last session's intent? | `file_history` or `recent_context` |
+| **Scope shift: converge→diverge** | A new unit of work is starting — check if prior sessions left `next_steps` relevant to this direction | `session_summaries` |
+| **Periodic orientation** | Check your cognitive trajectory and get prescriptive retrieval guidance | `current_stance` |
+
+#### The rule of first contact
+
+When you encounter a file, module, or concept for the first time in a session, **query before acting**. The cost of one tool call is negligible compared to re-deriving a conclusion that a prior session already reached. The automatic context injection covers recent work but cannot anticipate every relevant prior decision.
+
+This is the encoding specificity principle applied: memories are indexed by their context (files, errors, intent). The retrieval cue is the current situation. If you don't query, the relevant memory exists but cannot surface.
 
 ### Available MCP tools
 
@@ -231,6 +284,7 @@ These are live during the session via the nmem MCP server:
 | `session_trace` | Drill into a session's prompts and observations in order. |
 | `file_history` | Trace a file's history across sessions with intent context. |
 | `queue_task` | Queue a task for later dispatch into a tmux Claude Code session (S4). |
+| `current_stance` | Returns the current session's stance (phase × scope) with trend analysis and retrieval guidance. Call periodically to orient retrieval strategy. |
 
 ### Query patterns
 
@@ -246,11 +300,19 @@ session_summaries filtered to this project, then read `learned` fields
 
 # What files were hot in recent sessions?
 recent_context shows file_path with scores
+
+# What happened to this file across sessions?
+file_history: "src/s4_context.rs"
+
+# What's my current cognitive trajectory?
+current_stance — returns quadrant counts, EMA trend, and retrieval guidance
 ```
 
 ### The principle
 
-nmem captures what you do. Episodes compress recent work into intent-driven units with phase character and hot files. Session summaries compress older sessions. Context injection feeds both back: episodes for the last 48 hours, session summaries as fallback for older sessions. Suggested tasks surface `next_steps` from summaries and episode narratives. **Targeted queries are more powerful than passive injection** — when you have a specific question, search for it rather than hoping it was injected.
+nmem captures what you do. Episodes compress recent work into intent-driven units with stance character and hot files. Session summaries compress older sessions. Context injection feeds both back: episodes for the last 48 hours, session summaries as fallback for older sessions. Suggested tasks surface `next_steps` from summaries and episode narratives.
+
+**Targeted queries are more powerful than passive injection.** The retrieval triggers above exist because the gap between "tools available" and "tools used" is where memory fails. A prior session may have spent 30 minutes reaching a conclusion that one `search` call would surface. The agent that doesn't query pays the full cost again.
 
 ## Conventions
 
