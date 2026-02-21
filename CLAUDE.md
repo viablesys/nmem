@@ -73,7 +73,7 @@ No daemon. Four process modes:
 ```
 SessionStart → create session row, inject context into stdout
                Context: intents → episodes (within 48h window) → fallback summaries (older) → suggested tasks → obs table
-PostToolUse  → extract observation from tool_input/tool_response, classify phase (think/act), dedup, write
+PostToolUse  → extract observation from tool_input/tool_response, classify phase (think/act) + scope (converge/diverge), extract git metadata (commit/push), dedup, write, stream to VictoriaLogs
 Stop         → mark session ended, compute signature, detect episodes, summarize, WAL checkpoint
 ```
 
@@ -86,7 +86,7 @@ Files are prefixed by VSM layer: `s1_` (Operations), `s1_4_` (S1's S4), `s3_` (C
 | `main.rs` | infra | CLI dispatch, `run()` entry point |
 | `cli.rs` | infra | clap derive definitions only |
 | `db.rs` | infra | `open_db()`, SQLCipher key management, PRAGMAs |
-| `schema.rs` | infra | `rusqlite_migration` definitions (7 migrations) |
+| `schema.rs` | infra | `rusqlite_migration` definitions (9 migrations) |
 | `metrics.rs` | infra | Optional OTLP metrics export |
 | `status.rs` | infra | Status reporting |
 | `s1_record.rs` | S1 | Hook stdin → JSON → observation extraction + phase classification + storage |

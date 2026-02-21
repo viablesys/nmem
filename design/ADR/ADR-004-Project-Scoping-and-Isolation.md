@@ -154,11 +154,15 @@ Rationale:
 
 The database remains `~/.nmem/nmem.db` as established in ADR-001. The `project` column and `idx_obs_project` index from ADR-002 are the isolation mechanism.
 
+> **[ANNOTATION 2026-02-21, v1.2]:** The `project` column exists on the `sessions` table, not on `observations`. There is no `idx_obs_project` index. Observations are scoped to a project by joining through `sessions` via `session_id`. This means project-filtered queries on observations require a join, but the pattern works correctly throughout the codebase (context injection, search, recent_context all join through sessions). See ADR-002 v2.5 annotation for details.
+
 ## Project Identity
 
 How `cwd` becomes a `project` value. This is the normalization question — the same project can be opened from different paths (symlinks, home dir variations), and the identity must be stable.
 
 ### Resolution strategy (ordered by precedence):
+
+> **[ANNOTATION 2026-02-21, v1.2]:** The resolution strategy below was the design; the implementation diverged significantly. The actual `derive_project()` in `s5_project.rs` uses a simpler approach: it strips `$HOME` and skips known directory prefixes (`workspace`, `dev`, `viablesys`, `forge`), returning the first non-skipped path component as the project name. There is no `.nmem.toml` per-project config file, no `git rev-parse` subprocess, and no `canonicalize()` call. The global config at `~/.nmem/config.toml` does support per-project settings via `[projects.<name>]` sections, but project identity is derived purely from the cwd path, not from any of the three resolution methods described below. The precedence chain (explicit config > git root > canonical cwd) remains a valid design direction but is not implemented.
 
 1. **Explicit config**: A `.nmem.toml` in the project root. Checked first. Allows user override and handles edge cases (monorepos, unusual directory structures).
 
@@ -249,6 +253,8 @@ struct NmemServer {
 }
 ```
 
+> **[ANNOTATION 2026-02-21, v1.2]:** The actual `NmemServer` struct has `db: Arc<Mutex<Connection>>` and `tool_router: ToolRouter<Self>`. There is no `project` field. The MCP server does not cache or resolve the current project at startup. Instead, the `project` parameter is optional on all MCP tool calls — the caller (Claude Code) passes it explicitly or omits it for cross-project queries. This is a simpler approach than the design described here but means the server has no default project scope.
+
 ### Current model (Position A, no visibility tiers)
 
 All observations are stored with a `project` field. Query-time decisions:
@@ -288,6 +294,8 @@ This is not designed now. The schema supports it (NULL-able `project` on `synthe
 Observations frequently reference file paths (from Read, Write, Edit, Grep, Glob tool calls). How these are stored affects portability.
 
 ### Decision: project-relative paths
+
+> **[ANNOTATION 2026-02-21, v1.2]:** This decision was not implemented. The actual `extract_file_path()` in `s1_extract.rs` stores file paths exactly as provided by the tool call — typically absolute paths (e.g., `/home/bpd/workspace/nmem/src/main.rs`). There is no `normalize_path()` function or path relativization logic. The rationale for relative paths (portability, stability across moves) remains valid but was traded for implementation simplicity. Queries and context injection work with the absolute paths as stored.
 
 Store file paths relative to the project root, not absolute.
 
@@ -377,3 +385,4 @@ Add visibility tiers (Position C) when:
 | 2026-02-14 | 1.0 | Full ADR. Three positions (single DB, per-project DBs, visibility tiers). Adversarial analysis. Decision: single database with row-level project scoping. Project identity resolution (git root, explicit config, canonical cwd). Cross-project observation model. Relative path storage. |
 | 2026-02-14 | 1.1 | Refined. Added git subprocess caching note. MCP server project awareness (resolve once at startup). `.nmem.toml` minimal schema. Cross-ADR defaulting convention aligned with ADR-006. |
 | 2026-02-14 | 1.2 | Refined with library topics. Added `read_nmem_config` implementation (serde + toml). References updated: rusqlite.md, rmcp.md, claude-code-hooks-events.md, ADR-006. |
+| 2026-02-21 | 1.3 | Annotated against current codebase. Major divergences: (1) project resolution uses simple path prefix stripping in `s5_project.rs`, not the designed .nmem.toml/git/canonicalize chain; (2) `project` column is on `sessions` only, not `observations`; (3) file paths stored absolute, not project-relative; (4) NmemServer has no `project` field — project is caller-supplied per query. |

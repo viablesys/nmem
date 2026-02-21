@@ -42,6 +42,8 @@ Every observation is derived from deterministic parsing of tool calls and their 
 - Session boundaries (start/end, duration, working directory)
 - User-declared intent — from the initial prompt (literal text, no interpretation)
 
+> **[ANNOTATION 2026-02-21, v2.4]:** "Commit messages and diffs" is now implemented. `extract_git_metadata()` parses git stdout for commit hash, message, branch, and diffstat (files changed, insertions, deletions, new files). Commit messages are curated intent summaries — the highest value-to-size signal in the observation stream. Diffstat provides co-change sets (which files change together), partially addressing the "Connections between actions" gap listed below: commit-scoped file groupings reveal structural relationships without LLM inference.
+
 **What is lost:**
 - *Why* a file was read (intent behind the action)
 - Connections between actions (this error led to that fix)
@@ -178,6 +180,9 @@ Every observation has these fields:
 | `timestamp` | INTEGER NOT NULL | `unixepoch()` at capture |
 | `session_id` | TEXT NOT NULL | Hook common field |
 | `project` | TEXT NOT NULL | Derived from `cwd` |
+
+> **[ANNOTATION 2026-02-21, v2.4]:** The `project` column does not exist on the `observations` table in the implemented schema. Project is stored on the `sessions` table only; observations inherit their project via `session_id` foreign key join. Queries that filter by project use `JOIN sessions ON observations.session_id = sessions.id WHERE sessions.project = ?`. The `idx_obs_project` index referenced later in ADR-004 also does not exist.
+
 | `obs_type` | TEXT NOT NULL | Derived from tool/event (see Q4) |
 | `source_event` | TEXT NOT NULL | `hook_event_name` |
 | `tool_name` | TEXT | From PostToolUse (NULL for non-tool events) |
@@ -236,6 +241,8 @@ CREATE INDEX idx_obs_type ON observations(obs_type);
 CREATE INDEX idx_obs_timestamp ON observations(timestamp DESC);
 CREATE INDEX idx_obs_file_path ON observations(file_path);
 
+> **[ANNOTATION 2026-02-21, v2.4]:** The implemented schema (in `schema.rs`) differs from this Q3 design in several ways: (1) `project` column is NOT on `observations` — project lives on `sessions` only; (2) no `created_at` column exists; (3) `idx_obs_project` was never created; (4) `idx_obs_timestamp` does not exist — timestamp is part of composite indexes instead; (5) the `observations` table gained `is_pinned`, `phase`, `classifier_run_id`, `scope`, and `scope_run_id` columns via later migrations. The `syntheses` table below was also never created — session summaries use `sessions.summary` column instead (as noted in the v2.3 annotation on the Decision section).
+
 -- Future: S4 synthesis (Position C, when earned)
 CREATE TABLE syntheses (
     id INTEGER PRIMARY KEY,
@@ -267,6 +274,8 @@ Yes. Each source has its own extractor, but all produce the same observation sch
 | Stop | Session boundary marker | `session_end` | Duration derived from first/last timestamps |
 
 See `claude-code-hooks-events.md` in the library for complete field schemas per event. All sources produce observations — Q2 resolved: store everything, dedup handles noise.
+
+> **[ANNOTATION 2026-02-21, v2.4]:** The table shows `tool_response` used only for Bash exit codes, but `git_commit` and `git_push` now extract structured metadata from successful `tool_response` too. Previously, `tool_response` was discarded entirely on success. Parsed fields go into the `metadata` JSON column — no verbatim storage. See the Position A annotation above for what's extracted.
 
 ### Q5: What volume should we actually design for? — RESOLVED
 
@@ -331,3 +340,5 @@ Do **not** add LLM synthesis preemptively. The predecessor proved that premature
 | 2026-02-14 | 2.1 | Resolved Q2 (store everything, filter at retrieval) and Q5 (volume estimates updated for unfiltered capture). All open questions now resolved. |
 | 2026-02-14 | 2.2 | Annotated with live production data. Thinking blocks partially close the "What is lost" gap for Position A — agent reasoning provides inline intent/decision capture without LLM extraction. Volume estimates annotated: real rate is ~585K records/year (~652 MB) due to thinking block density (2.9x per user prompt, 84% of content volume). |
 | 2026-02-15 | 2.3 | Annotated Decision and When to Reconsider sections with S1's S4 implementation learnings. Position A → partial Position C transition: session summarization uses local LLM (granite-4-h-tiny) at session end, synthesizing over structured records. Trigger was parity gap (narrative coherence), not the listed retrieval criteria. Storage uses `sessions.summary` column, not Q3's `syntheses` table. |
+| 2026-02-21 | 2.4 | Annotated Position A with git metadata delivery. `extract_git_metadata()` parses `tool_response` on success for `git_commit` (commit hash, message, branch, diffstat, new files) and `git_push` (remote URL, hash range, branch) — stored in `metadata` JSON column. Previously `tool_response` was discarded on success. Commit messages provide curated intent; diffstat provides co-change sets, partially closing the "Connections between actions" gap. Q4 annotation updated to reflect `tool_response` extraction beyond failure cases. |
+| 2026-02-21 | 2.5 | Annotated Q1 and Q3 schemas against implemented schema in `schema.rs`. Key divergence: `project` column lives on `sessions` only, not on `observations`. No `created_at`, `idx_obs_project`, or `idx_obs_timestamp` in the actual schema. `syntheses` table was never created. |

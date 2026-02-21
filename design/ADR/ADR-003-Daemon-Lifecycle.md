@@ -213,6 +213,8 @@ struct HookPayload {
 }
 ```
 
+> **[ANNOTATION 2026-02-21, v1.6]:** The actual `HookPayload` in `s1_record.rs` has `tool_response: Option<serde_json::Value>` (not `Option<String>`). It also includes additional fields: `transcript_path: Option<String>`, `source: Option<String>` (for SessionStart), and `prompt: Option<String>` (for UserPromptSubmit). All fields except `session_id` use `#[serde(default)]` for robustness against missing fields in hook JSON.
+
 Tool-specific extraction uses the sibling-field dispatch pattern (see `serde-json.md` § 3, "Sibling-Field Dispatch"): match on `tool_name`, then extract typed fields from the `Value` with `.get()` / `as_str()`. No need for full typed input structs at launch — add them if validation errors become a problem.
 
 ### MCP Server
@@ -230,6 +232,8 @@ let conn = Connection::open_with_flags(&db_path,
 let server = NmemServer::new(conn);
 server.serve(rmcp::transport::stdio()).await?.waiting().await?;
 ```
+
+> **[ANNOTATION 2026-02-21, v1.6]:** The actual `NmemServer` struct in `s1_serve.rs` wraps the connection as `Arc<Mutex<Connection>>` (aliased as `DbHandle`), not a bare `Connection`. It has two fields: `db: DbHandle` and `tool_router: ToolRouter<Self>`. Notably, there is no `project: String` field — the MCP server does not cache the current project at startup, contrary to ADR-004's description. The tool set has also expanded beyond the three listed: the server exposes `search`, `get_observations`, `recent_context`, `session_summaries`, `timeline`, `file_history`, `session_trace`, `regenerate_context`, and `queue_task`.
 
 The server struct holds the read-only connection and exposes tools: `search` (FTS5 query → ranked results), `get_observations` (IDs → full details), `recent_context` (→ session start context). See `rmcp.md` for tool definitions, server state, and stdio transport lifecycle.
 
@@ -313,6 +317,8 @@ enum Command {
     Maintain,
 }
 ```
+
+> **[ANNOTATION 2026-02-21, v1.6]:** The enum above has two issues: (1) `Maintain` appears twice (duplicate entry), and (2) the actual `Command` enum in `cli.rs` has grown significantly. Current subcommands: `Record`, `Serve`, `Purge`, `Maintain`, `Status`, `Search`, `Encrypt`, `Pin`, `Unpin`, `Context`, `Queue`, `Dispatch`, `Task`, `Learn`, `Backfill`, `BackfillScope`. The `Encrypt` subcommand reflects the resolved encryption decision (ADR-001). `Queue`/`Dispatch`/`Task` support S4 task dispatch. `Learn` runs cross-session pattern detection. `Backfill`/`BackfillScope` apply S2 classifiers to historical data.
 
 Hook configuration points to `nmem record`, MCP config to `nmem serve`. Database path follows precedence: `--db` flag > `NMEM_DB` env var > `~/.nmem/nmem.db` default. See `clap.md` for derive API details.
 
@@ -405,3 +411,4 @@ The architecture supports adding a daemon later — the database is the coordina
 | 2026-02-14 | 1.4 | Added session signatures — event type distribution computed at session end for retrieval filtering, dedup tuning, and context injection. Derived from capture data analysis (684 events, 7 sessions). |
 | 2026-02-14 | 1.5 | Added `Maintain` subcommand to clap enum. Implements explicit trigger for maintenance operations (incremental vacuum, WAL checkpoint, FTS integrity check, optional FTS rebuild via `--rebuild-fts`). Completes the "opportunistic maintenance" story — hooks run maintenance inline, `nmem maintain` provides the manual escape hatch. |
 | 2026-02-14 | 1.6 | Added `Status` subcommand — read-only health check (DB/WAL size, observation/prompt/session counts, top-5 obs_type breakdown, last session). Completes all planned subcommands from Q1. |
+| 2026-02-21 | 1.7 | Annotated against current codebase. Corrected HookPayload (tool_response is Value not String, additional fields). Noted duplicate Maintain in clap enum. Documented expanded subcommands (16 total). Corrected NmemServer struct (Arc<Mutex<Connection>>, no project field, expanded tool set). |

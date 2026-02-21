@@ -3,6 +3,8 @@
 ## Status
 Draft
 
+> **[ANNOTATION 2026-02-21, v0.3]:** Episode detection is fully implemented in `s4_memory.rs` — boundary detection, annotation, narrative generation via local LLM, and storage in `work_units` table. Episodes feed context injection in `s4_context.rs` (48h window with fallback summaries for older sessions). Status should be updated to Accepted.
+
 ## Framing
 *How does nmem identify work units (episodes) within a session, and where does the boundary signal come from?*
 
@@ -168,6 +170,8 @@ for each user prompt in session:
         keywords = intent_keywords(prompt)
         similarity = jaccard(keywords, current_episode_keywords)
         if similarity < threshold (0.3):
+> **[ANNOTATION 2026-02-21, v0.3]:** Implementation uses `BOUNDARY_THRESHOLD = 0.15`, not 0.3. The lower threshold was chosen because intra-session prompts are shorter and more varied than inter-session intents, and the keyword bag grows as prompts accumulate (`s4_memory.rs` line 10).
+
             close current episode
             open new episode with these keywords
         else:
@@ -240,6 +244,8 @@ FROM prompts p
 WHERE p.source = 'user';
 ```
 
+> **[ANNOTATION 2026-02-21, v0.3]:** The implemented view in `s4_memory.rs::ensure_view()` omits `gap_seconds`. The view computes only `word_count`. Gap-based threshold adjustment was not implemented — boundary detection uses only Jaccard similarity on keyword bags.
+
 S4 creates this view at initialization. `schema.rs` remains ignorant of S4's concerns. The view is the channel; the `work_units` table is S4's own state.
 
 ### Schema
@@ -264,6 +270,8 @@ CREATE TABLE work_units (
 
 This is the same schema as ADR-009 Q2 but with `first_prompt_id`/`last_prompt_id` replacing `source_obs_range` — because the episode is defined by prompts, not observations.
 
+> **[ANNOTATION 2026-02-21, v0.3]:** The schema is implemented as shown (migration 6 in `schema.rs`). However, `learned` and `notes` columns are never populated. The LLM prompt requests these fields, but the response is stored as a single `summary` TEXT blob via `store_narrative()`. The structured fields exist in the schema but are unused — narrative JSON is not parsed into separate columns.
+
 ## Open Questions
 
 ### Q1: When does detection run?
@@ -275,6 +283,8 @@ Three options:
 
 Position: **UserPromptSubmit for boundary detection, Stop for annotation.** Detect the boundary when the prompt arrives (the signal is in the text, no observation data needed). Annotate with observation metadata at session end. This separates the fast path (boundary detection = keyword comparison) from the slow path (annotation = SQL aggregation + optional LLM).
 
+> **[ANNOTATION 2026-02-21, v0.3]:** Resolved differently than the stated position. Implementation runs both boundary detection and annotation at Stop time (`s1_record.rs::handle_stop` calls `s4_memory::detect_and_narrate_episodes`). No UserPromptSubmit-time detection was implemented. This is simpler and avoids partial-episode state between hook invocations.
+
 ### Q2: How do episodes feed context injection?
 
 Current context injection (SessionStart) uses session summaries — one per session. Episodes are finer-grained. Options:
@@ -283,6 +293,8 @@ Current context injection (SessionStart) uses session summaries — one per sess
 - **Hybrid: inject the last N episodes from the most recent session, plus session summaries for older sessions.** Recent work at episode resolution, older work at session resolution.
 
 Deferred until episodes are generating data.
+
+> **[ANNOTATION 2026-02-21, v0.3]:** Resolved as hybrid (option 3). `s4_context.rs` injects episodes from sessions within a configurable window (`context_episode_window_hours`, default 48h), with session summaries as fallback for older sessions. Suggested tasks are surfaced from both episode narratives and session summary `next_steps`.
 
 ### Q3: What about automated sessions?
 
@@ -330,3 +342,4 @@ The LLM is not optional — the narrative is what makes an episode a story rathe
 |------|---------|---------|
 | 2026-02-18 | 0.1 | Initial draft. Reframes work unit detection from observation-driven (ADR-009 design) to prompt-driven (user intent). VSM recursion analysis: user as external viable system, agent as user's S1. Two positions evaluated, Position B (prompt-driven) accepted. Detection algorithm, schema, s3_learn integration, 4 open questions. |
 | 2026-02-18 | 0.2 | Episodes are stories. Reframes observation data from post-hoc annotation to the middle of the narrative. The episode is a dialogue — user prompts directing, agent prompts explaining, observations recording actions. LLM narrative generation is constitutive, not optional. Q4 restructured from "should we?" to "how?". Session summaries can compose from episode narratives. |
+| 2026-02-21 | 0.3 | Annotated with implementation status. Episode detection fully implemented in `s4_memory.rs` — status should be Accepted. Boundary threshold 0.3→0.15 in practice. `gap_seconds` view column not implemented. `learned`/`notes` columns exist but unused (narrative stored as single `summary` blob). Q1 resolved differently: detection runs at Stop, not UserPromptSubmit. Q2 resolved as hybrid: episodes within configurable window + session summaries as fallback. |

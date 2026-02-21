@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 /// Classify a tool name into an observation type.
 /// For Bash commands, pass the command string to sub-classify git operations.
@@ -138,6 +138,101 @@ pub fn extract_file_path(name: &str, tool_input: &Value) -> Option<String> {
     }
 }
 
+/// Extract structured metadata from git commit/push tool_response.
+/// Returns a map with commit_hash, commit_message, branch, diffstat fields.
+pub fn extract_git_metadata(obs_type: &str, tool_response: &str) -> Map<String, Value> {
+    let mut meta = Map::new();
+    match obs_type {
+        "git_commit" => parse_git_commit_response(tool_response, &mut meta),
+        "git_push" => parse_git_push_response(tool_response, &mut meta),
+        _ => {}
+    }
+    meta
+}
+
+fn parse_git_commit_response(response: &str, meta: &mut Map<String, Value>) {
+    for line in response.lines() {
+        let line = line.trim();
+        // [branch hash] Commit message
+        if line.starts_with('[') {
+            if let Some(bracket_end) = line.find(']') {
+                let inside = &line[1..bracket_end];
+                // "branch hash" or "branch (root-commit) hash"
+                let parts: Vec<&str> = inside.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    meta.insert("branch".into(), Value::String(parts[0].into()));
+                    meta.insert(
+                        "commit_hash".into(),
+                        Value::String(parts.last().unwrap().to_string()),
+                    );
+                }
+                let message = line[bracket_end + 1..].trim().to_string();
+                if !message.is_empty() {
+                    meta.insert("commit_message".into(), Value::String(message));
+                }
+            }
+        }
+        // N files changed, X insertions(+), Y deletions(-)
+        if line.contains("changed") && (line.contains("insertion") || line.contains("deletion")) {
+            let mut files = 0u32;
+            let mut ins = 0u32;
+            let mut del = 0u32;
+            let words: Vec<&str> = line.split_whitespace().collect();
+            for (i, w) in words.iter().enumerate() {
+                if i > 0 {
+                    if w.starts_with("file") {
+                        files = words[i - 1].parse().unwrap_or(0);
+                    } else if w.starts_with("insertion") {
+                        ins = words[i - 1].parse().unwrap_or(0);
+                    } else if w.starts_with("deletion") {
+                        del = words[i - 1].parse().unwrap_or(0);
+                    }
+                }
+            }
+            meta.insert("files_changed".into(), Value::Number(files.into()));
+            meta.insert("insertions".into(), Value::Number(ins.into()));
+            meta.insert("deletions".into(), Value::Number(del.into()));
+        }
+        // create mode / delete mode — collect changed file names
+        if line.starts_with("create mode") || line.starts_with("delete mode") {
+            let file = line.rsplit_once(' ').map(|(_, f)| f).unwrap_or("");
+            if !file.is_empty() {
+                let arr = meta
+                    .entry("new_files")
+                    .or_insert_with(|| Value::Array(Vec::new()));
+                if let Value::Array(v) = arr {
+                    v.push(Value::String(file.into()));
+                }
+            }
+        }
+    }
+}
+
+fn parse_git_push_response(response: &str, meta: &mut Map<String, Value>) {
+    for line in response.lines() {
+        let line = line.trim();
+        // To https://github.com/org/repo.git
+        if line.starts_with("To ") {
+            meta.insert("remote_url".into(), Value::String(line[3..].into()));
+        }
+        // oldhash..newhash  branch -> branch
+        if line.contains("..") && line.contains("->") {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if !parts.is_empty() {
+                meta.insert("hash_range".into(), Value::String(parts[0].into()));
+            }
+            if let Some(arrow_pos) = parts.iter().position(|&w| w == "->") {
+                if arrow_pos > 0 {
+                    meta.insert(
+                        "branch".into(),
+                        Value::String(parts[arrow_pos - 1].into()),
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,5 +312,46 @@ mod tests {
             Some("src/".into())
         );
         assert_eq!(extract_file_path("Bash", &json!({"command": "ls"})), None);
+    }
+
+    #[test]
+    fn test_extract_git_commit_metadata() {
+        let response = "[main 5356097] Add S2 scope classifier\n 14 files changed, 921 insertions(+), 29 deletions(-)\n create mode 100644 src/s2_scope.rs\n create mode 100644 models/converge-diverge.json";
+        let meta = extract_git_metadata("git_commit", response);
+        assert_eq!(meta["commit_hash"], "5356097");
+        assert_eq!(meta["commit_message"], "Add S2 scope classifier");
+        assert_eq!(meta["branch"], "main");
+        assert_eq!(meta["files_changed"], 14);
+        assert_eq!(meta["insertions"], 921);
+        assert_eq!(meta["deletions"], 29);
+        let new_files = meta["new_files"].as_array().unwrap();
+        assert_eq!(new_files.len(), 2);
+        assert_eq!(new_files[0], "src/s2_scope.rs");
+    }
+
+    #[test]
+    fn test_extract_git_commit_root() {
+        let response = "[master (root-commit) 52f09a1] initial\n 2 files changed, 2 insertions(+)";
+        let meta = extract_git_metadata("git_commit", response);
+        assert_eq!(meta["commit_hash"], "52f09a1");
+        assert_eq!(meta["branch"], "master");
+        assert_eq!(meta["files_changed"], 2);
+        assert_eq!(meta["insertions"], 2);
+        assert_eq!(meta["deletions"], 0);
+    }
+
+    #[test]
+    fn test_extract_git_push_metadata() {
+        let response = "To https://github.com/viablesys/nmem.git\n   0164631..5356097  main -> main";
+        let meta = extract_git_metadata("git_push", response);
+        assert_eq!(meta["remote_url"], "https://github.com/viablesys/nmem.git");
+        assert_eq!(meta["hash_range"], "0164631..5356097");
+        assert_eq!(meta["branch"], "main");
+    }
+
+    #[test]
+    fn test_extract_git_metadata_empty() {
+        let meta = extract_git_metadata("command", "some output");
+        assert!(meta.is_empty());
     }
 }

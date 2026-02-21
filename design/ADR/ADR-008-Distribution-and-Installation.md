@@ -22,6 +22,8 @@ Three distinct install paths serve different needs: marketplace distribution for
 
 nmem is a single Rust binary (`nmem`) with two subcommands: `record` (synchronous hook handler) and `serve` (MCP server). Installation requires:
 
+> **[ANNOTATION 2026-02-21, v0.2]:** The binary now has 16 subcommands, not 2. Beyond `record` and `serve`: `purge`, `maintain`, `status`, `search`, `encrypt`, `pin`, `unpin`, `context`, `queue`, `dispatch`, `task`, `learn`, `backfill`, `backfill-scope`. See `src/cli.rs` for the full `Command` enum. The core installation requirement (binary on PATH + hooks + MCP registration) remains accurate, but the characterization of nmem as having only two subcommands is stale.
+
 1. The binary on `$PATH` (or an absolute path in config)
 2. Claude Code hooks configured in `~/.claude/settings.json` (PostToolUse, SessionStart, UserPromptSubmit, Stop)
 3. MCP server registered in `.claude.json` or project-level config
@@ -68,3 +70,10 @@ nmem is a single Rust binary (`nmem`) with two subcommands: `record` (synchronou
 
 ## Consequences
 *TBD*
+
+## Revision History
+
+| Date | Version | Changes |
+|------|---------|---------|
+| 2026-02-15 | 0.1 | Draft with open questions, dev install note. |
+| 2026-02-21 | 0.2 | Annotated stale subcommand count (2 → 16). |

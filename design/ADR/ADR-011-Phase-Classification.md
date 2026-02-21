@@ -101,6 +101,8 @@ Use the frontier model offline to label a large synthetic corpus. Train a TF-IDF
 
 **Position C: synthetic data + TF-IDF/LogReg trained in Python, inference in Rust.**
 
+> **[ANNOTATION 2026-02-21, v1.1]:** The production model is LinearSVC, not LogReg. This header reflects the original v1.0 decision which was updated in v1.1 (see Training Results). The inference math is identical (dot product + bias), but the model is an SVM, not logistic regression. The `s2_classify.rs` module doc comment has been updated to say "LinearSVC".
+
 Rationale:
 1. ADR-003 compliance is non-negotiable. No API calls, no daemon, no GPU in the hook path.
 2. The accuracy floor from synthetic labeling is high — even if the statistical model captures 85% of the frontier model's decisions, that's better than any local LLM achieved.
@@ -209,6 +211,8 @@ ALTER TABLE observations ADD COLUMN phase TEXT;
 ```
 
 No index on `phase` — it's a low-cardinality column (two values + NULL). Queries filtering by phase will use existing indexes and scan the phase column inline.
+
+> **[ANNOTATION 2026-02-21, v1.1]:** A subsequent migration 8 added the `classifier_runs` table and `classifier_run_id` FK column on observations for provenance tracking. Each unique (name, model_hash) pair gets a row in `classifier_runs`, and every classified observation links back via `classifier_run_id`. This is implemented in `s2_classify.rs::ensure_classifier_run()` and called from `s1_record.rs::handle_post_tool_use()`.
 
 ## Design Properties
 

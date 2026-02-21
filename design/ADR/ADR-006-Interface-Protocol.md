@@ -56,6 +56,8 @@ The handler uses `serde_json::Value::get()` to extract known fields and ignores 
 
 Six tools exposed via `nmem serve` (session-scoped stdio MCP server, read-only SQLite connection).
 
+> **[ANNOTATION 2026-02-21, v4.2]:** The MCP server now exposes 9 tools, not 6. In addition to the 6 documented below (`search`, `get_observations`, `timeline`, `recent_context`, `session_trace`, `file_history`), three more tools exist in `s1_serve.rs`: `session_summaries` (structured JSON summaries filtered by project/time), `regenerate_context` (re-runs SessionStart context injection on demand), and `queue_task` (queues a task for later dispatch via systemd/tmux). The `session_summaries` tool has `project`, `limit`, `before`, `after` parameters. The `regenerate_context` tool takes a required `project` and optional `before` timestamp. The `queue_task` tool takes `prompt`, `after` (required), and optional `project`/`cwd`. Additionally, the `search` tool now supports `orderBy` ("relevance" or "blended"), `before`, and `after` parameters not shown in the original spec below.
+
 ### `search`
 
 Full-text search over observations with metadata filters.
@@ -67,6 +69,8 @@ Full-text search over observations with metadata filters.
 | `query` | string | yes | -- | FTS5 query. Supports `AND`/`OR`/`NOT`, `"phrase"`, `prefix*`. |
 | `project` | string | no | current project | Filter by project. NULL = all projects. |
 | `obs_type` | string | no | NULL | Filter by type (`file_read`, `file_write`, `file_edit`, `command`, `command_error`, `search`, `user_prompt`, `session_start`, `session_end`, `mcp_call`). |
+
+> **[ANNOTATION 2026-02-21, v4.2]:** The obs_type examples above include types that are not produced by the extraction pipeline. `command_error`, `user_prompt`, `session_start`, and `session_end` are not actual obs_types. The correct vocabulary is: `file_read`, `file_write`, `file_edit`, `search`, `command`, `git_commit`, `git_push`, `github`, `task_spawn`, `web_fetch`, `web_search`, `mcp_call`, `tool_other`, `session_compact`, `session_resume`, `session_clear`. See `s1_extract.rs` for `classify_tool()`/`classify_bash()` and `s1_record.rs` for session event obs_types.
 | `limit` | integer | no | 20 | Max results. Capped at 100. |
 | `offset` | integer | no | 0 | Pagination offset. |
 
@@ -97,6 +101,8 @@ WHERE observations_fts MATCH ?1
 ORDER BY f.rank  -- FTS5 rank is negative BM25 (more negative = better match); ASC is correct
 LIMIT ?4 OFFSET ?5
 ```
+
+> **[ANNOTATION 2026-02-21, v4.2]:** This SQL sketch references `o.project`, but the `project` column lives on the `sessions` table, not `observations`. The actual implementation in `s1_serve.rs` correctly uses `JOIN sessions s ON o.session_id = s.id` and filters on `s.project = ?2`. The sketch should read `JOIN sessions s ON o.session_id = s.id` with `s.project` in the WHERE clause.
 
 ### `get_observations`
 
@@ -357,6 +363,8 @@ The SessionStart hook pushes context proactively. `nmem record` handles SessionS
 
 > **[ANNOTATION 2026-02-14, v3.1 — resolves v1.2]:** Action-weighted intent filtering now implemented. `INTENTS_SQL` in `src/s4_context.rs` joins `prompts → observations` via `prompt_id`, uses `HAVING COUNT(o.id) > 0` to exclude zero-action conversational turns, and shows top 10 recent intents with action counts. Output format: `- [2m ago] "commit this" → 4 actions`. Content truncated to 60 chars. Appears as `## Recent Intents` section before observation tables in context injection. 3 unit tests + 2 integration tests.
 
+> **[ANNOTATION 2026-02-21, v4.1]:** VictoriaLogs streaming is a second push interface not documented in this ADR's protocol sections. `stream_observation_to_logs()` in `s1_record.rs` fires on every PostToolUse alongside SQLite storage — same trigger point as context injection (SessionStart), but on a different event. It pushes jsonline records (with phase, scope, and git metadata as of v4.1) to localhost:9428. Unlike context injection (stdout to harness), this push targets nmem's own observability infrastructure. It is not part of the ingestion contract (which specifies stdin/stdout behavior) and is intentionally fire-and-forget with no impact on hook exit codes.
+
 ## Harness Independence
 
 The adversarial question: what if Claude Code disappears tomorrow?
@@ -373,6 +381,8 @@ The adversarial question: what if Claude Code disappears tomorrow?
 - Tool call schema (`tool_name`/`tool_input`/`tool_response` is Claude Code's hook contract -- a different harness needs a different ingestion adapter).
 
 **Design principle:** nmem's internal interfaces (SQLite schema, SQL queries, observation struct) do not reference Claude Code. Coupling is confined to two boundary points: the ingestion adapter (`nmem record`, a thin translation layer) and the MCP server (`nmem serve`, harness-agnostic).
+
+> **[ANNOTATION 2026-02-21, v4.1]:** VictoriaLogs streaming (`stream_observation_to_logs()` in `s1_record.rs`) is a third boundary point — it couples the ingestion handler to an external HTTP service (localhost:9428). Unlike the other two boundaries (Claude Code-specific and MCP-agnostic respectively), this one is nmem-specific infrastructure: a fire-and-forget jsonline push to a logging backend that nmem chose, not the harness. It does not threaten harness independence (no Claude Code coupling), but it is an external dependency that would need replacement or removal if VictoriaLogs were dropped. The "two boundary points" claim above should be read as "two harness-coupled boundary points" — VictoriaLogs is a third point coupled to nmem's own observability stack.
 
 ## Open Questions
 
@@ -401,6 +411,8 @@ Some projects may want more or fewer injected observations, or suppress cross-pr
 ### Negative
 
 - **Six MCP tools is surface area.** Double claude-mem's three. Mitigation: distinct purposes at different abstraction levels — `search`/`get_observations` for content retrieval, `timeline`/`session_trace` for structural navigation, `recent_context`/`file_history` for contextual views.
+
+> **[ANNOTATION 2026-02-21, v4.2]:** Now 9 MCP tools (triple claude-mem's three). The additional tools (`session_summaries`, `regenerate_context`, `queue_task`) serve distinct purposes: compressed history, on-demand context refresh, and deferred task scheduling respectively. The mitigation logic still holds — each tool operates at a different abstraction level.
 - **No streaming model.** Request-response only. Acceptable now, limits future live dashboards.
 - **Context injection is fire-and-forget.** No feedback on whether injected context was useful.
 
@@ -432,3 +444,5 @@ Some projects may want more or fewer injected observations, or suppress cross-pr
 | 2026-02-14 | 3.0 | **Context injection on SessionStart.** New module `src/s4_context.rs` with `generate_context()` emitting scored markdown tables to stdout. Project-local (20 rows) + cross-project (10 rows) sections. Recovery modes (`compact`/`clear`) expand to 30+15. Scoring: `exp_decay` recency (7d half-life) + type weight, deduped by file_path. Wired into `s1_record.rs::handle_session_start()` after commit+sweep, non-fatal. 5 integration tests + 7 unit tests. |
 | 2026-02-14 | 3.1 | **Action-weighted intent injection (resolves v1.2 annotation).** Added `## Recent Intents` section to context injection: joins `prompts → observations` via `prompt_id`, filters zero-action conversational turns (`HAVING COUNT > 0`), shows top 10 intents with action counts. New in `src/s4_context.rs`: `INTENTS_SQL`, `IntentRow`, `query_intents()`, `format_intents()`. 3 unit tests + 2 integration tests. No schema changes. |
 | 2026-02-17 | 4.0 | **Navigational tools: `session_trace` and `file_history`.** Two new read-only MCP tools filling the gap between observation-level (`timeline`) and summary-level (`session_summaries`) retrieval. `session_trace`: drill into session → prompts → observations hierarchy; temporal filters apply to both prompt and observation timestamps (observation filter in LEFT JOIN condition). `file_history`: cross-session file biography grouped by session with intent extraction from summary JSON; joins `prompts` filtered to `source='user'` for human intent. Tool count 4→6. Error handling table extended. 12 new integration tests. No schema changes. |
+| 2026-02-21 | 4.1 | **VictoriaLogs observation enrichment.** `stream_observation_to_logs()` in `s1_record.rs` now receives phase (think/act from S2 classifier) and scope (converge/diverge from S2 scope classifier) and merges both into every jsonline record. For `git_commit`/`git_push` observations: git-specific fields (commit_hash, commit_message, branch, files_changed, insertions, deletions, remote_url, hash_range) extracted from metadata and merged into the log record. `_msg` field uses `build_log_message()` helper for readable format — `git_commit: [5356097] Add S2 scope classifier (921+/29−)` instead of raw command text; `git_push: old..new main → remote_url`. Enables LogsQL filtering by `phase:act AND scope:converge`, `obs_type:git_commit AND branch:main`, and Grafana dashboard panels for commit frequency, change magnitude, and phase/scope distribution. Same jsonline endpoint (localhost:9428), same fire-and-forget pattern, additive fields only — no protocol changes. Annotated Harness Independence section (VictoriaLogs as third boundary point). |
+| 2026-02-21 | 4.2 | **Factual corrections.** Annotated tool count (now 9, not 6): added `session_summaries`, `regenerate_context`, `queue_task`. Annotated search SQL sketch: `project` column is on `sessions` table, not `observations` — implementation correctly JOINs sessions. Corrected obs_type examples: `command_error`, `user_prompt`, `session_start`, `session_end` are not actual obs_types produced by the extraction pipeline. Documented additional `search` parameters (`orderBy`, `before`, `after`). |

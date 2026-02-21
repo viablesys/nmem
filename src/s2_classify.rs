@@ -1,6 +1,6 @@
 //! S2 Coordination — think/act phase classifier.
 //!
-//! Pure Rust TF-IDF + Logistic Regression inference.
+//! Pure Rust TF-IDF + LinearSVC inference.
 //! Loads exported model weights from `models/think-act.json`.
 //! No external ML crate dependencies — uses serde_json (already in tree).
 

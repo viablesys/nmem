@@ -1,5 +1,5 @@
 use crate::s4_context;
-use crate::s1_extract::{classify_tool, extract_content, extract_file_path};
+use crate::s1_extract::{classify_tool, extract_content, extract_file_path, extract_git_metadata};
 use crate::s1_4_transcript::{get_current_prompt_id, scan_transcript};
 use crate::s2_classify;
 use crate::s2_scope;
@@ -209,16 +209,28 @@ fn handle_post_tool_use(
         meta_obj.insert("redacted".into(), serde_json::Value::Bool(true));
     }
 
+    // Extract tool_response as string (used by failure capture and git metadata)
+    let response_str = payload.tool_response.as_ref().map(|resp| match resp {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    });
+
     if is_failure {
         meta_obj.insert("failed".into(), serde_json::Value::Bool(true));
-        if let Some(resp) = &payload.tool_response {
-            let resp_str = match resp {
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            let truncated: String = resp_str.chars().take(2000).collect();
+        if let Some(ref resp) = response_str {
+            let truncated: String = resp.chars().take(2000).collect();
             let (filtered_resp, _) = filter.redact(&truncated);
             meta_obj.insert("response".into(), serde_json::Value::String(filtered_resp));
+        }
+    }
+
+    // Extract structured git metadata from tool_response
+    if matches!(obs_type, "git_commit" | "git_push") {
+        if let Some(ref resp) = response_str {
+            let git_meta = extract_git_metadata(obs_type, resp);
+            for (k, v) in git_meta {
+                meta_obj.insert(k, v);
+            }
         }
     }
 
@@ -292,6 +304,9 @@ fn handle_post_tool_use(
         tool_name,
         file_path.as_deref(),
         &filtered_content,
+        phase,
+        scope,
+        &metadata_str,
     );
 
     Ok(())
@@ -306,13 +321,12 @@ fn stream_observation_to_logs(
     tool_name: &str,
     file_path: Option<&str>,
     content: &str,
+    phase: Option<&str>,
+    scope: Option<&str>,
+    metadata_str: &Option<String>,
 ) {
-    let msg = if let Some(fp) = file_path {
-        format!("{obs_type}: {fp}")
-    } else {
-        let preview: String = content.chars().take(80).collect();
-        format!("{obs_type}: {preview}")
-    };
+    // Build a meaningful _msg — for git ops, use commit info instead of raw command
+    let msg = build_log_message(obs_type, file_path, content, metadata_str);
 
     let mut record = serde_json::json!({
         "_msg": msg,
@@ -327,6 +341,26 @@ fn stream_observation_to_logs(
     if let Some(fp) = file_path {
         record["file_path"] = serde_json::Value::String(fp.to_string());
     }
+    if let Some(p) = phase {
+        record["phase"] = serde_json::Value::String(p.to_string());
+    }
+    if let Some(s) = scope {
+        record["scope"] = serde_json::Value::String(s.to_string());
+    }
+
+    // Merge git-specific fields into the log record
+    if matches!(obs_type, "git_commit" | "git_push") {
+        if let Some(ms) = metadata_str {
+            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(ms) {
+                for key in &["commit_hash", "commit_message", "branch", "files_changed",
+                             "insertions", "deletions", "remote_url", "hash_range"] {
+                    if let Some(v) = meta.get(*key) {
+                        record[*key] = v.clone();
+                    }
+                }
+            }
+        }
+    }
 
     let body = format!("{}\n", record);
     let agent = ureq::Agent::new_with_config(
@@ -338,6 +372,46 @@ fn stream_observation_to_logs(
         .post(VLOGS_ENDPOINT)
         .header("Content-Type", "application/stream+json")
         .send(body.as_bytes());
+}
+
+fn build_log_message(
+    obs_type: &str,
+    file_path: Option<&str>,
+    content: &str,
+    metadata_str: &Option<String>,
+) -> String {
+    // For git commits, show "[hash] message" instead of the raw command
+    if obs_type == "git_commit" {
+        if let Some(ms) = metadata_str {
+            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(ms) {
+                let hash = meta.get("commit_hash").and_then(|v| v.as_str()).unwrap_or("?");
+                let msg = meta.get("commit_message").and_then(|v| v.as_str()).unwrap_or("");
+                let stats = format!(
+                    "{}+/{}−",
+                    meta.get("insertions").and_then(|v| v.as_u64()).unwrap_or(0),
+                    meta.get("deletions").and_then(|v| v.as_u64()).unwrap_or(0),
+                );
+                return format!("git_commit: [{hash}] {msg} ({stats})");
+            }
+        }
+    }
+    if obs_type == "git_push" {
+        if let Some(ms) = metadata_str {
+            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(ms) {
+                let range = meta.get("hash_range").and_then(|v| v.as_str()).unwrap_or("?");
+                let branch = meta.get("branch").and_then(|v| v.as_str()).unwrap_or("?");
+                let remote = meta.get("remote_url").and_then(|v| v.as_str()).unwrap_or("?");
+                return format!("git_push: {range} {branch} → {remote}");
+            }
+        }
+    }
+    // Default: file_path or content preview
+    if let Some(fp) = file_path {
+        format!("{obs_type}: {fp}")
+    } else {
+        let preview: String = content.chars().take(80).collect();
+        format!("{obs_type}: {preview}")
+    }
 }
 
 fn handle_stop(conn: &Connection, payload: &HookPayload, config: &NmemConfig) -> Result<(), NmemError> {

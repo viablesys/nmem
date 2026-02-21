@@ -144,6 +144,8 @@ In `s1_record.rs::handle_post_tool_use`, after phase classification:
 let scope = s2_scope::classify(&filtered_content).map(|s| s.label);
 ```
 
+> **[ANNOTATION 2026-02-21, v1.0]:** The actual function name is `s2_scope::classify_scope()`, not `s2_scope::classify()`. In `s1_record.rs` line 270: `let scope_result = s2_scope::classify_scope(&filtered_content);`
+
 ### Schema
 
 Migration 9 in `schema.rs`:

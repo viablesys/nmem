@@ -119,16 +119,28 @@ impl Default for RetentionConfig {
 
 fn default_retention_days() -> HashMap<String, u32> {
     HashMap::from([
-        ("user_prompt".into(), 730),
-        ("command_error".into(), 730),
+        // Completion signals — high value, keep longest
+        ("git_commit".into(), 730),
+        ("git_push".into(), 730),
+        // Execution — file changes
         ("file_write".into(), 365),
         ("file_edit".into(), 365),
-        ("session_start".into(), 365),
-        ("session_end".into(), 365),
+        // Session lifecycle
+        ("session_startup".into(), 365),
+        ("session_compact".into(), 365),
+        ("session_resume".into(), 365),
+        ("session_clear".into(), 365),
+        // Commands and external interactions
+        ("command".into(), 180),
+        ("github".into(), 180),
+        // Investigation — high volume, shorter retention
         ("file_read".into(), 90),
         ("search".into(), 90),
         ("mcp_call".into(), 90),
-        ("command".into(), 180),
+        ("web_fetch".into(), 90),
+        ("web_search".into(), 90),
+        ("task_spawn".into(), 90),
+        ("tool_other".into(), 90),
     ])
 }
 
@@ -343,9 +355,14 @@ sensitivity = "strict"
         let config = NmemConfig::default();
         assert!(!config.retention.enabled);
         assert_eq!(config.retention.days["file_read"], 90);
+        assert_eq!(config.retention.days["search"], 90);
+        assert_eq!(config.retention.days["web_fetch"], 90);
         assert_eq!(config.retention.days["command"], 180);
+        assert_eq!(config.retention.days["github"], 180);
         assert_eq!(config.retention.days["file_edit"], 365);
-        assert_eq!(config.retention.days["user_prompt"], 730);
+        assert_eq!(config.retention.days["session_startup"], 365);
+        assert_eq!(config.retention.days["git_commit"], 730);
+        assert_eq!(config.retention.days["git_push"], 730);
     }
 
     #[test]

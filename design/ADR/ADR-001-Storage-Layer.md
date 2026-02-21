@@ -29,6 +29,8 @@ rusqlite_migration = "2.3"
 tokio-rusqlite = "0.6"
 ```
 
+> **[ANNOTATION 2026-02-21, v3.3]:** The actual dependencies diverge from the above listing. `Cargo.toml` uses `rusqlite = { version = "0.38", features = ["bundled-sqlcipher", "functions"] }` — `bundled-sqlcipher` replaces `bundled` (encryption is resolved, see annotation on Open Questions below). The `backup`, `hooks`, and `serde_json` features are not enabled. `tokio-rusqlite` is not a dependency — the MCP server uses `Arc<Mutex<Connection>>` for thread-safe access instead of a dedicated async wrapper. The feature flags table below should be read as the original design intent, not the current state.
+
 `bundled` compiles SQLite from source (currently 3.51.1), eliminating system SQLite version dependencies. This also includes FTS5 and JSON1.
 
 **Database location:** `~/.nmem/nmem.db` (default). Single file, user-local. ADR-004 may introduce per-project databases — if so, this becomes the global/cross-project database.
@@ -47,6 +49,8 @@ Not needed at launch: `load_extension` (no external extensions), `vtab` (no virt
 ### Schema
 
 Three tables: sessions, prompts, observations. User prompts are stored separately as intent markers — they frame the "why" for subsequent tool observations. Observations reference their preceding prompt via foreign key.
+
+> **[ANNOTATION 2026-02-21, v3.3]:** The schema has grown beyond three tables. As of migration 9, there are: `sessions`, `prompts`, `observations`, `_cursor` (transcript line tracking), `tasks` (S4 dispatch queue), `work_units` (episodic memory), and `classifier_runs` (S2 phase/scope model audit trail). Additionally, `observations` has gained columns: `is_pinned` (migration 2), `phase` (migration 7), `classifier_run_id` (migration 8), `scope` and `scope_run_id` (migration 9). The initial schema shown below remains accurate as the first migration.
 
 ```sql
 -- 001_initial.sql
@@ -194,6 +198,8 @@ WAL mode gives nmem the concurrency model it needs:
 - **Multiple sessions**: If two Claude Code sessions run simultaneously, both can write to the same database. `busy_timeout` handles contention — one writer blocks briefly while the other commits. At nmem's write frequency (seconds between writes), contention is effectively nonexistent.
 - **Async access**: rusqlite is `Send` but not `Sync` — it can't be shared across async tasks. `tokio-rusqlite` wraps a connection on a dedicated OS thread, accessed via `.call()` closures that move into the thread. This is the expected pattern for nmem's daemon. Reader and writer connections should be separate `tokio-rusqlite` instances.
 
+> **[ANNOTATION 2026-02-21, v3.3]:** `tokio-rusqlite` was never adopted. The MCP server (`s1_serve.rs`) uses `Arc<Mutex<Connection>>` — a standard `Mutex`-wrapped connection shared across async tasks. This works because nmem's MCP queries are short-lived and non-overlapping in practice. The `tokio-rusqlite` pattern described above remains a valid upgrade path if lock contention becomes measurable.
+
 ### Schema Migration
 
 `rusqlite_migration` tracks schema version via SQLite's `user_version` PRAGMA — a single integer at a fixed file offset, no extra tables. Migrations run on connection open.
@@ -258,6 +264,8 @@ Principle: **thin database, smart application.** Rust's ecosystem handles comput
 
 Not decided. Options and their trade-offs:
 
+> **[ANNOTATION 2026-02-21, v3.3]:** This question is resolved. SQLCipher was adopted. The `bundled-sqlcipher` feature replaces `bundled` in `Cargo.toml`. Key management is implemented in `db.rs`: `NMEM_KEY` env var > `encryption.key_file` in config > `~/.nmem/key` (auto-generated 256-bit random hex). Keys are applied as raw hex (`x'...'` format, skipping PBKDF2). The `nmem encrypt` subcommand migrates existing unencrypted databases via `sqlcipher_export()`. An `is_db_encrypted()` function detects whether a database file requires a key. The compatibility concern about `sqlite3` CLI was accepted — encrypted databases require SQLCipher-aware tooling.
+
 | Option | Pros | Cons |
 |--------|------|------|
 | **None** (filesystem permissions) | Zero complexity. Standard tooling works (`sqlite3` CLI). | Secrets stored in plaintext if filtering fails. |
@@ -313,6 +321,8 @@ The 5-year ceiling pushes into territory where forgetting matters. SQLite handle
 
 - **Single writer**: SQLite allows one writer at a time. Multiple concurrent sessions contend on writes. At nmem's write frequency this is a non-issue, but it's a hard architectural ceiling.
 - **No native async**: rusqlite is `Send` but not `Sync`. Async access requires `tokio-rusqlite` (spawns a dedicated thread per connection). Each `.call()` closure moves into the thread and back — ergonomic but adds indirection compared to direct rusqlite access.
+
+> **[ANNOTATION 2026-02-21, v3.3]:** See concurrent access annotation above. The actual async pattern is `Arc<Mutex<Connection>>`, not `tokio-rusqlite`.
 - **Bundled SQLite size**: Compiling SQLite from source adds ~30 seconds to clean builds and ~1.5 MB to the binary. Acceptable for a developer tool.
 
 ## References
@@ -338,3 +348,4 @@ The 5-year ceiling pushes into territory where forgetting matters. SQLite handle
 | 2026-02-14 | 3.1 | Unified reasoning (thinking blocks) and user prompts as first-class intents. Added `source` column ("user"/"agent") to prompts table. Both are FTS-indexed and searchable. Validated against 5,353 prompts across 97 sessions. |
 | 2026-02-14 | 3.2 | Added FTS5 on prompts table (was implemented but undocumented). Added effort signal obs_types (session_compact/resume/clear). Updated volume estimates from real prototype data (73.9x compression, ~5 MB for 6 weeks). Fixed prompt_id semantics. Validated with live v2 extractor producing real hook data. |
 | 2026-02-14 | 3.3 | Data-driven revision from live production analysis. Revised volume estimates upward (~585K records/year, ~652 MB) based on real-time hook rates (293 records/hour). Documented FTS5 trigger creation pitfall (semicolons in trigger bodies). Added thinking block storage dominance finding (84% of content volume). Added prompt-observation linking analysis (100% linked but 75% of prompts have no direct actions). Noted 2.4x storage overhead. Cross-referenced ADR-005 forgetting timeline (1-2 years, not indefinite). |
+| 2026-02-21 | 3.4 | Annotated against current codebase. Corrected dependency listing (bundled-sqlcipher replaces bundled, tokio-rusqlite not adopted). Marked encryption question as resolved (SQLCipher in use with key management in db.rs). Noted schema growth from 3 to 7 tables across 9 migrations. Corrected async access pattern (Arc<Mutex<Connection>>, not tokio-rusqlite). |
