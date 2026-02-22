@@ -63,20 +63,34 @@ fn ensure_session(conn: &Connection, session_id: &str, cwd: &str, ts: i64) -> Re
     Ok(())
 }
 
-fn maybe_sweep(conn: &Connection, config: &NmemConfig) {
+fn maybe_sweep(conn: &Connection, config: &NmemConfig, db_path: &Path) {
     if !config.retention.enabled {
         return;
     }
-    let count: i64 = conn
+
+    // Size-based trigger: check if DB + WAL exceeds configured limit
+    let size_exceeded = config.retention.max_db_size_mb.is_some_and(|limit| {
+        let db_size = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
+        let wal_size = std::fs::metadata(db_path.with_extension("db-wal"))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        (db_size + wal_size) / (1024 * 1024) > limit as u64
+    });
+
+    // Count-based trigger: enough old observations to justify a sweep
+    let count_exceeded = conn
         .query_row(
             "SELECT COUNT(*) FROM observations WHERE timestamp < unixepoch('now') - 86400",
             [],
-            |r| r.get(0),
+            |r| r.get::<_, i64>(0),
         )
-        .unwrap_or(0);
-    if count < 100 {
+        .unwrap_or(0)
+        >= 100;
+
+    if !size_exceeded && !count_exceeded {
         return;
     }
+
     match run_sweep(conn, &config.retention) {
         Ok(r) if r.deleted > 0 => {
             eprintln!("nmem: sweep deleted {} expired observations", r.deleted)
@@ -115,8 +129,6 @@ fn handle_session_start(
     }
 
     tx.commit()?;
-
-    maybe_sweep(conn, config);
 
     // Context injection — non-fatal, errors logged to stderr
     let is_recovery = matches!(source, "compact" | "clear");
@@ -408,7 +420,7 @@ fn build_log_message(
     }
 }
 
-fn handle_stop(conn: &Connection, payload: &HookPayload, config: &NmemConfig) -> Result<(), NmemError> {
+fn handle_stop(conn: &Connection, payload: &HookPayload, config: &NmemConfig, db_path: &Path) -> Result<(), NmemError> {
     let ts = now_ts();
     let tx = conn.unchecked_transaction()?;
 
@@ -456,6 +468,9 @@ fn handle_stop(conn: &Connection, payload: &HookPayload, config: &NmemConfig) ->
         Err(e) => eprintln!("nmem: summarization failed (non-fatal): {e}"),
     }
 
+    // Retention sweep — non-fatal
+    maybe_sweep(conn, config, db_path);
+
     // WAL checkpoint outside transaction
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
 
@@ -487,7 +502,7 @@ pub fn handle_record(db_path: &Path) -> Result<(), NmemError> {
         "UserPromptSubmit" => handle_user_prompt(&conn, &payload, &filter),
         "PostToolUse" => handle_post_tool_use(&conn, &payload, &filter, "PostToolUse"),
         "PostToolUseFailure" => handle_post_tool_use(&conn, &payload, &filter, "PostToolUseFailure"),
-        "Stop" => handle_stop(&conn, &payload, &config),
+        "Stop" => handle_stop(&conn, &payload, &config, db_path),
         _ => Ok(()),
     };
 

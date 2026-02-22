@@ -119,6 +119,7 @@ mod tests {
         let config = RetentionConfig {
             enabled: false,
             days: HashMap::from([("file_read".into(), 1)]),
+            max_db_size_mb: None,
         };
 
         let result = run_sweep(&conn, &config).unwrap();
@@ -147,6 +148,7 @@ mod tests {
         let config = RetentionConfig {
             enabled: true,
             days: HashMap::from([("file_read".into(), 90)]),
+            max_db_size_mb: None,
         };
 
         let result = run_sweep(&conn, &config).unwrap();
@@ -176,6 +178,7 @@ mod tests {
         let config = RetentionConfig {
             enabled: true,
             days: HashMap::from([("file_read".into(), 90)]),
+            max_db_size_mb: None,
         };
 
         let result = run_sweep(&conn, &config).unwrap();
@@ -217,6 +220,7 @@ mod tests {
         let config = RetentionConfig {
             enabled: true,
             days: HashMap::from([("file_read".into(), 90)]),
+            max_db_size_mb: None,
         };
 
         let result = run_sweep(&conn, &config).unwrap();
@@ -253,6 +257,7 @@ mod tests {
         let config = RetentionConfig {
             enabled: true,
             days: HashMap::from([("file_read".into(), 90)]),
+            max_db_size_mb: None,
         };
 
         let result = run_sweep(&conn, &config).unwrap();

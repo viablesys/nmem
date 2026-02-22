@@ -102,17 +102,26 @@ pub struct EncryptionConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct RetentionConfig {
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default = "default_retention_days")]
     pub days: HashMap<String, u32>,
+    /// Optional DB size trigger in MB. When DB + WAL exceeds this, sweep runs
+    /// regardless of observation count. None means no size limit.
+    #[serde(default)]
+    pub max_db_size_mb: Option<u32>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for RetentionConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             days: default_retention_days(),
+            max_db_size_mb: None,
         }
     }
 }
@@ -353,7 +362,7 @@ sensitivity = "strict"
     #[test]
     fn default_retention_config() {
         let config = NmemConfig::default();
-        assert!(!config.retention.enabled);
+        assert!(config.retention.enabled);
         assert_eq!(config.retention.days["file_read"], 90);
         assert_eq!(config.retention.days["search"], 90);
         assert_eq!(config.retention.days["web_fetch"], 90);
@@ -478,6 +487,38 @@ context_cross_limit = 5
         .unwrap();
         let (_, cross) = resolve_context_limits(&config, "myproj", false);
         assert_eq!(cross, 10, "default config should not suppress cross-project");
+    }
+
+    #[test]
+    fn parse_retention_max_db_size() {
+        let toml_str = r#"
+[retention]
+enabled = true
+max_db_size_mb = 500
+"#;
+        let config: NmemConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.retention.enabled);
+        assert_eq!(config.retention.max_db_size_mb, Some(500));
+    }
+
+    #[test]
+    fn retention_enabled_by_default_when_section_absent() {
+        let toml_str = r#"
+[filter]
+"#;
+        let config: NmemConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.retention.enabled);
+        assert_eq!(config.retention.max_db_size_mb, None);
+    }
+
+    #[test]
+    fn retention_can_be_disabled_explicitly() {
+        let toml_str = r#"
+[retention]
+enabled = false
+"#;
+        let config: NmemConfig = toml::from_str(toml_str).unwrap();
+        assert!(!config.retention.enabled);
     }
 
     #[test]

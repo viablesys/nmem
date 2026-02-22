@@ -56,21 +56,21 @@ No known gaps. Coordination is inherently simpler in a single-user, single-machi
 
 ## S3 — Control
 
-Resource management, storage budgets, compaction. **Manual.**
+Resource management, storage budgets, compaction. **Semi-autonomous.**
 
 What exists:
-- Retention config with per-type TTL (90-730 days)
-- `nmem maintain --sweep` runs retention purge
+- Retention config with per-type TTL (90-730 days), **enabled by default**
+- Automatic sweep on session Stop — runs after summarization, before WAL checkpoint
+- Two sweep triggers: count-based (>100 expired observations) and size-based (`max_db_size_mb` config, DB + WAL)
+- `nmem maintain --sweep` for manual intervention
 - `nmem maintain --rebuild-fts` reconstructs indexes
 - `nmem purge` provides targeted deletion
 - WAL checkpoint on session end
 
-What's missing: **autonomy.** S3 is a control panel, not a controller. Nothing triggers sweeps, compaction, or integrity checks without human invocation. A viable S3 would:
-- Monitor storage growth and trigger sweeps when budgets are exceeded
-- Schedule compaction during idle periods (no active sessions)
-- Escalate anomalies (unexpected growth, failed writes) rather than silently degrade
-
-**Path to autonomy**: A background timer or post-session hook that checks storage size against a budget and runs sweeps when thresholds are crossed. The logic exists; the trigger doesn't.
+What's still missing:
+- **Compaction scheduling** — no idle-period detection for vacuum/rebuild
+- **Anomaly escalation** — unexpected growth or failed writes degrade silently
+- **Sweep frequency throttling** — every session end checks; not needed at current scale but would matter with high session frequency
 
 ## S3* — Audit
 
@@ -200,12 +200,12 @@ A mature S5 would:
 |--------|-------|-----|
 | S1 Operations | Functional (S4 v2) | Summary-primary context injection; PreCompact, rolling, FTS5 indexing remain |
 | S2 Coordination | Functional | Multi-agent would stress this |
-| S3 Control | Manual | Needs autonomous triggers |
+| S3 Control | Semi-autonomous | Sweep on session end; compaction and escalation remain manual |
 | S3* Audit | Minimal | Needs functional integrity checks |
 | S4 Intelligence | Partial | Task dispatch + cross-session pattern detection functional; work unit detection designed, platform constraints block autonomous context actuation |
 | S5 Policy | Static | No tension to resolve without active S4 inward-facing capabilities |
 
-S1 captures facts and produces agent-oriented session summaries. Context injection is now summary-primary — raw observation noise replaced with curated signal (summaries + pinned + recent edits + git milestones). S2 coordinates. S3 exists but doesn't self-trigger. S3* checks structure but not function. S4 now has both an outward actuator (task dispatch) and an inward sensor (`nmem learn` — cross-session pattern detection). Task dispatch spawns new viable systems; pattern detection surfaces stuck loops, recurring failures, and repeated investigations from the observation corpus. What remains designed: work unit detection (per-prompt phase transitions) and autonomous context management. S5 has nothing to mediate yet. The organism records, compresses, selectively recalls, initiates future work, and can now detect when it's stuck — but doesn't yet manage its own attention.
+S1 captures facts and produces agent-oriented session summaries. Context injection is now summary-primary — raw observation noise replaced with curated signal (summaries + pinned + recent edits + git milestones). S2 coordinates. S3 is semi-autonomous — retention sweeps run automatically at session end with count and size triggers, enabled by default. S3* checks structure but not function. S4 now has both an outward actuator (task dispatch) and an inward sensor (`nmem learn` — cross-session pattern detection). Task dispatch spawns new viable systems; pattern detection surfaces stuck loops, recurring failures, and repeated investigations from the observation corpus. What remains designed: work unit detection (per-prompt phase transitions) and autonomous context management. S5 has nothing to mediate yet. The organism records, compresses, selectively recalls, initiates future work, and can now detect when it's stuck — but doesn't yet manage its own attention.
 
 ## Recurring Patterns
 
@@ -237,7 +237,7 @@ This pattern repeats wherever a higher system needs to interpret lower-system da
 3. **S4 work unit detection** — highest priority for inward-facing S4. The core algorithm: recognize work unit boundaries from observation patterns (prompt:thinking:tool ratios, hot files, intent shifts). Cross-session pattern detection (`nmem learn`) is a step toward this — it detects patterns across sessions (stuck loops, recurring failures) but not within sessions (phase transitions). Work unit detection operates at a finer grain: per-prompt tool composition within a single session.
 4. **S4 context actuation** — depends on Claude Code platform evolution (issues #24252, #25689, #21132) or building an API-based harness. Without this, S4 can detect and summarize but not act autonomously on context.
 5. **S4 UI** — work-unit-oriented dashboard. S4's external interface for users. Shows current work unit, history, context health. Same data model as context injection.
-6. **S3 autonomy** — post-session hook or timer that checks storage and runs sweeps. The logic exists; wire a trigger.
+6. ~~**S3 autonomy**~~ — **Done (baseline).** Retention enabled by default, sweep runs on session Stop with count-based and size-based triggers. Remaining: compaction scheduling, anomaly escalation.
 7. **S3* functional audits** — track extraction success rate, retrieval hit rate, filter accuracy. Surface in `nmem status`.
 8. **S4 cross-session synthesis** — cluster work unit summaries into patterns. `nmem learn` is a first step: it detects cross-session patterns from observations and summaries, but outputs a static report rather than feeding back into context injection. Next: integrate learnings into SessionStart context (warn about confirmed stuck loops) and cluster work unit summaries when available.
 9. **Multi-agent S2/S4** — networking, shared memory, cross-agent retrieval. Changes the nature of S2 coordination and gives S4 richer input.

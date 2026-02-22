@@ -659,12 +659,17 @@ command = 9999
 fn sweep_disabled_by_default() {
     let dir = TempDir::new().unwrap();
     let db = dir.path().join("test.db");
+    let config_path = dir.path().join("config.toml");
+
+    // Explicitly disable retention (default is now enabled)
+    std::fs::write(&config_path, "[retention]\nenabled = false\n").unwrap();
 
     session_start(&db, "sw-disabled");
     post_tool_use(&db, "sw-disabled", "Read", r#"{"file_path":"/src/a.rs"}"#);
 
-    // No config file, retention defaults to disabled
-    nmem_cmd(&db)
+    let mut cmd = Command::cargo_bin("nmem").unwrap();
+    cmd.env("NMEM_DB", &db)
+        .env("NMEM_CONFIG", &config_path)
         .args(["maintain", "--sweep"])
         .assert()
         .success();
@@ -675,7 +680,7 @@ fn sweep_disabled_by_default() {
 
 #[test]
 #[allow(deprecated)]
-fn sweep_on_session_start() {
+fn sweep_on_session_stop() {
     let dir = TempDir::new().unwrap();
     let db = dir.path().join("test.db");
     let config_path = dir.path().join("config.toml");
@@ -710,20 +715,20 @@ file_read = 0
     let before: String = query_db(&db, "SELECT COUNT(*) FROM observations")[0][0].clone();
     assert!(before.parse::<i32>().unwrap() >= 110);
 
-    // SessionStart with retention config triggers opportunistic sweep
+    // Stop with retention config triggers opportunistic sweep
     let mut cmd = Command::cargo_bin("nmem").unwrap();
     cmd.env("NMEM_DB", &db)
         .env("NMEM_CONFIG", &config_path)
         .arg("record")
         .write_stdin(
-            r#"{"session_id":"sw-ss-new","cwd":"/home/test/workspace/myproj","hook_event_name":"SessionStart"}"#,
+            r#"{"session_id":"sw-ss-setup","cwd":"/home/test/workspace/myproj","hook_event_name":"Stop"}"#,
         )
         .assert()
         .success();
 
     // Old file_read observations should be swept
     let after: String = query_db(&db, "SELECT COUNT(*) FROM observations WHERE obs_type = 'file_read'")[0][0].clone();
-    assert_eq!(after, "0", "expired file_read observations should be swept on SessionStart");
+    assert_eq!(after, "0", "expired file_read observations should be swept on Stop");
 }
 
 // --- Maintain tests ---

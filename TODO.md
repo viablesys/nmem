@@ -119,6 +119,15 @@ The converge/diverge scope classifier (ADR-013) achieves 71.4% CV on real data �
 
 **Trigger**: Scope model accuracy demonstrably affects episode quality or context injection decisions. Current 71% may be sufficient at the episode aggregation level.
 
+## S3 — Semi-autonomous (baseline achieved)
+
+Retention sweeps now run automatically at session end (Stop hook), after summarization and before WAL checkpoint. Enabled by default — no config needed. Two triggers: count-based (>100 expired observations older than 1 day) and size-based (`max_db_size_mb` in config, checks DB + WAL).
+
+**Remaining S3 gaps:**
+- **Compaction scheduling** — vacuum and FTS rebuild are manual only (`nmem maintain`). No idle-period detection.
+- **Anomaly escalation** — if sweeps can't reclaim enough or writes fail, nothing escalates. Silent degradation.
+- **Sweep audit** — deletions logged to stderr only. No persistent record of what was swept when.
+
 ## Low priority
 
 ### Per-project retention overrides
