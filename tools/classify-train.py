@@ -30,9 +30,10 @@ def load_corpus(path):
     texts = [e["text"] for e in corpus]
     labels = [e["type"] for e in corpus]
 
-    think_count = labels.count("think")
-    act_count = labels.count("act")
-    print(f"Corpus: {len(corpus)} entries ({think_count} think, {act_count} act)")
+    # Dynamic label counting — works for any binary classifier
+    unique_labels = sorted(set(labels))
+    counts = ", ".join(f"{labels.count(l)} {l}" for l in unique_labels)
+    print(f"Corpus: {len(corpus)} entries ({counts})")
 
     return texts, labels
 
@@ -145,7 +146,7 @@ def export_json(pipeline, output_path, labels):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train think/act classifier")
+    parser = argparse.ArgumentParser(description="Train binary text classifier (TF-IDF + LinearSVC)")
     parser.add_argument("--corpus", required=True, help="Labeled corpus JSON")
     parser.add_argument("--output", default="models/think-act.json", help="Model output path")
     parser.add_argument("--pickle", help="Also save sklearn pipeline as pickle")

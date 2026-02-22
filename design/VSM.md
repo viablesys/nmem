@@ -45,12 +45,16 @@ Incremental gaps: extraction coverage could expand (SendMessage, Skill invocatio
 
 ## S2 — Coordination
 
-Dedup, sequencing, concurrency. **Functional.**
+Dedup, sequencing, concurrency, classification. **Functional.**
 
 - SQLite WAL provides concurrent read access with single writer
 - Dedup checks (session + obs_type + file_path + timestamp window) prevent duplicate observations
 - prompt_id links observations to most recent user intent, providing causal ordering
 - Session boundaries (started_at/ended_at) scope temporal context
+- **Five classifier dimensions** at write time: phase (think/act), scope (converge/diverge), locus (internal/external), novelty (routine/novel), friction (smooth/friction)
+- Shared TF-IDF + LinearSVC inference engine (`s2_inference.rs`) — sub-millisecond per classification
+- All classifiers use the same architecture: exported JSON model weights, Rust-native inference, OnceLock caching
+- `nmem backfill --dimension <name>` retroactively classifies historical observations
 
 No known gaps. Coordination is inherently simpler in a single-user, single-machine system. Multi-agent coordination would stress S2 significantly.
 

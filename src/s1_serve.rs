@@ -298,6 +298,20 @@ struct RecentShift {
 }
 
 #[derive(Serialize)]
+struct DimensionCounts {
+    #[serde(flatten)]
+    counts: std::collections::HashMap<String, i64>,
+}
+
+#[derive(Serialize)]
+struct NoveltyFriction {
+    routine_smooth: i64,
+    routine_friction: i64,
+    novel_smooth: i64,
+    novel_friction: i64,
+}
+
+#[derive(Serialize)]
 struct StanceResult {
     session_id: String,
     observation_count: i64,
@@ -305,6 +319,14 @@ struct StanceResult {
     current: CurrentSignal,
     trend: TrendSignal,
     recent_shifts: Vec<RecentShift>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    locus: Option<DimensionCounts>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    novelty: Option<DimensionCounts>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    friction: Option<DimensionCounts>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    novelty_friction: Option<NoveltyFriction>,
     guidance: String,
 }
 
@@ -1266,7 +1288,93 @@ impl NmemServer {
             recent_shifts.drain(..drain_to);
         }
 
-        // 7. Compute guidance
+        // 7. Aggregate new dimensions (locus, novelty, friction)
+        let (locus_counts, novelty_counts, friction_counts, nf_cross) = {
+            let mut locus_map: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+            let mut novelty_map: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+            let mut friction_map: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+            let mut nf = NoveltyFriction {
+                routine_smooth: 0,
+                routine_friction: 0,
+                novel_smooth: 0,
+                novel_friction: 0,
+            };
+
+            let mut dim_stmt = db
+                .prepare(
+                    "SELECT locus, novelty, friction, COUNT(*) FROM observations
+                     WHERE session_id = ?1
+                     GROUP BY locus, novelty, friction",
+                )
+                .map_err(|e| db_err(&e))?;
+
+            let mut dim_rows = dim_stmt
+                .query(rusqlite::params![session_id])
+                .map_err(|e| db_err(&e))?;
+            while let Some(row) = dim_rows.next().map_err(|e| db_err(&e))? {
+                let locus: Option<String> = row.get(0).map_err(|e| db_err(&e))?;
+                let novelty: Option<String> = row.get(1).map_err(|e| db_err(&e))?;
+                let friction: Option<String> = row.get(2).map_err(|e| db_err(&e))?;
+                let count: i64 = row.get(3).map_err(|e| db_err(&e))?;
+
+                if let Some(l) = &locus {
+                    *locus_map.entry(l.clone()).or_insert(0) += count;
+                }
+                if let Some(n) = &novelty {
+                    *novelty_map.entry(n.clone()).or_insert(0) += count;
+                }
+                if let Some(f) = &friction {
+                    *friction_map.entry(f.clone()).or_insert(0) += count;
+                }
+
+                // Cross-tabulate novelty × friction
+                if let (Some(n), Some(f)) = (&novelty, &friction) {
+                    match (n.as_str(), f.as_str()) {
+                        ("routine", "smooth") => nf.routine_smooth += count,
+                        ("routine", "friction") => nf.routine_friction += count,
+                        ("novel", "smooth") => nf.novel_smooth += count,
+                        ("novel", "friction") => nf.novel_friction += count,
+                        _ => {}
+                    }
+                }
+            }
+            drop(dim_rows);
+
+            let has_locus = !locus_map.is_empty();
+            let has_novelty = !novelty_map.is_empty();
+            let has_friction = !friction_map.is_empty();
+            let has_nf = has_novelty && has_friction;
+
+            // Add percentage fields
+            fn add_pct(map: &mut std::collections::HashMap<String, i64>, key: &str) {
+                let total: i64 = map.values().sum();
+                if total > 0
+                    && let Some(&val) = map.get(key)
+                {
+                    let pct = (val as f64 / total as f64 * 1000.0).round() as i64;
+                    map.insert(format!("pct_{key}"), pct);
+                }
+            }
+
+            if has_locus {
+                add_pct(&mut locus_map, "internal");
+            }
+            if has_novelty {
+                add_pct(&mut novelty_map, "novel");
+            }
+            if has_friction {
+                add_pct(&mut friction_map, "friction");
+            }
+
+            (
+                if has_locus { Some(DimensionCounts { counts: locus_map }) } else { None },
+                if has_novelty { Some(DimensionCounts { counts: novelty_map }) } else { None },
+                if has_friction { Some(DimensionCounts { counts: friction_map }) } else { None },
+                if has_nf { Some(nf) } else { None },
+            )
+        };
+
+        // 8. Compute guidance
         let guidance = if scope_5 < 0.0 && scope_20 > 0.0 {
             "Scope shifting toward diverge — new work unit may be starting. Check `session_summaries` for prior `next_steps`. Run `file_history` on new files before editing.".to_string()
         } else if ema_phase < -0.5 {
@@ -1310,6 +1418,10 @@ impl NmemServer {
                 scope_direction,
             },
             recent_shifts,
+            locus: locus_counts,
+            novelty: novelty_counts,
+            friction: friction_counts,
+            novelty_friction: nf_cross,
             guidance,
         };
 

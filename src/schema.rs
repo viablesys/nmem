@@ -145,6 +145,16 @@ ALTER TABLE observations ADD COLUMN scope TEXT;
 ALTER TABLE observations ADD COLUMN scope_run_id INTEGER REFERENCES classifier_runs(id);
 ",
         ),
+        M::up(
+            "
+ALTER TABLE observations ADD COLUMN locus TEXT;
+ALTER TABLE observations ADD COLUMN locus_run_id INTEGER REFERENCES classifier_runs(id);
+ALTER TABLE observations ADD COLUMN novelty TEXT;
+ALTER TABLE observations ADD COLUMN novelty_run_id INTEGER REFERENCES classifier_runs(id);
+ALTER TABLE observations ADD COLUMN friction TEXT;
+ALTER TABLE observations ADD COLUMN friction_run_id INTEGER REFERENCES classifier_runs(id);
+",
+        ),
     ])
 });
 

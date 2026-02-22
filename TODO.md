@@ -107,6 +107,16 @@ Stub — five open questions, no decisions. Blocks `nmem init`, binary packaging
 
 **Why**: Claude Code marketplace/plugin packaging mechanics are unknown. Can't finalize distribution without understanding the target.
 
+### New classifier training (locus, novelty, friction)
+Three new classifier dimensions added (2026-02-22): locus (internal/external), novelty (routine/novel), friction (smooth/friction). Infrastructure wired — shared `s2_inference.rs` engine, schema migration 10, hook pipeline, backfill CLI — but models need training.
+
+**Training workflow:**
+1. Generate heuristic-labeled corpus: `python3 tools/classify-label-heuristic.py --dimension <dim> --output tools/corpus-<dim>.json`
+2. Train: `python3 tools/classify-train.py --corpus tools/corpus-<dim>.json --output models/<labels>.json`
+3. Backfill: `nmem backfill --dimension <dim>`
+
+**Trigger**: Enough observations in the DB (500+) to generate meaningful training data. Heuristic labels serve as bootstrap; agent-augmented paraphrases can improve accuracy as with think/act.
+
 ### Scope classifier augmentation strategy
 The converge/diverge scope classifier (ADR-013) achieves 71.4% CV on real data — functional but below the 80% floor that think/act meets. The bottleneck is augmentation quality: word-dropout transforms don't add decision-boundary signal, so 5478 augmented entries perform no better than 870 base entries on held-out data. Think/act reached 98.8% because 10x LLM-generated paraphrases added genuine semantic variety.
 

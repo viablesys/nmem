@@ -42,14 +42,16 @@ pub enum Command {
     Task(TaskArgs),
     /// Detect cross-session patterns and write learnings report
     Learn(LearnArgs),
-    /// Backfill phase classification for observations with NULL phase
+    /// Backfill classifier labels for observations with NULL values
     Backfill(BackfillArgs),
-    /// Backfill scope classification for observations with NULL scope
-    BackfillScope(BackfillArgs),
 }
 
 #[derive(Parser)]
 pub struct BackfillArgs {
+    /// Dimension to backfill: phase, scope, locus, novelty, friction (default: phase)
+    #[arg(long, default_value = "phase")]
+    pub dimension: String,
+
     /// Batch size for commits (default 500)
     #[arg(long, default_value = "500")]
     pub batch_size: usize,

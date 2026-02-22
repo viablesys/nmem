@@ -190,17 +190,23 @@ fn annotate_episode(conn: &Connection, episode: &Episode) -> Result<WorkUnitRow,
     // Phase signature: use classifier labels (think/act) when available,
     // fall back to obs_type heuristic for old unclassified observations.
     // Also aggregate scope (converge/diverge) from classifier labels.
-    let (investigate, execute, failures, diverge, converge) = {
+    let (investigate, execute, failures, diverge, converge, internal, external, routine, novel, smooth, friction) = {
         let mut stmt = conn.prepare(
-            "SELECT phase, obs_type, scope, COUNT(*) FROM observations
+            "SELECT phase, obs_type, scope, locus, novelty, friction, COUNT(*) FROM observations
              WHERE session_id = ?1
                AND prompt_id >= ?2 AND prompt_id <= ?3
-             GROUP BY phase, obs_type, scope",
+             GROUP BY phase, obs_type, scope, locus, novelty, friction",
         )?;
         let mut inv = 0i64;
         let mut exe = 0i64;
         let mut div = 0i64;
         let mut conv = 0i64;
+        let mut int = 0i64;
+        let mut ext = 0i64;
+        let mut rout = 0i64;
+        let mut nov = 0i64;
+        let mut sm = 0i64;
+        let mut fric = 0i64;
 
         let mut rows = stmt.query(params![
             episode.session_id,
@@ -211,11 +217,13 @@ fn annotate_episode(conn: &Connection, episode: &Episode) -> Result<WorkUnitRow,
             let phase: Option<String> = row.get(0)?;
             let obs_type: String = row.get(1)?;
             let scope: Option<String> = row.get(2)?;
-            let count: i64 = row.get(3)?;
+            let locus: Option<String> = row.get(3)?;
+            let novelty: Option<String> = row.get(4)?;
+            let friction: Option<String> = row.get(5)?;
+            let count: i64 = row.get(6)?;
             match phase.as_deref() {
                 Some("think") => inv += count,
                 Some("act") => exe += count,
-                // NULL phase: fall back to obs_type heuristic for old data
                 None => match obs_type.as_str() {
                     "file_read" | "search" | "web_search" | "web_fetch" => inv += count,
                     "file_edit" | "file_write" | "git_commit" | "git_push" | "command" => exe += count,
@@ -226,6 +234,21 @@ fn annotate_episode(conn: &Connection, episode: &Episode) -> Result<WorkUnitRow,
             match scope.as_deref() {
                 Some("diverge") => div += count,
                 Some("converge") => conv += count,
+                _ => {}
+            }
+            match locus.as_deref() {
+                Some("internal") => int += count,
+                Some("external") => ext += count,
+                _ => {}
+            }
+            match novelty.as_deref() {
+                Some("routine") => rout += count,
+                Some("novel") => nov += count,
+                _ => {}
+            }
+            match friction.as_deref() {
+                Some("smooth") => sm += count,
+                Some("friction") => fric += count,
                 _ => {}
             }
         }
@@ -240,7 +263,7 @@ fn annotate_episode(conn: &Connection, episode: &Episode) -> Result<WorkUnitRow,
             |r| r.get(0),
         )?;
 
-        (inv, exe, fail, div, conv)
+        (inv, exe, fail, div, conv, int, ext, rout, nov, sm, fric)
     };
 
     let obs_count: i64 = conn.query_row(
@@ -258,6 +281,12 @@ fn annotate_episode(conn: &Connection, episode: &Episode) -> Result<WorkUnitRow,
         "failures": failures,
         "diverge": diverge,
         "converge": converge,
+        "internal": internal,
+        "external": external,
+        "routine": routine,
+        "novel": novel,
+        "smooth": smooth,
+        "friction": friction,
     })
     .to_string();
 

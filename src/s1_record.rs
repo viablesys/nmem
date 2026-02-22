@@ -2,6 +2,9 @@ use crate::s4_context;
 use crate::s1_extract::{classify_tool, extract_content, extract_file_path, extract_git_metadata};
 use crate::s1_4_transcript::{get_current_prompt_id, scan_transcript};
 use crate::s2_classify;
+use crate::s2_friction;
+use crate::s2_locus;
+use crate::s2_novelty;
 use crate::s2_scope;
 use crate::s3_sweep::run_sweep;
 use crate::s5_config::{load_config, resolve_filter_params, NmemConfig};
@@ -285,9 +288,30 @@ fn handle_post_tool_use(
             .ok()
     });
 
+    // Classify locus (internal/external) — non-fatal
+    let locus_result = s2_locus::classify_locus(&filtered_content);
+    let locus = locus_result.as_ref().map(|r| r.label);
+    let locus_run_id = locus_result.as_ref().and_then(|r| {
+        s2_classify::ensure_classifier_run(&tx, "internal-external", r.model_hash, None, None, None).ok()
+    });
+
+    // Classify novelty (routine/novel) — non-fatal
+    let novelty_result = s2_novelty::classify_novelty(&filtered_content);
+    let novelty = novelty_result.as_ref().map(|r| r.label);
+    let novelty_run_id = novelty_result.as_ref().and_then(|r| {
+        s2_classify::ensure_classifier_run(&tx, "routine-novel", r.model_hash, None, None, None).ok()
+    });
+
+    // Classify friction (smooth/friction) — non-fatal
+    let friction_result = s2_friction::classify_friction(&filtered_content);
+    let friction = friction_result.as_ref().map(|r| r.label);
+    let friction_run_id = friction_result.as_ref().and_then(|r| {
+        s2_classify::ensure_classifier_run(&tx, "smooth-friction", r.model_hash, None, None, None).ok()
+    });
+
     tx.execute(
-        "INSERT INTO observations (session_id, prompt_id, timestamp, obs_type, source_event, tool_name, file_path, content, metadata, phase, classifier_run_id, scope, scope_run_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        "INSERT INTO observations (session_id, prompt_id, timestamp, obs_type, source_event, tool_name, file_path, content, metadata, phase, classifier_run_id, scope, scope_run_id, locus, locus_run_id, novelty, novelty_run_id, friction, friction_run_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         params![
             payload.session_id,
             prompt_id,
@@ -302,6 +326,12 @@ fn handle_post_tool_use(
             classifier_run_id,
             scope,
             scope_run_id,
+            locus,
+            locus_run_id,
+            novelty,
+            novelty_run_id,
+            friction,
+            friction_run_id,
         ],
     )?;
 
@@ -317,6 +347,9 @@ fn handle_post_tool_use(
         &filtered_content,
         phase,
         scope,
+        locus,
+        novelty,
+        friction,
         &metadata_str,
     );
 
@@ -335,6 +368,9 @@ fn stream_observation_to_logs(
     content: &str,
     phase: Option<&str>,
     scope: Option<&str>,
+    locus: Option<&str>,
+    novelty: Option<&str>,
+    friction: Option<&str>,
     metadata_str: &Option<String>,
 ) {
     // Build a meaningful _msg — for git ops, use commit info instead of raw command
@@ -358,6 +394,15 @@ fn stream_observation_to_logs(
     }
     if let Some(s) = scope {
         record["scope"] = serde_json::Value::String(s.to_string());
+    }
+    if let Some(l) = locus {
+        record["locus"] = serde_json::Value::String(l.to_string());
+    }
+    if let Some(n) = novelty {
+        record["novelty"] = serde_json::Value::String(n.to_string());
+    }
+    if let Some(fr) = friction {
+        record["friction"] = serde_json::Value::String(fr.to_string());
     }
 
     // Merge git-specific fields into the log record

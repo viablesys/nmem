@@ -24,8 +24,12 @@ cargo build --release
 **Must rebuild after changing:**
 - `s1_record.rs` — hook event handling, observation storage
 - `s1_extract.rs` — tool classification, content extraction
+- `s2_inference.rs` — shared TF-IDF inference engine
 - `s2_classify.rs` — think/act phase classification
 - `s2_scope.rs` — converge/diverge scope classification
+- `s2_locus.rs` — internal/external locus classification
+- `s2_novelty.rs` — routine/novel novelty classification
+- `s2_friction.rs` — smooth/friction classification
 - `s5_filter.rs` — secret redaction patterns
 - `s4_context.rs` — SessionStart context injection
 - `s1_4_summarize.rs` — end-of-session summarization
@@ -49,7 +53,7 @@ nmem is designed around Stafford Beer's Viable System Model. Every module maps t
 |--------|-------------|---------|
 | **S1** Operations | Capture, store, retrieve | `s1_record.rs`, `s1_extract.rs`, `s1_serve.rs`, `s1_search.rs`, `s1_pin.rs` |
 | **S1's S4** | Session summarization — S1's own intelligence layer | `s1_4_summarize.rs`, `s1_4_transcript.rs` |
-| **S2** Coordination | Dedup, ordering, classification | SQLite WAL, dedup checks in `s1_record.rs`, `s2_classify.rs`, `s2_scope.rs` |
+| **S2** Coordination | Dedup, ordering, classification | SQLite WAL, dedup checks in `s1_record.rs`, `s2_inference.rs`, `s2_classify.rs`, `s2_scope.rs`, `s2_locus.rs`, `s2_novelty.rs`, `s2_friction.rs` |
 | **S3** Control | Storage budgets, retention, compaction | `s3_sweep.rs`, `s3_maintain.rs`, `s3_purge.rs` |
 | **S3*** Audit | Integrity checks | `s3_maintain.rs` (FTS rebuild, integrity) |
 | **S4** Intelligence | Context injection, task dispatch, cross-session pattern detection, episodic memory | `s4_context.rs`, `s4_dispatch.rs`, `s4_memory.rs`, `s3_learn.rs` |
@@ -73,7 +77,7 @@ No daemon. Four process modes:
 ```
 SessionStart → create session row, inject context into stdout
                Context: intents → episodes (within 48h window) → fallback summaries (older) → suggested tasks → obs table
-PostToolUse  → extract observation from tool_input/tool_response, classify phase (think/act) + scope (converge/diverge), extract git metadata (commit/push), dedup, write, stream to VictoriaLogs
+PostToolUse  → extract observation from tool_input/tool_response, classify 5 dimensions (phase/scope/locus/novelty/friction), extract git metadata (commit/push), dedup, write, stream to VictoriaLogs
 Stop         → mark session ended, compute signature, detect episodes, summarize, WAL checkpoint
 ```
 
@@ -86,15 +90,19 @@ Files are prefixed by VSM layer: `s1_` (Operations), `s1_4_` (S1's S4), `s3_` (C
 | `main.rs` | infra | CLI dispatch, `run()` entry point |
 | `cli.rs` | infra | clap derive definitions only |
 | `db.rs` | infra | `open_db()`, SQLCipher key management, PRAGMAs |
-| `schema.rs` | infra | `rusqlite_migration` definitions (9 migrations) |
+| `schema.rs` | infra | `rusqlite_migration` definitions (10 migrations) |
 | `metrics.rs` | infra | Optional OTLP metrics export |
 | `status.rs` | infra | Status reporting |
 | `s1_record.rs` | S1 | Hook stdin → JSON → observation extraction + phase classification + storage |
 | `s1_serve.rs` | S1 | MCP server (`NmemServer`), tools: `search`, `get_observations`, `recent_context`, `queue_task`, etc. |
 | `s1_search.rs` | S1 | CLI search with BM25 + recency blended ranking |
 | `s1_extract.rs` | S1 | `classify_tool()`, `classify_bash()`, `extract_content()`, `extract_file_path()` |
-| `s2_classify.rs` | S2 | Think/act phase classifier — TF-IDF + LinearSVC inference from exported JSON model |
-| `s2_scope.rs` | S2 | Converge/diverge scope classifier — same architecture as s2_classify, separate model |
+| `s2_inference.rs` | S2 | Shared TF-IDF + LinearSVC inference engine — types, tokenization, scoring, generic backfill |
+| `s2_classify.rs` | S2 | Think/act phase classifier — thin wrapper over s2_inference |
+| `s2_scope.rs` | S2 | Converge/diverge scope classifier — thin wrapper over s2_inference |
+| `s2_locus.rs` | S2 | Internal/external locus classifier — thin wrapper over s2_inference |
+| `s2_novelty.rs` | S2 | Routine/novel novelty classifier — thin wrapper over s2_inference |
+| `s2_friction.rs` | S2 | Smooth/friction classifier — thin wrapper over s2_inference |
 | `s4_context.rs` | S4 | SessionStart context injection (intents + episodes + fallback summaries + suggested tasks + obs table) |
 | `s1_pin.rs` | S1 | Pin/unpin observations |
 | `s1_4_summarize.rs` | S1's S4 | End-of-session LLM summarization, VictoriaLogs streaming |
@@ -113,7 +121,7 @@ Files are prefixed by VSM layer: `s1_` (Operations), `s1_4_` (S1's S4), `s3_` (C
 
 SQLite with `bundled-sqlcipher`. DB at `~/.nmem/nmem.db` (override: `--db` or `NMEM_DB`).
 
-Five tables: `sessions`, `prompts`, `observations`, `tasks`, `work_units` + `classifier_runs` + external FTS5 indexes (`observations_fts`, `prompts_fts`). Full schema in `design/SCHEMA.md`. Schema versioned via `rusqlite_migration` `user_version` PRAGMA (9 migrations).
+Five tables: `sessions`, `prompts`, `observations`, `tasks`, `work_units` + `classifier_runs` + external FTS5 indexes (`observations_fts`, `prompts_fts`). Full schema in `design/SCHEMA.md`. Schema versioned via `rusqlite_migration` `user_version` PRAGMA (10 migrations).
 
 Key PRAGMAs: `journal_mode=WAL`, `synchronous=NORMAL`, `busy_timeout=5000`, `foreign_keys=ON`.
 
@@ -171,7 +179,7 @@ ADRs in `design/ADR/`. Read before changing load-bearing decisions:
 | `s1_search.rs` | `fts5.md`, `sqlite-retrieval-patterns.md` |
 | `s1_serve.rs` | `rmcp.md`, `fts5.md` |
 | `s1_record.rs`, `s1_extract.rs` | `claude-code-hooks-events.md`, `serde-json.md` |
-| `s2_classify.rs`, `s2_scope.rs` | `sklearn-text-classification.md`, `serde-json.md` |
+| `s2_inference.rs`, `s2_classify.rs`, `s2_scope.rs`, `s2_locus.rs`, `s2_novelty.rs`, `s2_friction.rs` | `sklearn-text-classification.md`, `serde-json.md` |
 | `s5_filter.rs` | `regex.md` |
 | `s4_context.rs` | `sqlite-retrieval-patterns.md`, `episodic-memory.md` |
 | `s4_memory.rs` | `episodic-memory.md`, `sqlite-retrieval-patterns.md` |
@@ -206,14 +214,17 @@ Observation classification vocabulary. Bash commands are sub-classified by `clas
 | `mcp_call` | `*__*` tools | External tool |
 | `tool_other` | Unknown tools | Uncategorized |
 
-## Stance (phase × scope)
+## Stance (5 classifier dimensions)
 
-Every observation is classified on two orthogonal dimensions at write time:
+Every observation is classified on five orthogonal dimensions at write time:
 
 - **Phase**: `think` (reasoning, investigating) vs `act` (editing, committing, executing)
 - **Scope**: `diverge` (exploring, broadening) vs `converge` (narrowing, completing)
+- **Locus**: `internal` (within project) vs `external` (reaching outside)
+- **Novelty**: `routine` (familiar operation) vs `novel` (new territory)
+- **Friction**: `smooth` (clean progress) vs `friction` (encountering resistance)
 
-Together these form four **stance** quadrants:
+Phase × scope form the four primary **stance** quadrants:
 
 | Stance | Character | Typical obs_types |
 |--------|-----------|-------------------|
