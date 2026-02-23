@@ -67,17 +67,33 @@ fn nmem_dir() -> Option<std::path::PathBuf> {
         .map(|h| std::path::PathBuf::from(h).join(".nmem"))
 }
 
+/// Embedded model weights — compiled into the binary.
+mod embedded {
+    pub const THINK_ACT: &str = include_str!("../models/think-act.json");
+    pub const CONVERGE_DIVERGE: &str = include_str!("../models/converge-diverge.json");
+    pub const INTERNAL_EXTERNAL: &str = include_str!("../models/internal-external.json");
+    pub const ROUTINE_NOVEL: &str = include_str!("../models/routine-novel.json");
+}
+
+/// Get embedded model data by filename.
+fn embedded_model_data(filename: &str) -> Option<&'static str> {
+    match filename {
+        "think-act.json" => Some(embedded::THINK_ACT),
+        "converge-diverge.json" => Some(embedded::CONVERGE_DIVERGE),
+        "internal-external.json" => Some(embedded::INTERNAL_EXTERNAL),
+        "routine-novel.json" => Some(embedded::ROUTINE_NOVEL),
+        _ => None,
+    }
+}
+
 /// Resolve model path by searching standard locations.
+/// External files override embedded models (for development or model updates).
 pub(crate) fn resolve_model_path(filename: &str) -> std::path::PathBuf {
     let candidates = [
-        // Next to the binary (release builds)
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("../../models").join(filename))),
+        // ~/.nmem/models/ (user override)
+        nmem_dir().map(|d| d.join("models").join(filename)),
         // Project root (development)
         Some(std::path::PathBuf::from("models").join(filename)),
-        // ~/.nmem/models/
-        nmem_dir().map(|d| d.join("models").join(filename)),
     ];
 
     for candidate in candidates.into_iter().flatten() {
@@ -86,15 +102,14 @@ pub(crate) fn resolve_model_path(filename: &str) -> std::path::PathBuf {
         }
     }
 
-    // Fallback — will fail gracefully
+    // Fallback — will fail gracefully (embedded models handle this case)
     std::path::PathBuf::from("models").join(filename)
 }
 
-/// Load a model from a JSON file.
-pub(crate) fn load_model_from(path: &Path) -> Option<Model> {
-    let raw = std::fs::read(path).ok()?;
-    let hash = siphash_hex(&raw);
-    let exported: ExportedModel = serde_json::from_str(std::str::from_utf8(&raw).ok()?).ok()?;
+/// Load a model from raw JSON bytes.
+fn parse_model(raw: &[u8]) -> Option<Model> {
+    let hash = siphash_hex(raw);
+    let exported: ExportedModel = serde_json::from_str(std::str::from_utf8(raw).ok()?).ok()?;
 
     Some(Model {
         classes: exported.classes,
@@ -105,25 +120,44 @@ pub(crate) fn load_model_from(path: &Path) -> Option<Model> {
     })
 }
 
+/// Load a model from a JSON file.
+pub(crate) fn load_model_from(path: &Path) -> Option<Model> {
+    let raw = std::fs::read(path).ok()?;
+    parse_model(&raw)
+}
+
 /// Load or retrieve a cached model from a OnceLock.
+/// Tries external file first (for overrides), falls back to embedded model.
 pub(crate) fn load_or_get_model<'a>(
     lock: &'a OnceLock<Option<Model>>,
     filename: &str,
     log_name: &str,
 ) -> Option<&'a Model> {
     lock.get_or_init(|| {
+        // Try external file first (allows overriding embedded models)
         let path = resolve_model_path(filename);
-        match load_model_from(&path) {
-            Some(m) => {
+        if let Some(m) = load_model_from(&path) {
+            eprintln!(
+                "nmem: loaded {log_name} model from file ({} word + {} char features)",
+                m.word.vocabulary.len(),
+                m.char.vocabulary.len()
+            );
+            return Some(m);
+        }
+
+        // Fall back to embedded model
+        if let Some(data) = embedded_model_data(filename) {
+            if let Some(m) = parse_model(data.as_bytes()) {
                 eprintln!(
-                    "nmem: loaded {log_name} model ({} word + {} char features)",
+                    "nmem: loaded {log_name} model (embedded, {} word + {} char features)",
                     m.word.vocabulary.len(),
                     m.char.vocabulary.len()
                 );
-                Some(m)
+                return Some(m);
             }
-            None => None,
         }
+
+        None
     })
     .as_ref()
 }
