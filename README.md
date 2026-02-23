@@ -4,15 +4,20 @@ Cross-session memory for Claude Code. Captures observations from every session (
 
 ## Install
 
+1. Install the binary:
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/viablesys/nmem/main/scripts/install.sh | sh
 ```
 
-Then install the Claude Code plugin:
+2. Add the marketplace and install the plugin:
 
 ```sh
-claude plugin add viablesys/nmem
+claude plugin marketplace add viablesys/claude-plugins
+claude plugin install nmem@viablesys
 ```
+
+3. Restart Claude Code.
 
 ## What gets captured
 
