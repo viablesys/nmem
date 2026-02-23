@@ -10,8 +10,8 @@
     {
       "name": "nmem",
       "source": {
-        "source": "github",
-        "repo": "viablesys/nmem"
+        "source": "url",
+        "url": "https://github.com/viablesys/nmem.git"
       },
       "description": "Cross-session memory for Claude Code. Captures observations, classifies on 5 dimensions, retrieves via MCP tools.",
       "version": "1.0.0",
