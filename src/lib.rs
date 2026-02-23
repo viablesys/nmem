@@ -7,6 +7,7 @@ pub mod status;
 
 // S1 Operations — capture, store, retrieve
 pub mod s1_extract;
+pub mod s1_mark;
 pub mod s1_pin;
 pub mod s1_record;
 pub mod s1_search;
@@ -14,7 +15,6 @@ pub mod s1_serve;
 
 // S2 Coordination — classification, dedup
 pub mod s2_classify;
-pub mod s2_friction;
 pub mod s2_inference;
 pub mod s2_locus;
 pub mod s2_novelty;
@@ -43,6 +43,7 @@ pub mod s5_project;
 // Backward-compat aliases — external code (main.rs, tests) can use old names
 pub use s4_context as context;
 pub use s1_extract as extract;
+pub use s1_mark as mark;
 pub use s1_pin as pin;
 pub use s1_record as record;
 pub use s1_search as search;

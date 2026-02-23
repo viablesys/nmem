@@ -60,8 +60,52 @@ pub fn handle_maintain(db_path: &Path, args: &MaintainArgs) -> Result<(), NmemEr
         }
     }
 
+    // Resummarize all sessions
+    if args.resummarize {
+        let config = load_config().unwrap_or_default();
+        if !config.summarization.enabled {
+            eprintln!("nmem: resummarize skipped (summarization not enabled)");
+        } else {
+            resummarize_all(&conn, &config.summarization)?;
+        }
+    }
+
     let size_after = std::fs::metadata(db_path)?.len();
     eprintln!("nmem: database: {} → {}", fmt_size(size_before), fmt_size(size_after));
+
+    Ok(())
+}
+
+fn resummarize_all(
+    conn: &rusqlite::Connection,
+    config: &crate::s5_config::SummarizationConfig,
+) -> Result<(), NmemError> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM sessions WHERE summary IS NOT NULL ORDER BY started_at ASC",
+    )?;
+    let session_ids: Vec<String> = stmt
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+
+    let total = session_ids.len();
+    eprintln!("nmem: resummarizing {total} sessions...");
+
+    let mut success = 0u64;
+    let mut failed = 0u64;
+    for (i, sid) in session_ids.iter().enumerate() {
+        match crate::s1_4_summarize::summarize_session(conn, sid, config) {
+            Ok(()) => {
+                success += 1;
+                eprint!("\rnmem: [{}/{}] {} ok, {} failed", i + 1, total, success, failed);
+            }
+            Err(e) => {
+                failed += 1;
+                eprint!("\rnmem: [{}/{}] {} ok, {} failed", i + 1, total, success, failed);
+                eprintln!(" — {sid}: {e}");
+            }
+        }
+    }
+    eprintln!("\nnmem: resummarize complete — {success} ok, {failed} failed");
 
     Ok(())
 }

@@ -29,7 +29,6 @@ cargo build --release
 - `s2_scope.rs` — converge/diverge scope classification
 - `s2_locus.rs` — internal/external locus classification
 - `s2_novelty.rs` — routine/novel novelty classification
-- `s2_friction.rs` — smooth/friction classification
 - `s5_filter.rs` — secret redaction patterns
 - `s4_context.rs` — SessionStart context injection
 - `s1_4_summarize.rs` — end-of-session summarization
@@ -53,7 +52,7 @@ nmem is designed around Stafford Beer's Viable System Model. Every module maps t
 |--------|-------------|---------|
 | **S1** Operations | Capture, store, retrieve | `s1_record.rs`, `s1_extract.rs`, `s1_serve.rs`, `s1_search.rs`, `s1_pin.rs` |
 | **S1's S4** | Session summarization — S1's own intelligence layer | `s1_4_summarize.rs`, `s1_4_transcript.rs` |
-| **S2** Coordination | Dedup, ordering, classification | SQLite WAL, dedup checks in `s1_record.rs`, `s2_inference.rs`, `s2_classify.rs`, `s2_scope.rs`, `s2_locus.rs`, `s2_novelty.rs`, `s2_friction.rs` |
+| **S2** Coordination | Dedup, ordering, classification | SQLite WAL, dedup checks in `s1_record.rs`, `s2_inference.rs`, `s2_classify.rs`, `s2_scope.rs`, `s2_locus.rs`, `s2_novelty.rs` |
 | **S3** Control | Storage budgets, retention, compaction | `s3_sweep.rs`, `s3_maintain.rs`, `s3_purge.rs` |
 | **S3*** Audit | Integrity checks | `s3_maintain.rs` (FTS rebuild, integrity) |
 | **S4** Intelligence | Context injection, task dispatch, cross-session pattern detection, episodic memory | `s4_context.rs`, `s4_dispatch.rs`, `s4_memory.rs`, `s3_learn.rs` |
@@ -90,7 +89,7 @@ Files are prefixed by VSM layer: `s1_` (Operations), `s1_4_` (S1's S4), `s3_` (C
 | `main.rs` | infra | CLI dispatch, `run()` entry point |
 | `cli.rs` | infra | clap derive definitions only |
 | `db.rs` | infra | `open_db()`, SQLCipher key management, PRAGMAs |
-| `schema.rs` | infra | `rusqlite_migration` definitions (10 migrations) |
+| `schema.rs` | infra | `rusqlite_migration` definitions (11 migrations) |
 | `metrics.rs` | infra | Optional OTLP metrics export |
 | `status.rs` | infra | Status reporting |
 | `s1_record.rs` | S1 | Hook stdin → JSON → observation extraction + phase classification + storage |
@@ -102,15 +101,14 @@ Files are prefixed by VSM layer: `s1_` (Operations), `s1_4_` (S1's S4), `s3_` (C
 | `s2_scope.rs` | S2 | Converge/diverge scope classifier — thin wrapper over s2_inference |
 | `s2_locus.rs` | S2 | Internal/external locus classifier — thin wrapper over s2_inference |
 | `s2_novelty.rs` | S2 | Routine/novel novelty classifier — thin wrapper over s2_inference |
-| `s2_friction.rs` | S2 | Smooth/friction classifier — thin wrapper over s2_inference |
 | `s4_context.rs` | S4 | SessionStart context injection (intents + episodes + fallback summaries + suggested tasks + obs table) |
 | `s1_pin.rs` | S1 | Pin/unpin observations |
 | `s1_4_summarize.rs` | S1's S4 | End-of-session LLM summarization, VictoriaLogs streaming |
 | `s1_4_transcript.rs` | S1's S4 | Scan transcript for prompt tracking |
 | `s3_learn.rs` | S4 | Cross-session pattern detection: failures, errors, intents, stuck loops |
 | `s4_dispatch.rs` | S4 | Task queue and systemd-driven dispatch to tmux |
-| `s4_memory.rs` | S4 | Episodic memory: intra-session episode detection, annotation, narrative generation |
-| `s3_sweep.rs` | S3 | Retention-based purge (per obs_type TTL, respects pins) |
+| `s4_memory.rs` | S4 | Episodic memory: episode detection, annotation, narrative generation, episode-level friction labeling, obs_trace rollup |
+| `s3_sweep.rs` | S3 | Retention-based purge (per obs_type TTL, respects pins, requires session summarization) |
 | `s3_maintain.rs` | S3 | Vacuum, WAL checkpoint, FTS integrity/rebuild |
 | `s3_purge.rs` | S3 | Manual purge by date/project/session/type/search |
 | `s5_config.rs` | S5 | TOML config loading from `~/.nmem/config.toml` |
@@ -121,7 +119,9 @@ Files are prefixed by VSM layer: `s1_` (Operations), `s1_4_` (S1's S4), `s3_` (C
 
 SQLite with `bundled-sqlcipher`. DB at `~/.nmem/nmem.db` (override: `--db` or `NMEM_DB`).
 
-Five tables: `sessions`, `prompts`, `observations`, `tasks`, `work_units` + `classifier_runs` + external FTS5 indexes (`observations_fts`, `prompts_fts`). Full schema in `design/SCHEMA.md`. Schema versioned via `rusqlite_migration` `user_version` PRAGMA (10 migrations).
+Five tables: `sessions`, `prompts`, `observations`, `tasks`, `work_units` + `classifier_runs` + external FTS5 indexes (`observations_fts`, `prompts_fts`). Full schema in `design/SCHEMA.md`. Schema versioned via `rusqlite_migration` `user_version` PRAGMA (11 migrations).
+
+`work_units.obs_trace` (TEXT, JSON) — compact per-observation fingerprint array frozen at episode detection time. Each entry: `{t, type, fp?, p?, s?, l?, n?, f?, fail?}`. This is the downsampling tier: observations are raw metrics, `obs_trace` is the rollup. Once frozen, S3 can sweep observations freely. S3 sweep precondition: only sweeps observations from sessions with `summary IS NOT NULL`.
 
 Key PRAGMAs: `journal_mode=WAL`, `synchronous=NORMAL`, `busy_timeout=5000`, `foreign_keys=ON`.
 
@@ -179,7 +179,7 @@ ADRs in `design/ADR/`. Read before changing load-bearing decisions:
 | `s1_search.rs` | `fts5.md`, `sqlite-retrieval-patterns.md` |
 | `s1_serve.rs` | `rmcp.md`, `fts5.md` |
 | `s1_record.rs`, `s1_extract.rs` | `claude-code-hooks-events.md`, `serde-json.md` |
-| `s2_inference.rs`, `s2_classify.rs`, `s2_scope.rs`, `s2_locus.rs`, `s2_novelty.rs`, `s2_friction.rs` | `sklearn-text-classification.md`, `serde-json.md` |
+| `s2_inference.rs`, `s2_classify.rs`, `s2_scope.rs`, `s2_locus.rs`, `s2_novelty.rs` | `sklearn-text-classification.md`, `serde-json.md` |
 | `s5_filter.rs` | `regex.md` |
 | `s4_context.rs` | `sqlite-retrieval-patterns.md`, `episodic-memory.md` |
 | `s4_memory.rs` | `episodic-memory.md`, `sqlite-retrieval-patterns.md` |
@@ -216,13 +216,13 @@ Observation classification vocabulary. Bash commands are sub-classified by `clas
 
 ## Stance (5 classifier dimensions)
 
-Every observation is classified on five orthogonal dimensions at write time:
+Every observation is classified on five orthogonal dimensions. Phase, scope, locus, and novelty are classified per-observation at write time (S2). Friction is classified per-episode at session end (S4), based on failure count.
 
-- **Phase**: `think` (reasoning, investigating) vs `act` (editing, committing, executing)
-- **Scope**: `diverge` (exploring, broadening) vs `converge` (narrowing, completing)
-- **Locus**: `internal` (within project) vs `external` (reaching outside)
-- **Novelty**: `routine` (familiar operation) vs `novel` (new territory)
-- **Friction**: `smooth` (clean progress) vs `friction` (encountering resistance)
+- **Phase**: `think` (reasoning, investigating) vs `act` (editing, committing, executing) — S2, write-time
+- **Scope**: `diverge` (exploring, broadening) vs `converge` (narrowing, completing) — S2, write-time
+- **Locus**: `internal` (within project) vs `external` (reaching outside) — S2, write-time
+- **Novelty**: `routine` (familiar operation) vs `novel` (new territory) — S2, write-time
+- **Friction**: `smooth` (clean progress) vs `friction` (encountering resistance) — S4, episode-level, heuristic: `failures > 0` in episode's phase_signature
 
 Phase × scope form the four primary **stance** quadrants:
 
@@ -233,9 +233,25 @@ Phase × scope form the four primary **stance** quadrants:
 | act+diverge | Executing exploratory work | file_edit (refactoring), task_spawn |
 | act+converge | Executing toward solution | file_edit (implementation), git_commit, git_push |
 
-### Observed distributions
+### Observed distributions (baseline 2026-02-22, n=3753)
 
-Across 3000+ observations: act+diverge 41%, act+converge 34%, think+diverge 14%, think+converge 11%. Sessions are act-heavy — the agent spends most time executing. The scope dimension oscillates more than phase, reflecting investigation/implementation cycles within a session.
+**Phase × scope**: act+diverge 41%, act+converge 34%, think+diverge 14%, think+converge 11%. Sessions are act-heavy — the agent spends most time executing. The scope dimension oscillates more than phase, reflecting investigation/implementation cycles within a session.
+
+**Locus**: 79.5% internal, 20.5% external. `git_commit` classifies 100% internal (24/24), `git_push` classifies 100% external (20/20) — the boundary sits at the project edge. External is almost exclusively novel (90%), internal is mostly routine (80%).
+
+**Novelty**: 65.9% routine, 34.1% novel. Novel work generates 2× the friction rate of routine (12.7% vs 3.5%). External+novel (18.5%) captures investigatory probing — the data-driven design pattern where the agent curls endpoints and reads unfamiliar docs.
+
+**Friction**: Now episode-level (S4). An episode has friction if `failures > 0` in its phase_signature. All observations in the episode inherit the label. This replaced the S2 text classifier (59% recall) — friction is about outcomes, not inputs, and the failure signal is ground truth. Observations not in any episode have NULL friction. During an active session, friction is NULL until the Stop hook runs episode detection.
+
+**Cross-tab: locus × novelty** reveals session character:
+- `internal+routine` (64%) — established codebase work
+- `external+novel` (18.5%) — exploratory probing
+- `internal+novel` (15.5%) — new work within the project
+- `external+routine` (2%) — habitual external actions (repeated pushes, recurring API calls)
+
+**Known classifier gap**: Phase classifies diagnostic commands (`curl` to query APIs, status checks) as "act" even when the intent is investigatory. Novelty and locus capture the investigatory character that phase misses — a session that's majority `novel+external` is exploring regardless of what phase says.
+
+**Per-project fingerprints**: Established projects (nmem) show high internal/routine ratios with moderate friction. Newer projects (multipass) show higher external/novel ratios — still finding their shape.
 
 ### Session stance analysis
 

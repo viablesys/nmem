@@ -2,7 +2,6 @@ use crate::s4_context;
 use crate::s1_extract::{classify_tool, extract_content, extract_file_path, extract_git_metadata};
 use crate::s1_4_transcript::{get_current_prompt_id, scan_transcript};
 use crate::s2_classify;
-use crate::s2_friction;
 use crate::s2_locus;
 use crate::s2_novelty;
 use crate::s2_scope;
@@ -302,12 +301,9 @@ fn handle_post_tool_use(
         s2_classify::ensure_classifier_run(&tx, "routine-novel", r.model_hash, None, None, None).ok()
     });
 
-    // Classify friction (smooth/friction) — non-fatal
-    let friction_result = s2_friction::classify_friction(&filtered_content);
-    let friction = friction_result.as_ref().map(|r| r.label);
-    let friction_run_id = friction_result.as_ref().and_then(|r| {
-        s2_classify::ensure_classifier_run(&tx, "smooth-friction", r.model_hash, None, None, None).ok()
-    });
+    // Friction is now computed at episode level (S4), not per-observation
+    let friction: Option<&str> = None;
+    let friction_run_id: Option<i64> = None;
 
     tx.execute(
         "INSERT INTO observations (session_id, prompt_id, timestamp, obs_type, source_event, tool_name, file_path, content, metadata, phase, classifier_run_id, scope, scope_run_id, locus, locus_run_id, novelty, novelty_run_id, friction, friction_run_id)
@@ -359,7 +355,7 @@ fn handle_post_tool_use(
 const VLOGS_ENDPOINT: &str = "http://localhost:9428/insert/jsonline";
 
 #[allow(clippy::too_many_arguments)]
-fn stream_observation_to_logs(
+pub(crate) fn stream_observation_to_logs(
     session_id: &str,
     project: &str,
     obs_type: &str,

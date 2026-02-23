@@ -35,6 +35,7 @@ struct WorkUnitRow {
     hot_files: String,
     phase_signature: String,
     obs_count: i64,
+    obs_trace: Option<String>,
 }
 
 /// Ensure the user_intent_stream view exists (idempotent).
@@ -290,6 +291,65 @@ fn annotate_episode(conn: &Connection, episode: &Episode) -> Result<WorkUnitRow,
     })
     .to_string();
 
+    // Compute obs_trace: compact per-observation fingerprint for S3 sweep safety
+    let obs_trace = {
+        let mut stmt = conn.prepare(
+            "SELECT timestamp, obs_type, file_path, phase, scope, locus, novelty, friction,
+                    CASE WHEN json_extract(metadata, '$.failed') = 1 THEN 1 ELSE 0 END as failed
+             FROM observations
+             WHERE session_id = ?1 AND prompt_id >= ?2 AND prompt_id <= ?3
+             ORDER BY timestamp ASC",
+        )?;
+        let trace: Vec<serde_json::Value> = stmt
+            .query_map(
+                params![episode.session_id, episode.first_prompt_id, episode.last_prompt_id],
+                |r| {
+                    let ts: i64 = r.get(0)?;
+                    let obs_type: String = r.get(1)?;
+                    let file_path: Option<String> = r.get(2)?;
+                    let phase: Option<String> = r.get(3)?;
+                    let scope: Option<String> = r.get(4)?;
+                    let locus: Option<String> = r.get(5)?;
+                    let novelty: Option<String> = r.get(6)?;
+                    let friction: Option<String> = r.get(7)?;
+                    let failed: bool = r.get::<_, i64>(8)? != 0;
+
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("t".into(), serde_json::Value::Number(ts.into()));
+                    obj.insert("type".into(), serde_json::Value::String(obs_type));
+                    if let Some(fp) = file_path {
+                        obj.insert("fp".into(), serde_json::Value::String(fp));
+                    }
+                    if let Some(p) = phase {
+                        obj.insert("p".into(), serde_json::Value::String(p));
+                    }
+                    if let Some(s) = scope {
+                        obj.insert("s".into(), serde_json::Value::String(s));
+                    }
+                    if let Some(l) = locus {
+                        obj.insert("l".into(), serde_json::Value::String(l));
+                    }
+                    if let Some(n) = novelty {
+                        obj.insert("n".into(), serde_json::Value::String(n));
+                    }
+                    if let Some(f) = friction {
+                        obj.insert("f".into(), serde_json::Value::String(f));
+                    }
+                    if failed {
+                        obj.insert("fail".into(), serde_json::Value::Bool(true));
+                    }
+                    Ok(serde_json::Value::Object(obj))
+                },
+            )?
+            .collect::<Result<_, _>>()?;
+
+        if trace.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&trace)?)
+        }
+    };
+
     Ok(WorkUnitRow {
         session_id: episode.session_id.clone(),
         started_at: episode.started_at,
@@ -300,6 +360,7 @@ fn annotate_episode(conn: &Connection, episode: &Episode) -> Result<WorkUnitRow,
         hot_files: hot_files_json,
         phase_signature: phase_sig,
         obs_count,
+        obs_trace,
     })
 }
 
@@ -307,8 +368,8 @@ fn annotate_episode(conn: &Connection, episode: &Episode) -> Result<WorkUnitRow,
 fn store_episodes(conn: &Connection, episodes: &[WorkUnitRow]) -> Result<(), NmemError> {
     let mut stmt = conn.prepare(
         "INSERT INTO work_units (session_id, started_at, ended_at, intent,
-         first_prompt_id, last_prompt_id, hot_files, phase_signature, obs_count)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+         first_prompt_id, last_prompt_id, hot_files, phase_signature, obs_count, obs_trace)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
     )?;
 
     for ep in episodes {
@@ -322,6 +383,7 @@ fn store_episodes(conn: &Connection, episodes: &[WorkUnitRow]) -> Result<(), Nme
             ep.hot_files,
             ep.phase_signature,
             ep.obs_count,
+            ep.obs_trace,
         ])?;
     }
 
@@ -421,9 +483,10 @@ fn gather_episode_payload(
         out.push('\n');
     }
 
-    // Observations in range
+    // Observations in range — include classifier labels and failure metadata
     let mut obs_stmt = conn.prepare(
-        "SELECT obs_type, file_path, content FROM observations
+        "SELECT obs_type, file_path, content, phase, scope, locus, novelty, metadata
+         FROM observations
          WHERE session_id = ?1
            AND prompt_id >= ?2 AND prompt_id <= ?3
          ORDER BY timestamp ASC LIMIT 30",
@@ -439,18 +502,17 @@ fn gather_episode_payload(
         let obs_type: String = row.get(0)?;
         let file_path: Option<String> = row.get(1)?;
         let content: String = row.get(2)?;
+        let phase: Option<String> = row.get(3)?;
+        let scope: Option<String> = row.get(4)?;
+        let locus: Option<String> = row.get(5)?;
+        let novelty: Option<String> = row.get(6)?;
+        let metadata_str: Option<String> = row.get(7)?;
 
-        let display = if let Some(fp) = &file_path {
-            let preview: String = content.chars().take(60).collect();
-            if preview.is_empty() {
-                format!("[{obs_type}] {fp}")
-            } else {
-                format!("[{obs_type}] {fp} - {preview}")
-            }
-        } else {
-            let preview: String = content.chars().take(80).collect();
-            format!("[{obs_type}] {preview}")
-        };
+        let display = crate::s1_4_summarize::format_action_line(
+            &obs_type, file_path.as_deref(), &content,
+            phase.as_deref(), scope.as_deref(), locus.as_deref(), novelty.as_deref(),
+            metadata_str.as_deref(),
+        );
         out.push_str(&format!("{display}\n"));
     }
 
@@ -533,11 +595,195 @@ fn store_narrative(conn: &Connection, session_id: &str, first_prompt_id: i64, na
     Ok(())
 }
 
+/// Apply episode-level friction labels to observations within a session's episodes.
+/// An episode has friction if it contains any failures (metadata.failed = true).
+/// All observations in that episode inherit the label. Observations not in any
+/// episode get NULL friction (unknown without episode context).
+fn apply_episode_friction(conn: &Connection, session_id: &str) -> Result<(), NmemError> {
+    let mut stmt = conn.prepare(
+        "SELECT first_prompt_id, last_prompt_id, phase_signature
+         FROM work_units WHERE session_id = ?1",
+    )?;
+
+    let units: Vec<(i64, i64, String)> = stmt
+        .query_map(params![session_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?
+        .collect::<Result<_, _>>()?;
+
+    for (first, last, sig_json) in &units {
+        let label = friction_label_from_signature(sig_json);
+        conn.execute(
+            "UPDATE observations SET friction = ?1, friction_run_id = NULL
+             WHERE session_id = ?2 AND prompt_id >= ?3 AND prompt_id <= ?4",
+            params![label, session_id, first, last],
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Determine friction label from a phase_signature JSON string.
+/// Returns "friction" if failures > 0, "smooth" otherwise.
+fn friction_label_from_signature(sig_json: &str) -> &'static str {
+    let failures = serde_json::from_str::<serde_json::Value>(sig_json)
+        .ok()
+        .and_then(|v| v.get("failures")?.as_i64())
+        .unwrap_or(0);
+    if failures > 0 { "friction" } else { "smooth" }
+}
+
+/// Backfill friction labels for all historical episodes.
+/// Walks all work_units, applies the heuristic (failures > 0 → friction),
+/// and updates observations in each episode's prompt range.
+pub fn backfill_episode_friction(db_path: &std::path::Path) -> Result<(), NmemError> {
+    let conn = crate::db::open_db(db_path)?;
+
+    let mut stmt = conn.prepare(
+        "SELECT session_id, first_prompt_id, last_prompt_id, phase_signature
+         FROM work_units ORDER BY session_id, first_prompt_id",
+    )?;
+
+    let units: Vec<(String, i64, i64, String)> = stmt
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?
+        .collect::<Result<_, _>>()?;
+
+    let mut updated = 0u64;
+    for (session_id, first, last, sig_json) in &units {
+        let label = friction_label_from_signature(sig_json);
+        let n = conn.execute(
+            "UPDATE observations SET friction = ?1, friction_run_id = NULL
+             WHERE session_id = ?2 AND prompt_id >= ?3 AND prompt_id <= ?4",
+            params![label, session_id, first, last],
+        )?;
+        updated += n as u64;
+    }
+
+    // Clear friction on orphan observations (not in any episode)
+    let orphaned = conn.execute(
+        "UPDATE observations SET friction = NULL, friction_run_id = NULL
+         WHERE friction IS NOT NULL
+           AND NOT EXISTS (
+               SELECT 1 FROM work_units wu
+               WHERE wu.session_id = observations.session_id
+                 AND observations.prompt_id >= wu.first_prompt_id
+                 AND observations.prompt_id <= wu.last_prompt_id
+           )",
+        [],
+    )?;
+
+    eprintln!(
+        "nmem: friction backfill complete — {} episodes, {} observations updated, {} orphans cleared",
+        units.len(),
+        updated,
+        orphaned,
+    );
+
+    Ok(())
+}
+
+/// Backfill obs_trace for existing episodes that don't have one.
+pub fn backfill_obs_trace(db_path: &std::path::Path) -> Result<(), NmemError> {
+    let conn = crate::db::open_db(db_path)?;
+
+    let mut stmt = conn.prepare(
+        "SELECT id, session_id, first_prompt_id, last_prompt_id
+         FROM work_units WHERE obs_trace IS NULL
+         ORDER BY session_id, first_prompt_id",
+    )?;
+
+    let units: Vec<(i64, String, i64, i64)> = stmt
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?
+        .collect::<Result<_, _>>()?;
+
+    let mut filled = 0u64;
+    let mut trace_stmt = conn.prepare(
+        "SELECT timestamp, obs_type, file_path, phase, scope, locus, novelty, friction,
+                CASE WHEN json_extract(metadata, '$.failed') = 1 THEN 1 ELSE 0 END as failed
+         FROM observations
+         WHERE session_id = ?1 AND prompt_id >= ?2 AND prompt_id <= ?3
+         ORDER BY timestamp ASC",
+    )?;
+
+    for (wu_id, session_id, first, last) in &units {
+        let trace: Vec<serde_json::Value> = trace_stmt
+            .query_map(params![session_id, first, last], |r| {
+                let ts: i64 = r.get(0)?;
+                let obs_type: String = r.get(1)?;
+                let file_path: Option<String> = r.get(2)?;
+                let phase: Option<String> = r.get(3)?;
+                let scope: Option<String> = r.get(4)?;
+                let locus: Option<String> = r.get(5)?;
+                let novelty: Option<String> = r.get(6)?;
+                let friction: Option<String> = r.get(7)?;
+                let failed: bool = r.get::<_, i64>(8)? != 0;
+
+                let mut obj = serde_json::Map::new();
+                obj.insert("t".into(), serde_json::Value::Number(ts.into()));
+                obj.insert("type".into(), serde_json::Value::String(obs_type));
+                if let Some(fp) = file_path {
+                    obj.insert("fp".into(), serde_json::Value::String(fp));
+                }
+                if let Some(p) = phase {
+                    obj.insert("p".into(), serde_json::Value::String(p));
+                }
+                if let Some(s) = scope {
+                    obj.insert("s".into(), serde_json::Value::String(s));
+                }
+                if let Some(l) = locus {
+                    obj.insert("l".into(), serde_json::Value::String(l));
+                }
+                if let Some(n) = novelty {
+                    obj.insert("n".into(), serde_json::Value::String(n));
+                }
+                if let Some(f) = friction {
+                    obj.insert("f".into(), serde_json::Value::String(f));
+                }
+                if failed {
+                    obj.insert("fail".into(), serde_json::Value::Bool(true));
+                }
+                Ok(serde_json::Value::Object(obj))
+            })?
+            .collect::<Result<_, _>>()?;
+
+        if !trace.is_empty() {
+            let json = serde_json::to_string(&trace)?;
+            conn.execute(
+                "UPDATE work_units SET obs_trace = ?1 WHERE id = ?2",
+                params![json, wu_id],
+            )?;
+            filled += 1;
+        }
+    }
+
+    eprintln!(
+        "nmem: obs_trace backfill complete — {} of {} episodes filled",
+        filled,
+        units.len(),
+    );
+
+    Ok(())
+}
+
 /// Orchestrator: detect episodes, annotate, and store. No narrative generation.
+/// Idempotent: skips if work_units already exist for this session.
 pub fn detect_and_store_episodes(
     conn: &Connection,
     session_id: &str,
 ) -> Result<usize, NmemError> {
+    let existing: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM work_units WHERE session_id = ?1",
+        params![session_id],
+        |r| r.get(0),
+    )?;
+    if existing > 0 {
+        return Ok(0);
+    }
+
     let episodes = detect_episodes(conn, session_id)?;
     if episodes.is_empty() {
         return Ok(0);
@@ -549,15 +795,26 @@ pub fn detect_and_store_episodes(
     }
 
     store_episodes(conn, &annotated)?;
+    apply_episode_friction(conn, session_id)?;
     Ok(annotated.len())
 }
 
 /// Full pipeline: detect, annotate, store, and generate narratives.
+/// Idempotent: skips if work_units already exist for this session.
 pub fn detect_and_narrate_episodes(
     conn: &Connection,
     session_id: &str,
     config: &SummarizationConfig,
 ) -> Result<usize, NmemError> {
+    let existing: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM work_units WHERE session_id = ?1",
+        params![session_id],
+        |r| r.get(0),
+    )?;
+    if existing > 0 {
+        return Ok(0);
+    }
+
     let episodes = detect_episodes(conn, session_id)?;
     if episodes.is_empty() {
         return Ok(0);
@@ -569,6 +826,7 @@ pub fn detect_and_narrate_episodes(
     }
 
     store_episodes(conn, &annotated)?;
+    apply_episode_friction(conn, session_id)?;
     let count = annotated.len();
 
     // Generate narratives if summarization is enabled

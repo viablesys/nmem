@@ -152,6 +152,15 @@ pub struct QueueTaskParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct CreateMarkerParams {
+    /// The marker text (conclusion, decision, waypoint).
+    pub text: String,
+    /// Project scope. Defaults to current project.
+    #[serde(default)]
+    pub project: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct CurrentStanceParams {
     /// Optional session ID. Defaults to the most recent session.
     #[serde(default)]
@@ -1093,6 +1102,45 @@ impl NmemServer {
             serde_json::to_string(&response).map_err(|e| db_err(&e))?,
         )]))
     }
+    pub fn do_create_marker(&self, params: CreateMarkerParams) -> Result<CallToolResult, ErrorData> {
+        let nmem_bin = std::env::current_exe().unwrap_or_else(|_| "nmem".into());
+
+        let mut cmd = std::process::Command::new(&nmem_bin);
+        cmd.arg("mark").arg(&params.text);
+
+        if let Some(ref project) = params.project {
+            cmd.arg("--project").arg(project);
+        }
+
+        let output = cmd.output().map_err(|e| {
+            ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("failed to run nmem mark: {e}"),
+                None,
+            )
+        })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("nmem mark failed: {stderr}"),
+                None,
+            ));
+        }
+
+        let obs_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let response = serde_json::json!({
+            "observation_id": obs_id.parse::<i64>().unwrap_or(0),
+            "status": "created",
+            "text": params.text,
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string(&response).map_err(|e| db_err(&e))?,
+        )]))
+    }
+
     pub fn do_current_stance(
         &self,
         params: CurrentStanceParams,
@@ -1568,6 +1616,20 @@ impl NmemServer {
         let start = std::time::Instant::now();
         let result = self.do_queue_task(p.0);
         record_query_metrics("queue_task", start);
+        result
+    }
+
+    #[tool(
+        description = "Create an agent-authored marker observation. Use to record conclusions, decisions, or waypoints not tied to a tool use. Markers are classified on all 5 dimensions and attached to the most recent session.",
+        annotations(read_only_hint = false, open_world_hint = false)
+    )]
+    async fn create_marker(
+        &self,
+        p: Parameters<CreateMarkerParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let start = std::time::Instant::now();
+        let result = self.do_create_marker(p.0);
+        record_query_metrics("create_marker", start);
         result
     }
 

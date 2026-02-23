@@ -29,14 +29,16 @@ fn run() -> Result<(), NmemError> {
         Command::Dispatch(args) => nmem::dispatch::handle_dispatch(&db_path, &args),
         Command::Task(args) => nmem::dispatch::handle_task(&db_path, &args),
         Command::Learn(args) => nmem::learn::handle_learn(&db_path, &args),
+        Command::Mark(args) => nmem::mark::handle_mark(&db_path, &args),
         Command::Backfill(args) => match args.dimension.as_str() {
             "phase" => nmem::s2_classify::handle_backfill(&db_path, &args),
             "scope" => nmem::s2_scope::handle_backfill_scope(&db_path, &args),
             "locus" => nmem::s2_locus::handle_backfill_locus(&db_path, &args),
             "novelty" => nmem::s2_novelty::handle_backfill_novelty(&db_path, &args),
-            "friction" => nmem::s2_friction::handle_backfill_friction(&db_path, &args),
+            "friction" => nmem::s4_memory::backfill_episode_friction(&db_path),
+            "obs_trace" => nmem::s4_memory::backfill_obs_trace(&db_path),
             other => Err(NmemError::Config(format!(
-                "unknown dimension: {other} (expected: phase, scope, locus, novelty, friction)"
+                "unknown dimension: {other} (expected: phase, scope, locus, novelty, friction, obs_trace)"
             ))),
         },
     }

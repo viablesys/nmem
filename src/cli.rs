@@ -44,6 +44,17 @@ pub enum Command {
     Learn(LearnArgs),
     /// Backfill classifier labels for observations with NULL values
     Backfill(BackfillArgs),
+    /// Create an agent-authored marker observation
+    Mark(MarkArgs),
+}
+
+#[derive(Parser)]
+pub struct MarkArgs {
+    /// The marker text (conclusion, decision, waypoint)
+    pub text: String,
+    /// Project name (defaults to cwd-derived)
+    #[arg(long)]
+    pub project: Option<String>,
 }
 
 #[derive(Parser)]
@@ -172,6 +183,10 @@ pub struct MaintainArgs {
     /// Run retention sweep (deletes expired observations per config)
     #[arg(long)]
     pub sweep: bool,
+
+    /// Regenerate all session summaries via LLM (requires LM Studio)
+    #[arg(long)]
+    pub resummarize: bool,
 }
 
 #[derive(Parser)]

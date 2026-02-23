@@ -127,8 +127,10 @@ pub fn gather_session_payload(conn: &Connection, session_id: &str) -> Result<Opt
     }
 
     // Gather observations (most recent 50, chronological)
+    // Include classifier labels and failure metadata for S4 consumers
     let mut obs_stmt = conn.prepare(
-        "SELECT obs_type, file_path, content FROM observations
+        "SELECT obs_type, file_path, content, phase, scope, locus, novelty, metadata
+         FROM observations
          WHERE session_id = ?1
          ORDER BY timestamp ASC LIMIT 50",
     )?;
@@ -140,23 +142,76 @@ pub fn gather_session_payload(conn: &Connection, session_id: &str) -> Result<Opt
         let obs_type: String = row.get(0)?;
         let file_path: Option<String> = row.get(1)?;
         let content: String = row.get(2)?;
+        let phase: Option<String> = row.get(3)?;
+        let scope: Option<String> = row.get(4)?;
+        let locus: Option<String> = row.get(5)?;
+        let novelty: Option<String> = row.get(6)?;
+        let metadata_str: Option<String> = row.get(7)?;
 
-        let display = if let Some(fp) = &file_path {
-            let content_preview: String = content.chars().take(60).collect();
-            if content_preview.is_empty() {
-                format!("[{obs_type}] {fp}")
-            } else {
-                format!("[{obs_type}] {fp} - {content_preview}")
-            }
-        } else {
-            let content_preview: String = content.chars().take(80).collect();
-            format!("[{obs_type}] {content_preview}")
-        };
-
+        let display = format_action_line(
+            &obs_type, file_path.as_deref(), &content,
+            phase.as_deref(), scope.as_deref(), locus.as_deref(), novelty.as_deref(),
+            metadata_str.as_deref(),
+        );
         out.push_str(&format!("{display}\n"));
     }
 
     Ok(Some(out))
+}
+
+/// Format a single observation action line for LLM payloads.
+/// Includes classifier stance labels and failure metadata when present.
+pub(crate) fn format_action_line(
+    obs_type: &str,
+    file_path: Option<&str>,
+    content: &str,
+    phase: Option<&str>,
+    scope: Option<&str>,
+    locus: Option<&str>,
+    novelty: Option<&str>,
+    metadata_str: Option<&str>,
+) -> String {
+    // Build stance tag: [obs_type|think|diverge|novel]
+    let mut tag_parts: Vec<&str> = vec![obs_type];
+    if let Some(p) = phase { tag_parts.push(p); }
+    if let Some(s) = scope { tag_parts.push(s); }
+    if let Some(l) = locus { tag_parts.push(l); }
+    if let Some(n) = novelty { tag_parts.push(n); }
+    let tag = tag_parts.join("|");
+
+    // Base display: [tag] file_path - content_preview
+    let base = if let Some(fp) = file_path {
+        let preview: String = content.chars().take(60).collect();
+        if preview.is_empty() {
+            format!("[{tag}] {fp}")
+        } else {
+            format!("[{tag}] {fp} - {preview}")
+        }
+    } else {
+        let preview: String = content.chars().take(80).collect();
+        format!("[{tag}] {preview}")
+    };
+
+    // Append failure info if present
+    if let Some(ms) = metadata_str {
+        if let Ok(meta) = serde_json::from_str::<serde_json::Value>(ms) {
+            if meta.get("failed").and_then(|v| v.as_bool()).unwrap_or(false) {
+                let error_preview = meta.get("response")
+                    .and_then(|v| v.as_str())
+                    .map(|s| {
+                        let preview: String = s.chars().take(120).collect();
+                        preview
+                    })
+                    .unwrap_or_default();
+                if error_preview.is_empty() {
+                    return format!("{base} FAILED");
+                }
+                return format!("{base} FAILED: {error_preview}");
+            }
+        }
+    }
+
+    base
 }
 
 /// Strip markdown code fences from LLM response.

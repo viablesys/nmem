@@ -49,13 +49,15 @@ pub fn run_sweep(conn: &Connection, config: &RetentionConfig) -> Result<SweepRes
             tx.execute(
                 "DELETE FROM observations WHERE obs_type = ?1 AND timestamp < ?2
                  AND is_pinned = 0
+                 AND session_id IN (SELECT id FROM sessions WHERE summary IS NOT NULL)
                  AND id NOT IN (SELECT value FROM syntheses, json_each(syntheses.source_obs_ids))",
                 params![obs_type, cutoff],
             )?
         } else {
             tx.execute(
                 "DELETE FROM observations WHERE obs_type = ?1 AND timestamp < ?2
-                 AND is_pinned = 0",
+                 AND is_pinned = 0
+                 AND session_id IN (SELECT id FROM sessions WHERE summary IS NOT NULL)",
                 params![obs_type, cutoff],
             )?
         };
@@ -90,7 +92,7 @@ mod tests {
         let db_path = dir.path().join("test.db");
         let conn = open_db(&db_path).unwrap();
         conn.execute(
-            "INSERT INTO sessions (id, project, started_at) VALUES ('s1', 'test', 1000)",
+            "INSERT INTO sessions (id, project, started_at, summary) VALUES ('s1', 'test', 1000, '{}')",
             [],
         )
         .unwrap();
@@ -266,6 +268,52 @@ mod tests {
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM observations WHERE obs_type = 'custom_type'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn sweep_skips_unsummarized_sessions() {
+        let (_dir, conn) = setup_db();
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // Insert an unsummarized session with an old observation
+        conn.execute(
+            "INSERT INTO sessions (id, project, started_at) VALUES ('s2', 'test', 1000)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO prompts (session_id, timestamp, source, content) VALUES ('s2', 1000, 'user', 'hello')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO observations (session_id, prompt_id, timestamp, obs_type, source_event, content)
+             VALUES ('s2', 2, ?1, 'file_read', 'PostToolUse', 'test')",
+            params![now - 200 * 86400],
+        )
+        .unwrap();
+
+        let config = RetentionConfig {
+            enabled: true,
+            days: HashMap::from([("file_read".into(), 90)]),
+            max_db_size_mb: None,
+        };
+
+        let result = run_sweep(&conn, &config).unwrap();
+        assert_eq!(result.deleted, 0, "unsummarized session observations should survive sweep");
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM observations WHERE session_id = 's2'",
                 [],
                 |r| r.get(0),
             )

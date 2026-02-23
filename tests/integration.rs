@@ -639,6 +639,12 @@ command = 9999
     post_tool_use(&db, "sw-maint", "Read", r#"{"file_path":"/src/a.rs"}"#);
     post_tool_use(&db, "sw-maint", "Bash", r#"{"command":"cargo test"}"#);
 
+    // Mark session as summarized (sweep precondition: only sweep summarized sessions)
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute("UPDATE sessions SET summary = '{}' WHERE id = 'sw-maint'", []).unwrap();
+    }
+
     assert_eq!(query_db(&db, "SELECT COUNT(*) FROM observations")[0][0], "2");
 
     // Run maintain --sweep with retention config
@@ -701,6 +707,8 @@ file_read = 0
     session_start(&db, "sw-ss-setup");
     {
         let conn = rusqlite::Connection::open(&db).unwrap();
+        // Mark session as summarized (sweep precondition)
+        conn.execute("UPDATE sessions SET summary = '{}' WHERE id = 'sw-ss-setup'", []).unwrap();
         let old_ts = 1000i64; // very old timestamp
         for i in 0..110 {
             conn.execute(
@@ -1030,6 +1038,12 @@ file_read = 0
     session_start(&db, "sw-pin");
     post_tool_use(&db, "sw-pin", "Read", r#"{"file_path":"/src/a.rs"}"#);
     post_tool_use(&db, "sw-pin", "Read", r#"{"file_path":"/src/b.rs"}"#);
+
+    // Mark session as summarized (sweep precondition)
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute("UPDATE sessions SET summary = '{}' WHERE id = 'sw-pin'", []).unwrap();
+    }
 
     // Pin the first observation
     let obs = query_db(&db, "SELECT id FROM observations ORDER BY id");

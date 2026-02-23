@@ -107,15 +107,44 @@ Stub — five open questions, no decisions. Blocks `nmem init`, binary packaging
 
 **Why**: Claude Code marketplace/plugin packaging mechanics are unknown. Can't finalize distribution without understanding the target.
 
-### New classifier training (locus, novelty, friction)
-Three new classifier dimensions added (2026-02-22): locus (internal/external), novelty (routine/novel), friction (smooth/friction). Infrastructure wired — shared `s2_inference.rs` engine, schema migration 10, hook pipeline, backfill CLI — but models need training.
+### New classifier training (locus, novelty)
+Two classifier dimensions added (2026-02-22): locus (internal/external), novelty (routine/novel). Shared `s2_inference.rs` engine, schema migration 10, hook pipeline, backfill CLI.
 
-**Training workflow:**
-1. Generate heuristic-labeled corpus: `python3 tools/classify-label-heuristic.py --dimension <dim> --output tools/corpus-<dim>.json`
-2. Train: `python3 tools/classify-train.py --corpus tools/corpus-<dim>.json --output models/<labels>.json`
-3. Backfill: `nmem backfill --dimension <dim>`
+**Baseline (2026-02-22, n=3753, heuristic-labeled training):**
 
-**Trigger**: Enough observations in the DB (500+) to generate meaningful training data. Heuristic labels serve as bootstrap; agent-augmented paraphrases can improve accuracy as with think/act.
+| Dimension | CV Accuracy | Distribution | Notes |
+|-----------|------------|--------------|-------|
+| Locus | 99.6% | 79.5% internal, 20.5% external | git_commit=100% internal, git_push=100% external |
+| Novelty | 98.6% | 65.9% routine, 34.1% novel | Novel work generates 2× friction rate |
+
+**Key finding**: novelty×locus captures investigatory character that phase misses. Sessions heavy on `novel+external` are exploring (data-driven design) even when phase says "act".
+
+**Remaining work:**
+- Phase classifier gap: diagnostic commands (curl queries, status checks) classified as "act" when intent is investigatory. Needs think-labeled command examples in training corpus.
+
+### Friction moved from S2 to S4 (2026-02-22)
+Friction was originally an S2 per-observation text classifier (smooth/friction on `tool_input` text). It achieved 95.6% CV but only 59% recall on friction examples — structurally impossible to infer outcomes from inputs when ADR-002 discards `tool_response` on success.
+
+**Resolution**: Friction is now episode-level (S4). An episode has friction if `failures > 0` in its `phase_signature`. All observations in that episode inherit the label. This is ground truth from `PostToolUseFailure` metadata, not text inference. Observations not in any episode get NULL friction.
+
+**v2 opportunity**: ML on episode narrative text (which includes failure context) could provide finer-grained friction classification. The heuristic captures binary friction/smooth; narrative analysis could distinguish types (build failures vs API errors vs logic bugs).
+
+### Agent markers (`nmem mark`)
+The agent needs a way to create its own observations — bookmarks/markers that record a conclusion, decision, or waypoint that isn't tied to a tool use. Current observations are all reactive (captured from hook events). Markers would be proactive — the agent writes them when it has something worth remembering.
+
+**Not a pinned observation** — pins exempt existing observations from retention. Markers are new observations authored by the agent, not captured from tool use.
+
+**Design sketch:**
+- New obs_type: `marker`
+- New CLI: `nmem mark "conclusion text"` (or via MCP tool `create_marker`)
+- Source_event: `AgentMarker` (not a hook event)
+- Classified like any other observation (phase/scope/locus/novelty/friction)
+- Subject to retention like any other observation (unless pinned)
+- Use cases: "decided to use X approach because Y", "this pattern recurs — see session Z", "blocked on upstream issue #N"
+
+**Trigger**: When the agent's ability to leave structured notes for future sessions demonstrably improves context reconstruction. The current `learned` field in session summaries partially fills this role — markers would be more granular and in-session rather than end-of-session.
+
+**Depends on**: Nothing — can start now. Schema needs no changes (observations table already supports it). Needs new CLI subcommand + MCP tool.
 
 ### Scope classifier augmentation strategy
 The converge/diverge scope classifier (ADR-013) achieves 71.4% CV on real data — functional but below the 80% floor that think/act meets. The bottleneck is augmentation quality: word-dropout transforms don't add decision-boundary signal, so 5478 augmented entries perform no better than 870 base entries on held-out data. Think/act reached 98.8% because 10x LLM-generated paraphrases added genuine semantic variety.
@@ -133,10 +162,16 @@ The converge/diverge scope classifier (ADR-013) achieves 71.4% CV on real data �
 
 Retention sweeps now run automatically at session end (Stop hook), after summarization and before WAL checkpoint. Enabled by default — no config needed. Two triggers: count-based (>100 expired observations older than 1 day) and size-based (`max_db_size_mb` in config, checks DB + WAL).
 
+**Sweep precondition (2026-02-22):** S3 cannot sweep observations from sessions that haven't been summarized. This ensures the compression pipeline (S1's S4 → S4 episodes → obs_trace) completes before forgetting begins. The `obs_trace` column in `work_units` freezes per-observation fingerprints (timestamp, obs_type, file_path, 5 classifier labels, failed flag) at episode detection time — once frozen, S3 can sweep observations freely.
+
 **Remaining S3 gaps:**
 - **Compaction scheduling** — vacuum and FTS rebuild are manual only (`nmem maintain`). No idle-period detection.
 - **Anomaly escalation** — if sweeps can't reclaim enough or writes fail, nothing escalates. Silent degradation.
 - **Sweep audit** — deletions logged to stderr only. No persistent record of what was swept when.
+- **FTS5 over summaries** — summary content is stored as JSON but not FTS5-indexed. Two-tier search (observations for current session, summaries for older) is the logical next step now that `obs_trace` makes observation deletion safe.
+- **`current_stance` fallback to `obs_trace`** — when observations are swept (90-day TTL), read EMA data from `obs_trace`. Needed ~86 days from 2026-02-22.
+- **`file_history` fallback to `obs_trace`** — reconstruct file touch records from `obs_trace` when observations are gone.
+- **`work_units` retention** — episodes should have their own TTL. Deferred until the compression pipeline has a layer above episodes (cross-session synthesis).
 
 ## Low priority
 
