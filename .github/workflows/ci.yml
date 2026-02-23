@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
 
 jobs:
   test:
@@ -19,3 +20,66 @@ jobs:
       - run: cargo build
       - run: cargo test
       - run: cargo clippy -- -D warnings
+
+  build:
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            binary: nmem
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            binary: nmem
+          - target: x86_64-apple-darwin
+            os: macos-13
+            binary: nmem
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package binary
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/${{ matrix.binary }} dist/nmem-${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nmem-${{ matrix.target }}
+          path: dist/nmem-${{ matrix.target }}
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect binaries
+        run: |
+          mkdir release
+          for dir in artifacts/nmem-*; do
+            cp "$dir"/* release/
+          done
+          ls -lh release/
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
