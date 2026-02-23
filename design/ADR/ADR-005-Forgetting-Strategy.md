@@ -1,7 +1,7 @@
 # ADR-005: Forgetting Strategy
 
 ## Status
-Accepted — Purge mechanism (v2.0) and retention sweeps (v3.0) implemented
+Accepted — Purge mechanism (v2.0), retention sweeps (v3.0), obs_trace rollup (v5.0) implemented
 
 ## Framing
 *What gets deleted, when, and how.*
@@ -406,6 +406,18 @@ Do **not** enable retention preemptively. The cost of keeping too much data is l
 - [SQLite PRAGMA secure_delete](https://www.sqlite.org/pragma.html#pragma_secure_delete)
 - [SQLite PRAGMA incremental_vacuum](https://www.sqlite.org/pragma.html#pragma_incremental_vacuum)
 
+## obs_trace Rollup and Sweep Precondition (2026-02-22)
+
+> **[ANNOTATION 2026-02-22, v5.0]:** Two changes close the S3→S4 gap in forgetting:
+>
+> **1. obs_trace rollup.** `work_units.obs_trace` (schema migration 11) stores a compact per-observation fingerprint array at episode detection time: `[{t, type, fp?, p?, s?, l?, n?, f?, fail?}, ...]`. This is the downsampling tier between raw observations and episode summaries. Once frozen, the rollup preserves the per-observation sequence (needed for `current_stance` EMA, `file_history` touch records, and classifier label analysis) even after S3 sweeps the source observations. Expected size: ~100 bytes/observation, ~1-3KB per typical episode.
+>
+> **2. Sweep precondition.** S3 can only sweep observations from sessions where `summary IS NOT NULL`. This ensures the compression pipeline completes before forgetting begins: S1 captures → S1's S4 summarizes → S4 detects episodes and freezes obs_trace → S3 sweeps. Without this, a session that crashed before summarization would lose its observations permanently.
+>
+> The two changes together mean S3 forgetting is now safe by construction. The remaining consumer work (fallback paths in `current_stance` and `file_history` to read from `obs_trace` when observations are gone) has ~86 days before the 90-day TTL starts biting.
+>
+> Episode detection is now idempotent — `detect_and_store_episodes` checks for existing work_units before inserting. This fixed a bug where repeated Stop hook fires created duplicate episodes (3879 rows → 355 after dedup).
+
 ## Revision History
 
 | Date | Version | Changes |
@@ -419,3 +431,4 @@ Do **not** enable retention preemptively. The cost of keeping too much data is l
 | 2026-02-14 | 3.0 | **Retention sweeps implemented.** Position C (type-aware retention) activated. `src/s3_sweep.rs` new module. Two entry points: `nmem maintain --sweep` (explicit) and opportunistic trigger on SessionStart (threshold: 100+ old observations). `RetentionConfig` in `src/s5_config.rs` with default days from ADR policy table. Syntheses guard via `sqlite_master` check. `cleanup_orphans`/`post_purge_maintenance` made pub for reuse. 4 unit + 3 integration tests. |
 | 2026-02-14 | 4.0 | **Observation pinning implemented.** Q1 resolved. Schema migration adds `is_pinned INTEGER NOT NULL DEFAULT 0` to observations. `nmem pin <id>` / `nmem unpin <id>` CLI commands. Sweep queries guard with `AND is_pinned = 0`. Purge ignores pin status (escape valve). Pin status in search/serve JSON output. Status shows pinned count. New module `src/s1_pin.rs`. 7 integration + 2 serve integration + 1 unit test. |
 | 2026-02-21 | 4.1 | **Factual correction.** Annotated retention policy table: several obs_types listed (`user_prompt`, `command_error`, `session_start`, `session_end`) do not match actual codebase values. User prompts are in the `prompts` table (not observations), `command_error` is not a distinct obs_type, and session events use `session_compact`/`session_resume`/`session_clear`. The retention defaults in `s5_config.rs` mirror the same incorrect names, making those entries dead config. |
+| 2026-02-22 | 5.0 | **obs_trace rollup and sweep precondition.** `work_units.obs_trace` (schema migration 11) freezes per-observation fingerprints at episode detection. Sweep precondition: only sweep summarized sessions. Episode detection idempotency fix. Forgetting is now safe by construction — the compression pipeline completes before S3 can sweep. |

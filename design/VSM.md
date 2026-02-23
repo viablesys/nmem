@@ -1,6 +1,6 @@
 # nmem — Viable System Model Assessment
 
-Current state of each VSM system. Update as capabilities mature.
+**Feature complete as of 2026-02-22.** All VSM layers functional. Remaining work: S3 cross-project retention (blocked on multipass bootstrap) and distribution/installation (ADR-008).
 
 ## S1 — Operations
 
@@ -56,25 +56,27 @@ Dedup, sequencing, concurrency, classification. **Functional.**
 - All classifiers use the same architecture: exported JSON model weights, Rust-native inference, OnceLock caching
 - `nmem backfill --dimension <name>` retroactively classifies historical observations
 
-No known gaps. Coordination is inherently simpler in a single-user, single-machine system. Multi-agent coordination would stress S2 significantly.
+No known gaps. The five classifier dimensions replaced the need for cross-session synthesis — session fingerprints, episode character, and retrieval signals are now structured data queryable with SQL, not text requiring LLM interpretation. Multi-agent coordination would stress S2 significantly.
 
 ## S3 — Control
 
-Resource management, storage budgets, compaction. **Semi-autonomous.**
+Resource management, storage budgets, compaction. **Functional.**
 
 What exists:
 - Retention config with per-type TTL (90-730 days), **enabled by default**
 - Automatic sweep on session Stop — runs after summarization, before WAL checkpoint
+- **Sweep precondition**: only sweeps sessions where `summary IS NOT NULL` — ensures the compression pipeline (S1's S4 → S4 episodes → obs_trace) completes before forgetting begins
+- **obs_trace rollup**: `work_units.obs_trace` freezes per-observation fingerprints at episode detection time — the downsampling tier that makes observation deletion safe
 - Two sweep triggers: count-based (>100 expired observations) and size-based (`max_db_size_mb` config, DB + WAL)
 - `nmem maintain --sweep` for manual intervention
 - `nmem maintain --rebuild-fts` reconstructs indexes
 - `nmem purge` provides targeted deletion
 - WAL checkpoint on session end
 
-What's still missing:
+Incremental gaps (not blocking):
 - **Compaction scheduling** — no idle-period detection for vacuum/rebuild
-- **Anomaly escalation** — unexpected growth or failed writes degrade silently
-- **Sweep frequency throttling** — every session end checks; not needed at current scale but would matter with high session frequency
+- **Cross-project retention** (S3:nmem + S3:multipass) — per-project retention policies across repos. Blocked on multipass bootstrap.
+- **Consumer fallback paths** — `current_stance` and `file_history` don't yet read from `obs_trace` when observations are swept. ~86 days from 2026-02-22 before the 90-day TTL makes this necessary.
 
 ## S3* — Audit
 
@@ -95,13 +97,19 @@ S3* should be the immune system — detecting pathology before it becomes visibl
 
 ## S4 — Intelligence
 
-Adaptation, pattern recognition, future-oriented action. **Partial — task dispatch functional, cross-session pattern detection functional, work unit detection designed.**
+Adaptation, pattern recognition, future-oriented action. **Functional.**
 
 S4 answers: "what's changing, what should we do next, and how should we adapt?" It has two faces:
 
 **Outward-facing (initiating future work):** The task queue (`s4_dispatch.rs`) is S4's first concrete module. It queues work for future execution and dispatches it into tmux panes running Claude Code — each dispatched session is its own viable system (VSM recursion at the system level). A systemd timer provides the clock. This is indirect control: S4 decides *what* to do; the spawned session decides *how*.
 
-**Inward-facing (recognizing patterns):** `nmem learn` (`s3_learn.rs`) is S4's first inward-facing module — cross-session pattern detection that scans the full observation and summary corpus to surface:
+**Inward-facing (recognizing patterns):** S4 now has three inward-facing capabilities:
+
+1. **Episodic memory** (`s4_memory.rs`) — detects episode boundaries from user prompt intent shifts, annotates with observation metadata (hot files, phase signature, 5 classifier dimensions), generates LLM narratives, freezes `obs_trace` rollup for S3 sweep safety. Episodes feed context injection (48h window) and session stance analysis.
+
+2. **Session stance** (`current_stance` MCP tool) — EMA-smoothed phase×scope trajectory over the observation sequence, with retrieval guidance. Surfaces the session's cognitive rhythm.
+
+3. **Cross-session pattern detection** — `nmem learn` (`s3_learn.rs`) scans the full observation and summary corpus to surface:
 1. **Repeated failures** — same command failing across sessions, normalized and heat-scored
 2. **Recurring errors** — error signatures from `metadata.response` appearing across sessions
 3. **Repeated intents** — similar session intents clustered via Jaccard similarity on keyword bags
@@ -202,14 +210,18 @@ A mature S5 would:
 
 | System | State | Gap |
 |--------|-------|-----|
-| S1 Operations | Functional (S4 v2) | Summary-primary context injection; PreCompact, rolling, FTS5 indexing remain |
-| S2 Coordination | Functional | Multi-agent would stress this |
-| S3 Control | Semi-autonomous | Sweep on session end; compaction and escalation remain manual |
+| S1 Operations | Functional | Summary-primary context injection; PreCompact, rolling, FTS5 indexing are incremental |
+| S2 Coordination | Functional | Five classifiers replace need for cross-session synthesis; multi-agent would stress this |
+| S3 Control | Functional | Sweep with summarization precondition + obs_trace rollup; cross-project retention deferred |
 | S3* Audit | Minimal | Needs functional integrity checks |
-| S4 Intelligence | Partial | Task dispatch + cross-session pattern detection functional; work unit detection designed, platform constraints block autonomous context actuation |
-| S5 Policy | Static | No tension to resolve without active S4 inward-facing capabilities |
+| S4 Intelligence | Functional | Episodes, stance, patterns, task dispatch, context injection, obs_trace rollup |
+| S5 Policy | Static | S3↔S4 tension exists (sweep precondition is the first mediation) but not yet dynamic |
 
-S1 captures facts and produces agent-oriented session summaries. Context injection is now summary-primary — raw observation noise replaced with curated signal (summaries + pinned + recent edits + git milestones). S2 coordinates. S3 is semi-autonomous — retention sweeps run automatically at session end with count and size triggers, enabled by default. S3* checks structure but not function. S4 now has both an outward actuator (task dispatch) and an inward sensor (`nmem learn` — cross-session pattern detection). Task dispatch spawns new viable systems; pattern detection surfaces stuck loops, recurring failures, and repeated investigations from the observation corpus. What remains designed: work unit detection (per-prompt phase transitions) and autonomous context management. S5 has nothing to mediate yet. The organism records, compresses, selectively recalls, initiates future work, and can now detect when it's stuck — but doesn't yet manage its own attention.
+**Feature complete (2026-02-22).** The system records, classifies (5 dimensions at write time), compresses (session summaries + episode narratives + obs_trace rollup), selectively forgets (sweep with summarization precondition), recalls (context injection with episodes + fallback summaries), detects patterns (cross-session learning), analyzes its own cognitive rhythm (session stance), initiates future work (task dispatch), and leaves structured markers for future sessions. The five classifiers give structured quantitative signals that compose with SQL — replacing the originally planned LLM-based cross-session synthesis.
+
+**Remaining work (not blocking viability):**
+1. **Distribution and installation** (ADR-008) — packaging, marketplace, `nmem init`
+2. **Cross-project retention** (S3:nmem + S3:multipass) — per-project retention policies. Blocked on multipass bootstrap.
 
 ## Recurring Patterns
 
@@ -236,13 +248,16 @@ This pattern repeats wherever a higher system needs to interpret lower-system da
 
 ## What closes the loop
 
-1. ~~**S1's S4 (session summarization)**~~ — **Done (v2).** Agent-oriented summarization via local LLM. Thinking blocks feed `learned` field. Summaries streamed to VictoriaLogs. Remaining sub-gaps (PreCompact, rolling summaries, FTS5 indexing) tracked in TODO.md.
-2. ~~**S4 task dispatch**~~ — **Done.** Task queue with systemd-driven dispatch (`s4_dispatch.rs`). Queues future work, dispatches into tmux panes running Claude Code. Each dispatched session is its own viable system. MCP tool (`queue_task`) allows running sessions to queue follow-up work. Remaining gaps: task result capture, cancellation, dependencies, notifications.
-3. **S4 work unit detection** — highest priority for inward-facing S4. The core algorithm: recognize work unit boundaries from observation patterns (prompt:thinking:tool ratios, hot files, intent shifts). Cross-session pattern detection (`nmem learn`) is a step toward this — it detects patterns across sessions (stuck loops, recurring failures) but not within sessions (phase transitions). Work unit detection operates at a finer grain: per-prompt tool composition within a single session.
-4. **S4 context actuation** — depends on Claude Code platform evolution (issues #24252, #25689, #21132) or building an API-based harness. Without this, S4 can detect and summarize but not act autonomously on context.
-5. **S4 UI** — work-unit-oriented dashboard. S4's external interface for users. Shows current work unit, history, context health. Same data model as context injection.
-6. ~~**S3 autonomy**~~ — **Done (baseline).** Retention enabled by default, sweep runs on session Stop with count-based and size-based triggers. Remaining: compaction scheduling, anomaly escalation.
-7. **S3* functional audits** — track extraction success rate, retrieval hit rate, filter accuracy. Surface in `nmem status`.
-8. **S4 cross-session synthesis** — cluster work unit summaries into patterns. `nmem learn` is a first step: it detects cross-session patterns from observations and summaries, but outputs a static report rather than feeding back into context injection. Next: integrate learnings into SessionStart context (warn about confirmed stuck loops) and cluster work unit summaries when available.
-9. **Multi-agent S2/S4** — networking, shared memory, cross-agent retrieval. Changes the nature of S2 coordination and gives S4 richer input.
-10. **S5 adaptive policy** — emerges naturally once S3 and S4 are both active and creating tension.
+All core items are done. Remaining items are incremental improvements or future extensions.
+
+1. ~~**S1's S4 (session summarization)**~~ — **Done (v2).** Agent-oriented summarization via local LLM. Thinking blocks feed `learned` field. Summaries streamed to VictoriaLogs.
+2. ~~**S4 task dispatch**~~ — **Done.** Task queue with systemd-driven dispatch. Each dispatched session is its own viable system.
+3. ~~**S4 work unit detection**~~ — **Done.** Prompt-driven episodic memory (`s4_memory.rs`). Boundary detection via Jaccard similarity on intent keyword bags. Annotation with hot files, phase signature, obs_trace rollup. LLM narrative generation. Idempotent.
+4. ~~**S2 classification**~~ — **Done.** Five dimensions (phase, scope, locus, novelty, friction) at write time. TF-IDF + LinearSVC in pure Rust, sub-millisecond inference. These replace the need for LLM-based cross-session synthesis — session character is structured data, not text.
+5. ~~**S3 safe forgetting**~~ — **Done.** Retention sweeps with summarization precondition + obs_trace rollup. The compression pipeline completes before S3 can sweep.
+6. ~~**S4 session stance**~~ — **Done.** `current_stance` MCP tool — EMA-smoothed phase×scope trajectory with retrieval guidance.
+7. ~~**S4 cross-session patterns**~~ — **Done.** `nmem learn` — repeated failures, recurring errors, stuck loops, unresolved investigations.
+8. **S4 context actuation** — depends on Claude Code platform evolution (issues #24252, #25689, #21132) or building an API-based harness. Currently reactive: detect → store → inject on next SessionStart.
+9. **Distribution and installation** (ADR-008) — packaging, marketplace, `nmem init`. Blocked on Claude Code plugin packaging format.
+10. **Cross-project retention** — S3:nmem + S3:multipass. Blocked on multipass bootstrap.
+11. **Multi-agent S2/S4** — networking, shared memory, cross-agent retrieval. Future extension.

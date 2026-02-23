@@ -1,9 +1,11 @@
 # ADR-010: Work Unit Detection — Episodic Memory
 
 ## Status
-Draft
+Accepted — Implemented
 
-> **[ANNOTATION 2026-02-21, v0.3]:** Episode detection is fully implemented in `s4_memory.rs` — boundary detection, annotation, narrative generation via local LLM, and storage in `work_units` table. Episodes feed context injection in `s4_context.rs` (48h window with fallback summaries for older sessions). Status should be updated to Accepted.
+> **[ANNOTATION 2026-02-21, v0.3]:** Episode detection is fully implemented in `s4_memory.rs` — boundary detection, annotation, narrative generation via local LLM, and storage in `work_units` table. Episodes feed context injection in `s4_context.rs` (48h window with fallback summaries for older sessions).
+
+> **[ANNOTATION 2026-02-22, v0.4]:** `obs_trace` added to `work_units` (schema migration 11). Compact per-observation fingerprint (timestamp, obs_type, file_path, 5 classifier labels, failed flag) frozen at episode detection time. This is the downsampling tier — once frozen, S3 can sweep observations safely. Episode detection is now idempotent (skips if work_units already exist for the session). Backfill via `nmem backfill --dimension obs_trace`.
 
 ## Framing
 *How does nmem identify work units (episodes) within a session, and where does the boundary signal come from?*
