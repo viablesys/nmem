@@ -1,16 +1,8 @@
 #!/bin/sh
 # nmem hook wrapper — finds the nmem binary and passes through all args + stdin.
 # Resolution order: $NMEM_BIN → $PATH → ~/.local/bin/nmem
-#
-# Dedup guard: when both a dev workspace (.claude-plugin/) and the installed
-# user-scope plugin define hooks, Claude Code fires both for every event.
-# flock ensures only one invocation runs — the loser exits silently.
 
 set -e
-
-LOCK="/tmp/nmem-hook.lock"
-exec 9>"$LOCK"
-flock -n 9 || exit 0
 
 if [ -n "$NMEM_BIN" ] && [ -x "$NMEM_BIN" ]; then
   exec "$NMEM_BIN" "$@"
