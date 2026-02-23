@@ -161,6 +161,7 @@ pub fn gather_session_payload(conn: &Connection, session_id: &str) -> Result<Opt
 
 /// Format a single observation action line for LLM payloads.
 /// Includes classifier stance labels and failure metadata when present.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn format_action_line(
     obs_type: &str,
     file_path: Option<&str>,
@@ -193,22 +194,18 @@ pub(crate) fn format_action_line(
     };
 
     // Append failure info if present
-    if let Some(ms) = metadata_str {
-        if let Ok(meta) = serde_json::from_str::<serde_json::Value>(ms) {
-            if meta.get("failed").and_then(|v| v.as_bool()).unwrap_or(false) {
-                let error_preview = meta.get("response")
-                    .and_then(|v| v.as_str())
-                    .map(|s| {
-                        let preview: String = s.chars().take(120).collect();
-                        preview
-                    })
-                    .unwrap_or_default();
-                if error_preview.is_empty() {
-                    return format!("{base} FAILED");
-                }
-                return format!("{base} FAILED: {error_preview}");
-            }
+    if let Some(ms) = metadata_str
+        && let Ok(meta) = serde_json::from_str::<serde_json::Value>(ms)
+        && meta.get("failed").and_then(|v| v.as_bool()).unwrap_or(false)
+    {
+        let error_preview = meta.get("response")
+            .and_then(|v| v.as_str())
+            .map(|s| s.chars().take(120).collect::<String>())
+            .unwrap_or_default();
+        if error_preview.is_empty() {
+            return format!("{base} FAILED");
         }
+        return format!("{base} FAILED: {error_preview}");
     }
 
     base
