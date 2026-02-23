@@ -24,13 +24,14 @@ jobs:
   build:
     needs: test
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             artifact: nmem-linux-x86_64
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-latest
             artifact: nmem-macos-x86_64
           - target: aarch64-apple-darwin
             os: macos-latest
