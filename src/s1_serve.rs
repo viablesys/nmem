@@ -1103,7 +1103,21 @@ impl NmemServer {
         )]))
     }
     pub fn do_create_marker(&self, params: CreateMarkerParams) -> Result<CallToolResult, ErrorData> {
-        let nmem_bin = std::env::current_exe().unwrap_or_else(|_| "nmem".into());
+        // Find nmem binary: current_exe (if it still exists on disk), then PATH, then ~/.local/bin
+        let nmem_bin = std::env::current_exe()
+            .ok()
+            .filter(|p| p.exists())
+            .unwrap_or_else(|| {
+                // current_exe may point to a deleted binary after rebuild
+                let local = std::path::PathBuf::from(
+                    format!("{}/.local/bin/nmem", std::env::var("HOME").unwrap_or_default()),
+                );
+                if local.exists() {
+                    local
+                } else {
+                    "nmem".into()
+                }
+            });
 
         let mut cmd = std::process::Command::new(&nmem_bin);
         cmd.arg("mark").arg(&params.text);

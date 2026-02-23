@@ -146,15 +146,15 @@ pub(crate) fn load_or_get_model<'a>(
         }
 
         // Fall back to embedded model
-        if let Some(data) = embedded_model_data(filename) {
-            if let Some(m) = parse_model(data.as_bytes()) {
-                eprintln!(
-                    "nmem: loaded {log_name} model (embedded, {} word + {} char features)",
-                    m.word.vocabulary.len(),
-                    m.char.vocabulary.len()
-                );
-                return Some(m);
-            }
+        if let Some(data) = embedded_model_data(filename)
+            && let Some(m) = parse_model(data.as_bytes())
+        {
+            eprintln!(
+                "nmem: loaded {log_name} model (embedded, {} word + {} char features)",
+                m.word.vocabulary.len(),
+                m.char.vocabulary.len()
+            );
+            return Some(m);
         }
 
         None
