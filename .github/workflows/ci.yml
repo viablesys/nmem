@@ -28,10 +28,13 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            binary: nmem
+            artifact: nmem-linux-x86_64
+          - target: x86_64-apple-darwin
+            os: macos-13
+            artifact: nmem-macos-x86_64
           - target: aarch64-apple-darwin
             os: macos-latest
-            binary: nmem
+            artifact: nmem-macos-arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -50,12 +53,12 @@ jobs:
       - name: Package binary
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/${{ matrix.binary }} dist/nmem-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/nmem dist/${{ matrix.artifact }}
 
       - uses: actions/upload-artifact@v4
         with:
-          name: nmem-${{ matrix.target }}
-          path: dist/nmem-${{ matrix.target }}
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
 
   release:
     needs: build
@@ -72,7 +75,7 @@ jobs:
         run: |
           mkdir release
           for dir in artifacts/nmem-*; do
-            cp "$dir"/* release/
+            cp "$dir"/* release/ 2>/dev/null || true
           done
           ls -lh release/
 
