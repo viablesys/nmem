@@ -1,0 +1,23 @@
+{
+  "name": "nmem",
+  "owner": {
+    "name": "viablesys"
+  },
+  "metadata": {
+    "description": "Cross-session memory for Claude Code"
+  },
+  "plugins": [
+    {
+      "name": "nmem",
+      "source": ".",
+      "description": "Cross-session memory for Claude Code. Captures observations, classifies on 5 dimensions, retrieves via MCP tools.",
+      "version": "1.0.0",
+      "author": {
+        "name": "viablesys"
+      },
+      "repository": "https://github.com/viablesys/nmem",
+      "license": "MIT",
+      "keywords": ["memory", "context", "cross-session", "mcp"]
+    }
+  ]
+}
