@@ -1129,6 +1129,405 @@ mod tests {
         assert!(text.contains("[file_read]"));
     }
 
+    /// Helper: insert observation with classifier labels and optional metadata.
+    fn insert_obs_classified(
+        conn: &Connection,
+        session_id: &str,
+        prompt_id: i64,
+        ts: i64,
+        obs_type: &str,
+        file_path: Option<&str>,
+        phase: Option<&str>,
+        scope: Option<&str>,
+        locus: Option<&str>,
+        novelty: Option<&str>,
+        metadata: Option<&str>,
+    ) {
+        conn.execute(
+            "INSERT INTO observations (session_id, prompt_id, timestamp, obs_type, source_event, content, file_path, phase, scope, locus, novelty, metadata)
+             VALUES (?1, ?2, ?3, ?4, 'PostToolUse', 'content', ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![session_id, prompt_id, ts, obs_type, file_path, phase, scope, locus, novelty, metadata],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn obs_trace_captures_all_fields() {
+        let conn = setup_db();
+        insert_session(&conn, "s1");
+
+        let p1 = insert_prompt(&conn, "s1", 1000, "fix the authentication bug in the login handler");
+
+        // Observation with all classifier labels
+        insert_obs_classified(
+            &conn, "s1", p1, 1001, "file_edit", Some("/src/auth.rs"),
+            Some("act"), Some("converge"), Some("internal"), Some("routine"), None,
+        );
+        // Observation with failed metadata
+        insert_obs_classified(
+            &conn, "s1", p1, 1002, "command", None,
+            Some("act"), Some("diverge"), Some("external"), Some("novel"),
+            Some(r#"{"failed":true}"#),
+        );
+        // Observation with file_path but partial labels
+        insert_obs_classified(
+            &conn, "s1", p1, 1003, "file_read", Some("/src/handler.rs"),
+            Some("think"), None, None, None, None,
+        );
+
+        let episodes = detect_episodes(&conn, "s1").unwrap();
+        let annotated = annotate_episode(&conn, &episodes[0]).unwrap();
+        let trace_json = annotated.obs_trace.expect("obs_trace should be Some");
+        let trace: Vec<serde_json::Value> = serde_json::from_str(&trace_json).unwrap();
+
+        assert_eq!(trace.len(), 3);
+
+        // First: all fields present
+        let e0 = &trace[0];
+        assert_eq!(e0["t"], 1001);
+        assert_eq!(e0["type"], "file_edit");
+        assert_eq!(e0["fp"], "/src/auth.rs");
+        assert_eq!(e0["p"], "act");
+        assert_eq!(e0["s"], "converge");
+        assert_eq!(e0["l"], "internal");
+        assert_eq!(e0["n"], "routine");
+        assert!(e0.get("fail").is_none(), "non-failed should omit fail");
+
+        // Second: failed flag present
+        let e1 = &trace[1];
+        assert_eq!(e1["t"], 1002);
+        assert_eq!(e1["type"], "command");
+        assert!(e1.get("fp").is_none(), "no file_path should omit fp");
+        assert_eq!(e1["p"], "act");
+        assert_eq!(e1["s"], "diverge");
+        assert_eq!(e1["l"], "external");
+        assert_eq!(e1["n"], "novel");
+        assert_eq!(e1["fail"], true);
+
+        // Third: partial labels — only p present
+        let e2 = &trace[2];
+        assert_eq!(e2["t"], 1003);
+        assert_eq!(e2["type"], "file_read");
+        assert_eq!(e2["fp"], "/src/handler.rs");
+        assert_eq!(e2["p"], "think");
+        assert!(e2.get("s").is_none(), "NULL scope should be absent");
+        assert!(e2.get("l").is_none(), "NULL locus should be absent");
+        assert!(e2.get("n").is_none(), "NULL novelty should be absent");
+    }
+
+    #[test]
+    fn obs_trace_omits_null_optional_fields() {
+        let conn = setup_db();
+        insert_session(&conn, "s1");
+
+        let p1 = insert_prompt(&conn, "s1", 1000, "implement the new feature for notifications");
+
+        // Observations with NO classifier labels at all
+        insert_obs_with_prompt(&conn, "s1", p1, 1001, "file_read", None);
+        insert_obs_with_prompt(&conn, "s1", p1, 1002, "command", None);
+
+        let episodes = detect_episodes(&conn, "s1").unwrap();
+        let annotated = annotate_episode(&conn, &episodes[0]).unwrap();
+        let trace_json = annotated.obs_trace.expect("obs_trace should be Some");
+        let trace: Vec<serde_json::Value> = serde_json::from_str(&trace_json).unwrap();
+
+        assert_eq!(trace.len(), 2);
+        for entry in &trace {
+            let obj = entry.as_object().unwrap();
+            assert!(obj.contains_key("t"), "must have timestamp");
+            assert!(obj.contains_key("type"), "must have obs_type");
+            assert!(!obj.contains_key("p"), "NULL phase must be absent");
+            assert!(!obj.contains_key("s"), "NULL scope must be absent");
+            assert!(!obj.contains_key("l"), "NULL locus must be absent");
+            assert!(!obj.contains_key("n"), "NULL novelty must be absent");
+            assert!(!obj.contains_key("f"), "NULL friction must be absent");
+            assert!(!obj.contains_key("fp"), "NULL file_path must be absent");
+            assert!(!obj.contains_key("fail"), "non-failed must be absent");
+        }
+    }
+
+    #[test]
+    fn obs_trace_preserves_observation_order() {
+        let conn = setup_db();
+        insert_session(&conn, "s1");
+
+        let p1 = insert_prompt(&conn, "s1", 1000, "fix the authentication bug in the login handler");
+
+        // Insert out of timestamp order
+        insert_obs_with_prompt(&conn, "s1", p1, 1005, "file_edit", Some("/src/c.rs"));
+        insert_obs_with_prompt(&conn, "s1", p1, 1001, "file_read", Some("/src/a.rs"));
+        insert_obs_with_prompt(&conn, "s1", p1, 1003, "search", None);
+
+        let episodes = detect_episodes(&conn, "s1").unwrap();
+        let annotated = annotate_episode(&conn, &episodes[0]).unwrap();
+        let trace_json = annotated.obs_trace.expect("obs_trace should be Some");
+        let trace: Vec<serde_json::Value> = serde_json::from_str(&trace_json).unwrap();
+
+        assert_eq!(trace.len(), 3);
+        let timestamps: Vec<i64> = trace.iter().map(|e| e["t"].as_i64().unwrap()).collect();
+        assert_eq!(timestamps, vec![1001, 1003, 1005], "obs_trace must be sorted by timestamp ASC");
+    }
+
+    #[test]
+    fn obs_trace_empty_episode_yields_none() {
+        let conn = setup_db();
+        insert_session(&conn, "s1");
+
+        // Create prompts but NO observations in their range
+        let _p1 = insert_prompt(&conn, "s1", 1000, "investigate the logging framework options");
+
+        let episodes = detect_episodes(&conn, "s1").unwrap();
+        assert_eq!(episodes.len(), 1);
+
+        let annotated = annotate_episode(&conn, &episodes[0]).unwrap();
+        assert!(annotated.obs_trace.is_none(), "episode with zero observations should have None obs_trace");
+        assert_eq!(annotated.obs_count, 0);
+    }
+
+    #[test]
+    fn obs_trace_survives_sweep() {
+        use crate::s3_sweep::run_sweep;
+        use crate::s5_config::RetentionConfig;
+        use std::collections::HashMap;
+
+        let conn = setup_db();
+        insert_session(&conn, "s1");
+        // Sweep requires session to be summarized
+        conn.execute("UPDATE sessions SET summary = '{}' WHERE id = 's1'", []).unwrap();
+
+        let p1 = insert_prompt(&conn, "s1", 1000, "fix the authentication bug in the login handler");
+        insert_obs_classified(
+            &conn, "s1", p1, 1001, "file_read", Some("/src/auth.rs"),
+            Some("think"), Some("diverge"), None, None, None,
+        );
+        insert_obs_classified(
+            &conn, "s1", p1, 1002, "file_edit", Some("/src/auth.rs"),
+            Some("act"), Some("converge"), None, None, None,
+        );
+
+        // Run full detect_and_store to create work_units with obs_trace
+        let count = detect_and_store_episodes(&conn, "s1").unwrap();
+        assert_eq!(count, 1);
+
+        // Verify obs_trace was stored
+        let trace_before: Option<String> = conn
+            .query_row("SELECT obs_trace FROM work_units WHERE session_id = 's1'", [], |r| r.get(0))
+            .unwrap();
+        assert!(trace_before.is_some(), "obs_trace should exist before sweep");
+        let trace_content = trace_before.unwrap();
+
+        // Verify observations exist before sweep
+        let obs_before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM observations WHERE session_id = 's1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(obs_before, 2);
+
+        // Aggressive sweep: 0 days retention for all types
+        let config = RetentionConfig {
+            enabled: true,
+            days: HashMap::from([
+                ("file_read".into(), 0),
+                ("file_edit".into(), 0),
+            ]),
+            max_db_size_mb: None,
+        };
+        let result = run_sweep(&conn, &config).unwrap();
+        assert_eq!(result.deleted, 2, "sweep should delete both observations");
+
+        // Observations gone
+        let obs_after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM observations WHERE session_id = 's1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(obs_after, 0, "observations should be deleted by sweep");
+
+        // obs_trace survives intact
+        let trace_after: Option<String> = conn
+            .query_row("SELECT obs_trace FROM work_units WHERE session_id = 's1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(trace_after.unwrap(), trace_content, "obs_trace must survive sweep unchanged");
+    }
+
+    #[test]
+    fn obs_trace_backfill_fills_missing() {
+        let conn = setup_db();
+        insert_session(&conn, "s1");
+
+        let p1 = insert_prompt(&conn, "s1", 1000, "fix the authentication bug in the login handler");
+        insert_obs_classified(
+            &conn, "s1", p1, 1001, "file_read", Some("/src/auth.rs"),
+            Some("think"), Some("diverge"), None, None, None,
+        );
+        insert_obs_classified(
+            &conn, "s1", p1, 1002, "file_edit", Some("/src/auth.rs"),
+            Some("act"), Some("converge"), None, None, None,
+        );
+
+        // Manually insert work_unit with NULL obs_trace (simulating pre-obs_trace data)
+        conn.execute(
+            "INSERT INTO work_units (session_id, started_at, ended_at, intent, first_prompt_id, last_prompt_id, hot_files, phase_signature, obs_count, obs_trace)
+             VALUES ('s1', 1000, 1002, 'fix auth', ?1, ?2, '[]', '{}', 2, NULL)",
+            params![p1, p1],
+        ).unwrap();
+
+        // Also insert a work_unit that already has obs_trace (should be untouched)
+        let existing_trace = r#"[{"t":9999,"type":"command"}]"#;
+        conn.execute(
+            "INSERT INTO work_units (session_id, started_at, ended_at, intent, first_prompt_id, last_prompt_id, hot_files, phase_signature, obs_count, obs_trace)
+             VALUES ('s1', 2000, 2001, 'other work', 999, 999, '[]', '{}', 1, ?1)",
+            params![existing_trace],
+        ).unwrap();
+
+        // backfill_obs_trace needs a file-based DB, so we replicate the core logic inline
+        // (the function uses open_db which manages encryption; in tests we use in-memory)
+        {
+            let mut stmt = conn.prepare(
+                "SELECT id, session_id, first_prompt_id, last_prompt_id
+                 FROM work_units WHERE obs_trace IS NULL
+                 ORDER BY session_id, first_prompt_id",
+            ).unwrap();
+
+            let units: Vec<(i64, String, i64, i64)> = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+
+            assert_eq!(units.len(), 1, "only NULL obs_trace units should be selected");
+
+            for (wu_id, session_id, first, last) in &units {
+                let mut trace_stmt = conn.prepare(
+                    "SELECT timestamp, obs_type, file_path, phase, scope, locus, novelty, friction,
+                            CASE WHEN json_extract(metadata, '$.failed') = 1 THEN 1 ELSE 0 END as failed
+                     FROM observations
+                     WHERE session_id = ?1 AND prompt_id >= ?2 AND prompt_id <= ?3
+                     ORDER BY timestamp ASC",
+                ).unwrap();
+                let trace: Vec<serde_json::Value> = trace_stmt
+                    .query_map(params![session_id, first, last], |r| {
+                        let mut obj = serde_json::Map::new();
+                        obj.insert("t".into(), serde_json::Value::Number(r.get::<_, i64>(0)?.into()));
+                        obj.insert("type".into(), serde_json::Value::String(r.get(1)?));
+                        if let Some(fp) = r.get::<_, Option<String>>(2)? {
+                            obj.insert("fp".into(), serde_json::Value::String(fp));
+                        }
+                        if let Some(p) = r.get::<_, Option<String>>(3)? {
+                            obj.insert("p".into(), serde_json::Value::String(p));
+                        }
+                        if let Some(s) = r.get::<_, Option<String>>(4)? {
+                            obj.insert("s".into(), serde_json::Value::String(s));
+                        }
+                        if let Some(l) = r.get::<_, Option<String>>(5)? {
+                            obj.insert("l".into(), serde_json::Value::String(l));
+                        }
+                        if let Some(n) = r.get::<_, Option<String>>(6)? {
+                            obj.insert("n".into(), serde_json::Value::String(n));
+                        }
+                        if let Some(f) = r.get::<_, Option<String>>(7)? {
+                            obj.insert("f".into(), serde_json::Value::String(f));
+                        }
+                        if r.get::<_, i64>(8)? != 0 {
+                            obj.insert("fail".into(), serde_json::Value::Bool(true));
+                        }
+                        Ok(serde_json::Value::Object(obj))
+                    })
+                    .unwrap()
+                    .collect::<Result<_, _>>()
+                    .unwrap();
+
+                if !trace.is_empty() {
+                    let json = serde_json::to_string(&trace).unwrap();
+                    conn.execute("UPDATE work_units SET obs_trace = ?1 WHERE id = ?2", params![json, wu_id]).unwrap();
+                }
+            }
+        }
+
+        // Verify backfilled unit now has obs_trace
+        let filled: String = conn
+            .query_row(
+                "SELECT obs_trace FROM work_units WHERE intent = 'fix auth'",
+                [], |r| r.get(0),
+            ).unwrap();
+        let trace: Vec<serde_json::Value> = serde_json::from_str(&filled).unwrap();
+        assert_eq!(trace.len(), 2);
+        assert_eq!(trace[0]["t"], 1001);
+        assert_eq!(trace[1]["t"], 1002);
+
+        // Verify pre-existing obs_trace was NOT overwritten
+        let untouched: String = conn
+            .query_row(
+                "SELECT obs_trace FROM work_units WHERE intent = 'other work'",
+                [], |r| r.get(0),
+            ).unwrap();
+        assert_eq!(untouched, existing_trace, "existing obs_trace must not be overwritten");
+    }
+
+    #[test]
+    fn friction_flows_into_obs_trace() {
+        let conn = setup_db();
+        insert_session(&conn, "s1");
+
+        let p1 = insert_prompt(&conn, "s1", 1000, "fix the authentication bug in the login handler");
+
+        // One successful, one failed observation
+        insert_obs_classified(
+            &conn, "s1", p1, 1001, "file_read", Some("/src/auth.rs"),
+            Some("think"), Some("diverge"), None, None, None,
+        );
+        insert_obs_classified(
+            &conn, "s1", p1, 1002, "command", None,
+            Some("act"), Some("converge"), None, None,
+            Some(r#"{"failed":true}"#),
+        );
+
+        // detect_and_store_episodes: annotate (freezes obs_trace) THEN apply_episode_friction
+        let count = detect_and_store_episodes(&conn, "s1").unwrap();
+        assert_eq!(count, 1);
+
+        // After detect_and_store, friction is applied to observations
+        let obs_friction: Vec<Option<String>> = {
+            let mut stmt = conn.prepare(
+                "SELECT friction FROM observations WHERE session_id = 's1' ORDER BY timestamp"
+            ).unwrap();
+            stmt.query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap()
+        };
+        // The episode has failures > 0, so all obs get "friction" label
+        assert_eq!(obs_friction, vec![Some("friction".into()), Some("friction".into())]);
+
+        // But obs_trace was frozen BEFORE apply_episode_friction ran,
+        // so friction ("f" key) should be NULL/absent in the trace
+        let trace_json: String = conn
+            .query_row("SELECT obs_trace FROM work_units WHERE session_id = 's1'", [], |r| r.get(0))
+            .unwrap();
+        let trace: Vec<serde_json::Value> = serde_json::from_str(&trace_json).unwrap();
+        for entry in &trace {
+            assert!(
+                entry.get("f").is_none(),
+                "obs_trace is frozen before apply_episode_friction, so friction field must be absent"
+            );
+        }
+    }
+
+    #[test]
+    fn obs_trace_count_matches_obs_count() {
+        let conn = setup_db();
+        insert_session(&conn, "s1");
+
+        let p1 = insert_prompt(&conn, "s1", 1000, "implement the notification system for users");
+
+        // Insert 5 observations
+        for i in 0..5 {
+            insert_obs_with_prompt(&conn, "s1", p1, 1001 + i, "file_edit", Some("/src/notify.rs"));
+        }
+
+        let episodes = detect_episodes(&conn, "s1").unwrap();
+        let annotated = annotate_episode(&conn, &episodes[0]).unwrap();
+
+        assert_eq!(annotated.obs_count, 5);
+        let trace_json = annotated.obs_trace.expect("obs_trace should be Some");
+        let trace: Vec<serde_json::Value> = serde_json::from_str(&trace_json).unwrap();
+        assert_eq!(trace.len() as i64, annotated.obs_count, "obs_trace length must equal obs_count");
+    }
+
     #[test]
     fn disabled_summarization_skips_narrative() {
         let conn = setup_db();

@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo build
+      - run: cargo test
+      - run: cargo clippy -- -D warnings
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: nmem-linux-x86_64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            artifact: nmem-macos-x86_64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact: nmem-macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package binary
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/nmem dist/${{ matrix.artifact }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect binaries
+        run: |
+          mkdir release
+          for dir in artifacts/nmem-*; do
+            cp "$dir"/* release/ 2>/dev/null || true
+          done
+          ls -lh release/
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true

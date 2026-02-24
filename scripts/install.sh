@@ -82,7 +82,7 @@ esac
 
 echo ""
 echo "Next: install the Claude Code plugin:"
-echo "  claude plugin add /path/to/nmem"
+echo "  claude plugin marketplace add viablesys/claude-plugins"
+echo "  claude plugin install nmem@viablesys"
 echo ""
-echo "Or if you cloned the repo:"
-echo "  claude plugin add ."
+echo "Then restart Claude Code."
