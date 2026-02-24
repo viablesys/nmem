@@ -431,6 +431,13 @@ pub fn handle_dispatch(db_path: &Path, args: &DispatchArgs) -> Result<(), NmemEr
         let prompt_path_str = prompt_path.to_string_lossy();
         let output_path_str = output_path.to_string_lossy();
 
+        // Source user shell environment so dispatched sessions have full PATH
+        // (systemd timers have minimal env; bare `cargo` etc. fail without this)
+        tmux_send_keys(
+            &target,
+            "source ~/.cargo/env 2>/dev/null; export PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"",
+        )?;
+
         // Read prompt from file instead of inlining it in the shell command
         tmux_send_keys(
             &target,

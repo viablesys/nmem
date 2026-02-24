@@ -8,10 +8,13 @@ Cross-session memory for Claude Code. Captures observations (file reads, edits, 
 cargo build                    # debug
 cargo build --release          # optimized (opt-level=z, LTO, stripped)
 ~/.cargo/bin/cargo test        # all tests — use full path (see below)
+cargo clippy -- -D warnings    # run BEFORE committing, not as a batch at the end
 NMEM_DB=/tmp/test.db nmem status   # test against throwaway DB
 ```
 
 **`cargo test` fails with exit 127?** Dispatched tmux sessions and some hook contexts don't inherit the user's PATH. Use `~/.cargo/bin/cargo` instead of bare `cargo`. This applies to all Cargo commands in non-interactive shells.
+
+**Clippy loops?** Run `cargo clippy -- -D warnings` after each file you edit, not as a final batch. Fixing 1 lint immediately is cheaper than fixing 5 in a loop at commit time.
 
 ### When to rebuild release
 
