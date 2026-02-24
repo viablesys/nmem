@@ -1,9 +1,0 @@
-{
-  "name": "nmem",
-  "version": "1.0.0",
-  "description": "Cross-session memory for Claude Code",
-  "author": { "name": "viablesys" },
-  "repository": "https://github.com/viablesys/nmem",
-  "license": "MIT",
-  "keywords": ["memory", "context", "cross-session"]
-}
