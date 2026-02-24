@@ -6,6 +6,11 @@ use crate::NmemError;
 use std::path::Path;
 
 pub fn handle_maintain(db_path: &Path, args: &MaintainArgs) -> Result<(), NmemError> {
+    // Session-scoped maintenance: episodes → summarize → sweep → checkpoint
+    if let Some(ref session_id) = args.session {
+        return handle_session_maintain(db_path, session_id);
+    }
+
     let conn = open_db(db_path)?;
 
     let size_before = std::fs::metadata(db_path)?.len();
@@ -106,6 +111,42 @@ fn resummarize_all(
         }
     }
     eprintln!("\nnmem: resummarize complete — {success} ok, {failed} failed");
+
+    Ok(())
+}
+
+fn handle_session_maintain(db_path: &Path, session_id: &str) -> Result<(), NmemError> {
+    let conn = open_db(db_path)?;
+    let config = load_config().unwrap_or_default();
+
+    // Detect episodes — non-fatal
+    match crate::s4_memory::detect_and_narrate_episodes(&conn, session_id, &config.summarization) {
+        Ok(n) if n > 1 => eprintln!("nmem: {n} episodes detected"),
+        Err(e) => eprintln!("nmem: episode detection failed (non-fatal): {e}"),
+        _ => {}
+    }
+
+    // Summarize session — non-fatal
+    match crate::s1_4_summarize::summarize_session(&conn, session_id, &config.summarization) {
+        Ok(()) => eprintln!("nmem: session summarized"),
+        Err(e) => eprintln!("nmem: summarization failed (non-fatal): {e}"),
+    }
+
+    // Retention sweep — non-fatal
+    if config.retention.enabled {
+        match run_sweep(&conn, &config.retention) {
+            Ok(r) if r.deleted > 0 => {
+                eprintln!("nmem: sweep deleted {} expired observations", r.deleted);
+            }
+            Err(e) => eprintln!("nmem: sweep error (non-fatal): {e}"),
+            _ => {}
+        }
+    }
+
+    // WAL checkpoint
+    if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)") {
+        eprintln!("nmem: WAL checkpoint failed (non-fatal): {e}");
+    }
 
     Ok(())
 }

@@ -178,9 +178,11 @@ nmem's session awareness comes from hook events, not from a persistent process:
 
 - **SessionStart**: Record session start. Source field indicates startup/resume/compact.
 - **PostToolUse**: Record observations. The bulk of capture.
-- **Stop**: Record session end. Compute session signature (event type distribution). Run `PRAGMA wal_checkpoint(TRUNCATE)` to clean up WAL.
+- **Stop**: Record session end. Compute session signature (event type distribution). Spawn deferred maintenance as a detached background process.
 
 No explicit "nmem start" or "nmem stop" — the system activates when Claude Code fires hooks and quiesces when hooks stop firing.
+
+> **[ANNOTATION 2026-02-23, v1.8]:** The Stop hook no longer runs episode detection, LLM summarization, retention sweep, or WAL checkpoint inline. These operations held a write connection for 10+ seconds (LM Studio latency), causing "database is locked" errors when the next session started before the Stop hook finished. The Stop hook now commits session state (transcript scan + signature + ended_at) and spawns `nmem maintain --session <id>` as a detached background process. The `--session` flag triggers a session-scoped maintenance path: episodes → summarize → sweep → checkpoint, all non-fatal. This is Position C (hybrid) realized at the process level — S1 (capture) completes immediately, S3 (maintenance) runs independently.
 
 ### Process Model
 
@@ -190,7 +192,9 @@ Claude Code Session
   ├── PostToolUse hook  → nmem binary (open DB, record, close)
   ├── PostToolUse hook  → nmem binary (open DB, record, close)
   ├── ...
-  ├── Stop hook         → nmem binary (open DB, record, checkpoint, close)
+  ├── Stop hook         → nmem binary (open DB, record, close)
+  │                       └── spawns: nmem maintain --session <id> (detached)
+  │                            └── episodes → summarize → sweep → checkpoint
   │
   └── MCP server        → nmem binary (open read-only DB, query, respond)
 ```
@@ -364,10 +368,11 @@ Benchmark this at implementation time. If it's consistently >10ms, reconsider.
 ## When to Reconsider
 
 Add a daemon when:
-- S4 synthesis is implemented and needs periodic background processing
 - Multiple consumers beyond Claude Code need coordinated access
 - Write volume exceeds what per-invocation SQLite opens can handle (unlikely below thousands of writes/minute)
 - Background maintenance can't keep up with opportunistic triggers
+
+> **[ANNOTATION 2026-02-23, v1.8]:** Removed "S4 synthesis needs periodic background processing" — this is now handled by the deferred `nmem maintain --session` process spawned from the Stop hook (for per-session work) and `nmem dispatch` via systemd timer (for cross-session task dispatch). Neither requires a daemon.
 
 The architecture supports adding a daemon later — the database is the coordination point, not the process model. A daemon would hold a persistent connection and run the same write/maintenance logic that hooks currently run per-invocation.
 
@@ -412,3 +417,4 @@ The architecture supports adding a daemon later — the database is the coordina
 | 2026-02-14 | 1.5 | Added `Maintain` subcommand to clap enum. Implements explicit trigger for maintenance operations (incremental vacuum, WAL checkpoint, FTS integrity check, optional FTS rebuild via `--rebuild-fts`). Completes the "opportunistic maintenance" story — hooks run maintenance inline, `nmem maintain` provides the manual escape hatch. |
 | 2026-02-14 | 1.6 | Added `Status` subcommand — read-only health check (DB/WAL size, observation/prompt/session counts, top-5 obs_type breakdown, last session). Completes all planned subcommands from Q1. |
 | 2026-02-21 | 1.7 | Annotated against current codebase. Corrected HookPayload (tool_response is Value not String, additional fields). Noted duplicate Maintain in clap enum. Documented expanded subcommands (16 total). Corrected NmemServer struct (Arc<Mutex<Connection>>, no project field, expanded tool set). |
+| 2026-02-23 | 1.8 | Deferred post-Stop work to background process. Stop hook no longer runs episodes, summarization, sweep, or checkpoint inline — spawns `nmem maintain --session <id>` as detached process. Eliminates "database is locked" errors from overlapping sessions. Updated process model diagram. Removed S4 synthesis from daemon reconsideration triggers (now handled by deferred maintain + systemd dispatch). |

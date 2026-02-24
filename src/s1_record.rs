@@ -5,7 +5,6 @@ use crate::s2_classify;
 use crate::s2_locus;
 use crate::s2_novelty;
 use crate::s2_scope;
-use crate::s3_sweep::run_sweep;
 use crate::s5_config::{load_config, resolve_filter_params, NmemConfig};
 use crate::s5_filter::{SecretFilter, redact_json_value_with};
 use crate::s5_project::derive_project;
@@ -63,43 +62,6 @@ fn ensure_session(conn: &Connection, session_id: &str, cwd: &str, ts: i64) -> Re
     }
 
     Ok(())
-}
-
-fn maybe_sweep(conn: &Connection, config: &NmemConfig, db_path: &Path) {
-    if !config.retention.enabled {
-        return;
-    }
-
-    // Size-based trigger: check if DB + WAL exceeds configured limit
-    let size_exceeded = config.retention.max_db_size_mb.is_some_and(|limit| {
-        let db_size = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
-        let wal_size = std::fs::metadata(db_path.with_extension("db-wal"))
-            .map(|m| m.len())
-            .unwrap_or(0);
-        (db_size + wal_size) / (1024 * 1024) > limit as u64
-    });
-
-    // Count-based trigger: enough old observations to justify a sweep
-    let count_exceeded = conn
-        .query_row(
-            "SELECT COUNT(*) FROM observations WHERE timestamp < unixepoch('now') - 86400",
-            [],
-            |r| r.get::<_, i64>(0),
-        )
-        .unwrap_or(0)
-        >= 100;
-
-    if !size_exceeded && !count_exceeded {
-        return;
-    }
-
-    match run_sweep(conn, &config.retention) {
-        Ok(r) if r.deleted > 0 => {
-            eprintln!("nmem: sweep deleted {} expired observations", r.deleted)
-        }
-        Err(e) => eprintln!("nmem: sweep error (non-fatal): {e}"),
-        _ => {}
-    }
 }
 
 fn handle_session_start(
@@ -461,7 +423,7 @@ fn build_log_message(
     }
 }
 
-fn handle_stop(conn: &Connection, payload: &HookPayload, config: &NmemConfig, db_path: &Path) -> Result<(), NmemError> {
+fn handle_stop(conn: &Connection, payload: &HookPayload, _config: &NmemConfig, db_path: &Path) -> Result<(), NmemError> {
     let ts = now_ts();
     let tx = conn.unchecked_transaction()?;
 
@@ -496,26 +458,41 @@ fn handle_stop(conn: &Connection, payload: &HookPayload, config: &NmemConfig, db
 
     tx.commit()?;
 
-    // Detect episodes — non-fatal
-    match crate::s4_memory::detect_and_narrate_episodes(conn, &payload.session_id, &config.summarization) {
-        Ok(n) if n > 1 => eprintln!("nmem: {n} episodes detected"),
-        Err(e) => eprintln!("nmem: episode detection failed (non-fatal): {e}"),
-        _ => {}
-    }
-
-    // Summarize session — non-fatal
-    match crate::s1_4_summarize::summarize_session(conn, &payload.session_id, &config.summarization) {
-        Ok(()) => {}
-        Err(e) => eprintln!("nmem: summarization failed (non-fatal): {e}"),
-    }
-
-    // Retention sweep — non-fatal
-    maybe_sweep(conn, config, db_path);
-
-    // WAL checkpoint outside transaction
-    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+    // Spawn deferred maintenance as a detached background process
+    spawn_deferred_maintain(&payload.session_id, db_path);
 
     Ok(())
+}
+
+fn spawn_deferred_maintain(session_id: &str, db_path: &Path) {
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("nmem: failed to resolve binary path: {e}");
+            return;
+        }
+    };
+
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("maintain").arg("--session").arg(session_id);
+
+    // Pass --db if using a non-default path
+    let default_db = std::path::PathBuf::from(
+        std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()),
+    )
+    .join(".nmem/nmem.db");
+    if db_path != default_db {
+        cmd.arg("--db").arg(db_path);
+    }
+
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit());
+
+    match cmd.spawn() {
+        Ok(_) => eprintln!("nmem: deferred maintenance spawned for session {}", &session_id[..8.min(session_id.len())]),
+        Err(e) => eprintln!("nmem: failed to spawn deferred maintenance: {e}"),
+    }
 }
 
 pub fn handle_record(db_path: &Path) -> Result<(), NmemError> {

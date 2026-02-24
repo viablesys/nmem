@@ -176,6 +176,10 @@ pub struct ContextArgs {
 
 #[derive(Parser)]
 pub struct MaintainArgs {
+    /// Session ID — run post-session maintenance (episodes, summarize, sweep, checkpoint)
+    #[arg(long)]
+    pub session: Option<String>,
+
     /// Also rebuild FTS5 indexes (rewrites entire index)
     #[arg(long)]
     pub rebuild_fts: bool,
