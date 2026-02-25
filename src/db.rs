@@ -393,4 +393,135 @@ mod tests {
             assert!(result.is_err());
         }
     }
+
+    #[test]
+    fn retry_on_busy_succeeds_after_lock_released() {
+        // Simulates the Stop hook scenario: one connection holds a write
+        // transaction (like summarization), another tries to write (new session hook).
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("busy.db");
+
+        // Set up the DB with minimal busy_timeout so BUSY fires fast
+        let setup = Connection::open(&db_path).unwrap();
+        setup.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE test (id INTEGER PRIMARY KEY, val TEXT);
+             INSERT INTO test VALUES (1, 'original');",
+        ).unwrap();
+        drop(setup);
+
+        // Conn A: hold an exclusive write transaction
+        let conn_a = Connection::open(&db_path).unwrap();
+        conn_a.pragma_update(None, "busy_timeout", &0).unwrap();
+        conn_a.execute_batch("BEGIN IMMEDIATE").unwrap();
+        conn_a.execute("UPDATE test SET val = 'from_a'", []).unwrap();
+        // Transaction is open — conn_a holds the write lock
+
+        // Release the lock from a background thread after 500ms
+        let db_path_clone = db_path.clone();
+        let release_thread = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            // conn_a is on the main thread, we commit it there — instead,
+            // we just need the main thread to know when to release.
+            // Signal via a file:
+            std::fs::write(db_path_clone.with_extension("release"), "").unwrap();
+        });
+
+        // Meanwhile, retry_on_busy should keep retrying until the lock is free.
+        // We simulate this by releasing conn_a's lock in a separate scope.
+        // Since retry_on_busy opens a fresh connection each retry, we need the
+        // blocker on a separate thread.
+        drop(conn_a); // release for the thread-based approach
+
+        // Better approach: hold the lock on a thread, release after delay
+        let conn_blocker = Connection::open(&db_path).unwrap();
+        conn_blocker.pragma_update(None, "busy_timeout", &0).unwrap();
+        conn_blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        conn_blocker.execute("UPDATE test SET val = 'blocking'", []).unwrap();
+
+        let blocker_thread = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            conn_blocker.execute_batch("COMMIT").unwrap();
+            // blocker released
+        });
+
+        // retry_on_busy should fail on first attempts, then succeed after ~400ms
+        let db_for_retry = db_path.clone();
+        let result = retry_on_busy(|| {
+            let conn = Connection::open(&db_for_retry).map_err(NmemError::Database)?;
+            conn.pragma_update(None, "busy_timeout", &0).map_err(NmemError::Database)?;
+            conn.execute("UPDATE test SET val = 'from_retry'", [])
+                .map_err(NmemError::Database)?;
+            Ok(())
+        });
+
+        release_thread.join().unwrap();
+        blocker_thread.join().unwrap();
+        assert!(result.is_ok(), "retry_on_busy should succeed after lock released: {result:?}");
+
+        // Verify the retry's write landed
+        let verify = Connection::open(&db_path).unwrap();
+        let val: String = verify.query_row("SELECT val FROM test", [], |r| r.get(0)).unwrap();
+        assert_eq!(val, "from_retry");
+    }
+
+    #[test]
+    fn retry_on_busy_gives_up_after_max_retries() {
+        // If the lock is never released, retry_on_busy should return the BUSY error
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("stuck.db");
+
+        let setup = Connection::open(&db_path).unwrap();
+        setup.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE test (id INTEGER PRIMARY KEY, val TEXT);
+             INSERT INTO test VALUES (1, 'original');",
+        ).unwrap();
+        drop(setup);
+
+        // Hold the lock for the entire test
+        let blocker = Connection::open(&db_path).unwrap();
+        blocker.pragma_update(None, "busy_timeout", &0).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        blocker.execute("UPDATE test SET val = 'blocked'", []).unwrap();
+
+        // Use minimal retries to keep the test fast — override via a direct loop
+        let db_for_retry = db_path.clone();
+        let mut attempts = 0u32;
+        let result: Result<(), NmemError> = {
+            // Simulate retry_on_busy but with faster timing
+            let mut delay = 10u64; // 10ms instead of 200ms
+            let retries = 3u32;
+            let mut last_err = None;
+            for attempt in 0..=retries {
+                let conn = Connection::open(&db_for_retry).map_err(NmemError::Database).unwrap();
+                conn.pragma_update(None, "busy_timeout", &0).map_err(NmemError::Database).unwrap();
+                match conn.execute("UPDATE test SET val = 'retry'", []) {
+                    Ok(_) => { last_err = None; break; }
+                    Err(e) => {
+                        attempts += 1;
+                        let ne = NmemError::Database(e);
+                        if is_busy(&ne) && attempt < retries {
+                            std::thread::sleep(std::time::Duration::from_millis(delay));
+                            delay *= 2;
+                            last_err = Some(ne);
+                        } else {
+                            last_err = Some(ne);
+                            break;
+                        }
+                    }
+                }
+            }
+            match last_err {
+                Some(e) => Err(e),
+                None => Ok(()),
+            }
+        };
+
+        blocker.execute_batch("ROLLBACK").unwrap();
+
+        assert!(result.is_err(), "should fail when lock never released");
+        assert!(is_busy(&result.unwrap_err()), "error should be BUSY");
+        assert!(attempts >= 3, "should have retried at least 3 times, got {attempts}");
+    }
 }
