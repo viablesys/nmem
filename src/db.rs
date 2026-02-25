@@ -251,14 +251,43 @@ fn migrate_to_encrypted(db_path: &Path, key: &str) -> Result<(), NmemError> {
     let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
     let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
 
-    eprintln!("nmem: migrated database to encrypted format");
-    eprintln!(
-        "nmem: unencrypted backup at {}",
-        backup_path.display()
-    );
-    eprintln!("nmem: verify and delete the backup manually");
+    // Migration is silent — the backup file's presence signals what happened.
 
     Ok(())
+}
+
+// --- BUSY retry ---
+
+/// Check if an NmemError wraps a SQLite BUSY error.
+fn is_busy(e: &NmemError) -> bool {
+    if let NmemError::Database(re) = e {
+        matches!(re, rusqlite::Error::SqliteFailure(ffi, _)
+            if ffi.code == rusqlite::ffi::ErrorCode::DatabaseBusy)
+    } else {
+        false
+    }
+}
+
+/// Retry a closure on BUSY errors with exponential backoff.
+/// Silent — no stderr (safe for hook context).
+pub fn retry_on_busy<F, T>(f: F) -> Result<T, NmemError>
+where
+    F: Fn() -> Result<T, NmemError>,
+{
+    const RETRIES: u32 = 5;
+    const INITIAL_MS: u64 = 200;
+    let mut delay = INITIAL_MS;
+    for attempt in 0..=RETRIES {
+        match f() {
+            Ok(v) => return Ok(v),
+            Err(e) if is_busy(&e) && attempt < RETRIES => {
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+                delay *= 2;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!()
 }
 
 // --- UDF registration ---

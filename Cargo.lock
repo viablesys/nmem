@@ -980,7 +980,7 @@ dependencies = [
 
 [[package]]
 name = "nmem"
-version = "1.0.1"
+version = "1.0.3"
 dependencies = [
  "assert_cmd",
  "clap",

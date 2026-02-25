@@ -8,7 +8,7 @@ use crate::s2_scope;
 use crate::s5_config::{load_config, resolve_filter_params, NmemConfig};
 use crate::s5_filter::{SecretFilter, redact_json_value_with};
 use crate::s5_project::derive_project;
-use crate::db::open_db;
+use crate::db::{open_db, retry_on_busy};
 use crate::NmemError;
 use rusqlite::{Connection, params};
 use serde::Deserialize;
@@ -100,7 +100,7 @@ fn handle_session_start(
     match s4_context::generate_context(conn, project, local_limit, cross_limit, None) {
         Ok(ctx) if !ctx.is_empty() => print!("{ctx}"),
         Ok(_) => {}
-        Err(e) => eprintln!("nmem: context injection failed: {e}"),
+        Err(_) => {}
     }
 
     Ok(())
@@ -123,11 +123,7 @@ fn handle_user_prompt(
 
     // Truncate and filter secrets
     let truncated: String = prompt.chars().take(500).collect();
-    let (filtered, redacted) = filter.redact(&truncated);
-
-    if redacted {
-        eprintln!("nmem: redacted potential secret from user_prompt");
-    }
+    let (filtered, _redacted) = filter.redact(&truncated);
 
     tx.execute(
         "INSERT INTO prompts (session_id, timestamp, source, content) VALUES (?1, ?2, ?3, ?4)",
@@ -225,10 +221,6 @@ fn handle_post_tool_use(
     } else {
         Some(serde_json::to_string(&metadata)?)
     };
-
-    if content_redacted {
-        eprintln!("nmem: redacted potential secret from {obs_type} observation");
-    }
 
     // Classify phase (think/act) — non-fatal, None if model not loaded
     let phase_result = s2_classify::classify(&filtered_content);
@@ -467,10 +459,7 @@ fn handle_stop(conn: &Connection, payload: &HookPayload, _config: &NmemConfig, d
 fn spawn_deferred_maintain(session_id: &str, db_path: &Path) {
     let exe = match std::env::current_exe() {
         Ok(e) => e,
-        Err(e) => {
-            eprintln!("nmem: failed to resolve binary path: {e}");
-            return;
-        }
+        Err(_) => return,
     };
 
     let mut cmd = std::process::Command::new(exe);
@@ -489,12 +478,11 @@ fn spawn_deferred_maintain(session_id: &str, db_path: &Path) {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit());
 
-    match cmd.spawn() {
-        Ok(_) => eprintln!("nmem: deferred maintenance spawned for session {}", &session_id[..8.min(session_id.len())]),
-        Err(e) => eprintln!("nmem: failed to spawn deferred maintenance: {e}"),
-    }
+    let _ = cmd.spawn();
 }
 
+/// Hook entry point. IMPORTANT: this function and everything it calls must
+/// never write to stderr — Claude Code treats any stderr from hooks as an error.
 pub fn handle_record(db_path: &Path) -> Result<(), NmemError> {
     let start = std::time::Instant::now();
 
@@ -507,22 +495,24 @@ pub fn handle_record(db_path: &Path) -> Result<(), NmemError> {
         return Ok(());
     }
 
-    let conn = open_db(db_path)?;
-
     // Load config and create project-aware filter
     let config = load_config().unwrap_or_default();
     let project = derive_project(&payload.cwd);
     let params = resolve_filter_params(&config, Some(&project));
     let filter = SecretFilter::with_params(params);
 
-    let result = match payload.hook_event_name.as_str() {
-        "SessionStart" => handle_session_start(&conn, &payload, &config, &project),
-        "UserPromptSubmit" => handle_user_prompt(&conn, &payload, &filter),
-        "PostToolUse" => handle_post_tool_use(&conn, &payload, &filter, "PostToolUse"),
-        "PostToolUseFailure" => handle_post_tool_use(&conn, &payload, &filter, "PostToolUseFailure"),
-        "Stop" => handle_stop(&conn, &payload, &config, db_path),
-        _ => Ok(()),
-    };
+    // Fresh connection on each retry — avoids stale transaction state after BUSY
+    let result = retry_on_busy(|| {
+        let conn = open_db(db_path)?;
+        match payload.hook_event_name.as_str() {
+            "SessionStart" => handle_session_start(&conn, &payload, &config, &project),
+            "UserPromptSubmit" => handle_user_prompt(&conn, &payload, &filter),
+            "PostToolUse" => handle_post_tool_use(&conn, &payload, &filter, "PostToolUse"),
+            "PostToolUseFailure" => handle_post_tool_use(&conn, &payload, &filter, "PostToolUseFailure"),
+            "Stop" => handle_stop(&conn, &payload, &config, db_path),
+            _ => Ok(()),
+        }
+    });
 
     // Metrics export — non-fatal
     if config.metrics.enabled {
@@ -545,10 +535,7 @@ fn record_metrics(
         .build()
     {
         Ok(rt) => rt,
-        Err(e) => {
-            eprintln!("nmem: metrics runtime: {e}");
-            return;
-        }
+        Err(_) => return,
     };
 
     let provider = match rt.block_on(async {
@@ -602,7 +589,5 @@ fn record_metrics(
         .build()
         .record(start.elapsed().as_secs_f64(), &[]);
 
-    if let Err(e) = provider.shutdown() {
-        eprintln!("nmem: metrics shutdown: {e}");
-    }
+    let _ = provider.shutdown();
 }

@@ -131,17 +131,12 @@ pub(crate) fn load_model_from(path: &Path) -> Option<Model> {
 pub(crate) fn load_or_get_model<'a>(
     lock: &'a OnceLock<Option<Model>>,
     filename: &str,
-    log_name: &str,
+    _log_name: &str,
 ) -> Option<&'a Model> {
     lock.get_or_init(|| {
         // Try external file first (allows overriding embedded models)
         let path = resolve_model_path(filename);
         if let Some(m) = load_model_from(&path) {
-            eprintln!(
-                "nmem: loaded {log_name} model from file ({} word + {} char features)",
-                m.word.vocabulary.len(),
-                m.char.vocabulary.len()
-            );
             return Some(m);
         }
 
@@ -149,11 +144,6 @@ pub(crate) fn load_or_get_model<'a>(
         if let Some(data) = embedded_model_data(filename)
             && let Some(m) = parse_model(data.as_bytes())
         {
-            eprintln!(
-                "nmem: loaded {log_name} model (embedded, {} word + {} char features)",
-                m.word.vocabulary.len(),
-                m.char.vocabulary.len()
-            );
             return Some(m);
         }
 
