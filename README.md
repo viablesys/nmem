@@ -54,11 +54,35 @@ Every observation is classified on four dimensions at write time: **phase** (thi
 | `create_marker` | Record a decision or conclusion |
 | `regenerate_context` | Re-run context injection |
 
+## Project detection
+
+nmem tags every session with a project name derived from the working directory.
+
+**Default strategy (`git`):** walks parent directories for a `.git` directory or file, and uses the repository root's basename. This is stable regardless of which subdirectory you start a session from. Falls back to the basename of the working directory when no git root is found.
+
+**Alternative strategy (`cwd`):** uses the basename of the current working directory directly. Useful for task-directory workflows where you create subdirectories per work unit (e.g., `tmp/OPS-1234`).
+
+```toml
+# ~/.nmem/config.toml
+[project]
+strategy = "cwd"   # default: "git"
+```
+
+| Working directory | `git` strategy | `cwd` strategy |
+|---|---|---|
+| `~/dev/my-repo/src` | `my-repo` | `src` |
+| `~/dev/my-repo/tmp/OPS-42` | `my-repo` | `OPS-42` |
+| `/tmp/scratch` | `scratch` | `scratch` |
+| `~` | `home` | `home` |
+
 ## Configuration
 
 `~/.nmem/config.toml`
 
 ```toml
+[project]
+strategy = "git"   # or "cwd" for task-directory workflows
+
 [filter]
 patterns = ["sk-[a-zA-Z0-9]{20,}"]  # secret patterns to redact
 
