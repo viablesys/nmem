@@ -437,6 +437,94 @@ fn purge_by_session() {
 }
 
 #[test]
+fn purge_by_session_with_work_units() {
+    // Regression test for GitHub issue #4: FOREIGN KEY constraint failed
+    // when purging sessions that have dependent work_units rows.
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    session_start(&db, "fk-sess");
+    user_prompt(&db, "fk-sess", "Do something");
+    post_tool_use(&db, "fk-sess", "Read", r#"{"file_path":"/src/a.rs"}"#);
+    post_tool_use(&db, "fk-sess", "Edit", r#"{"file_path":"/src/a.rs"}"#);
+    stop(&db, "fk-sess");
+
+    // Insert work_units row (normally created by episode detection at Stop time)
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO work_units (session_id, started_at, intent, obs_count)
+             VALUES ('fk-sess', 1000, 'test episode', 3)",
+            [],
+        )
+        .unwrap();
+    }
+
+    // Verify FK dependency exists
+    assert!(
+        query_db(&db, "SELECT COUNT(*) FROM work_units WHERE session_id = 'fk-sess'")[0][0]
+            .parse::<i32>()
+            .unwrap()
+            >= 1
+    );
+
+    // This previously failed with "FOREIGN KEY constraint failed"
+    nmem_cmd(&db)
+        .args(["purge", "--session", "fk-sess", "--confirm"])
+        .assert()
+        .success();
+
+    // Everything gone
+    assert_eq!(
+        query_db(&db, "SELECT COUNT(*) FROM sessions WHERE id = 'fk-sess'")[0][0],
+        "0"
+    );
+    assert_eq!(
+        query_db(&db, "SELECT COUNT(*) FROM work_units WHERE session_id = 'fk-sess'")[0][0],
+        "0"
+    );
+    assert_eq!(
+        query_db(&db, "SELECT COUNT(*) FROM _cursor WHERE session_id = 'fk-sess'")[0][0],
+        "0"
+    );
+}
+
+#[test]
+fn purge_by_project_with_work_units() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    session_start_project(&db, "fk-proj-1", "alpha");
+    post_tool_use(&db, "fk-proj-1", "Edit", r#"{"file_path":"/src/a.rs"}"#);
+    stop(&db, "fk-proj-1");
+
+    // Add work_units dependency
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO work_units (session_id, started_at, intent, obs_count)
+             VALUES ('fk-proj-1', 1000, 'project episode', 2)",
+            [],
+        )
+        .unwrap();
+    }
+
+    nmem_cmd(&db)
+        .args(["purge", "--project", "alpha", "--confirm"])
+        .assert()
+        .success();
+
+    assert_eq!(
+        query_db(&db, "SELECT COUNT(*) FROM sessions WHERE project = 'alpha'")[0][0],
+        "0"
+    );
+    assert_eq!(
+        query_db(&db, "SELECT COUNT(*) FROM work_units WHERE session_id = 'fk-proj-1'")[0][0],
+        "0"
+    );
+}
+
+#[test]
 fn purge_by_project() {
     let dir = TempDir::new().unwrap();
     let db = dir.path().join("test.db");
@@ -821,6 +909,25 @@ fn maintain_fts_integrity() {
 }
 
 // --- Search tests ---
+
+#[test]
+fn search_hyphenated_term() {
+    // Regression: OPS-1234 caused "no such column: 1234" via FTS5 NOT operator
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("test.db");
+
+    session_start(&db, "srch-hyph");
+    post_tool_use(&db, "srch-hyph", "Bash", r#"{"command":"cargo test"}"#);
+
+    // Should not crash — just return 0 results
+    let out = nmem_cmd(&db)
+        .args(["search", "OPS-1234"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    let results: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
+    assert!(results.is_empty());
+}
 
 #[test]
 fn search_basic() {

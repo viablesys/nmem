@@ -109,3 +109,125 @@ impl From<rusqlite_migration::Error> for NmemError {
 pub fn schema_migrations() -> &'static rusqlite_migration::Migrations<'static> {
     &schema::MIGRATIONS
 }
+
+/// Sanitize user input for FTS5 MATCH queries.
+///
+/// FTS5 treats `-` as NOT and `*` as prefix wildcard. This function quotes
+/// individual terms that contain characters that would be misinterpreted
+/// (hyphens, colons, dots, slashes), while preserving valid FTS5 operators
+/// (AND, OR, NOT, NEAR) and already-quoted phrases.
+///
+/// Returns `None` if the input produces no usable tokens.
+pub fn sanitize_fts_query(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // If the entire input is already a quoted phrase, pass through
+    if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() > 1 {
+        return Some(trimmed.to_string());
+    }
+
+    let fts_operators = ["AND", "OR", "NOT", "NEAR"];
+    let needs_quoting = |w: &str| -> bool {
+        w.contains('-') || w.contains(':') || w.contains('.') || w.contains('/')
+            || w.contains('\\') || w.contains('(') || w.contains(')')
+            || w.contains('{') || w.contains('}') || w.contains('[') || w.contains(']')
+    };
+
+    let words: Vec<&str> = trimmed.split_whitespace().collect();
+
+    // If there are no non-operator terms, operators can't be preserved
+    let has_operands = words.iter().any(|w| !fts_operators.contains(w));
+
+    let terms: Vec<String> = words
+        .into_iter()
+        .map(|w| {
+            // Already quoted — pass through
+            if w.starts_with('"') && w.ends_with('"') && w.len() > 1 {
+                return w.to_string();
+            }
+            // FTS5 operators — only pass through if there are actual operands
+            if fts_operators.contains(&w) {
+                if has_operands {
+                    return w.to_string();
+                }
+                // No operands — quote the operator so it's treated as literal
+                return format!("\"{}\"", w);
+            }
+            // Terms with problematic characters — quote them
+            if needs_quoting(w) {
+                return format!("\"{}\"", w.replace('"', ""));
+            }
+            // Plain words — pass through
+            w.to_string()
+        })
+        .filter(|t| !t.is_empty())
+        .collect();
+
+    if terms.is_empty() { None } else { Some(terms.join(" ")) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_plain_word() {
+        assert_eq!(sanitize_fts_query("cargo"), Some("cargo".into()));
+    }
+
+    #[test]
+    fn sanitize_hyphenated_term() {
+        // OPS-1234 must not become OPS NOT 1234
+        assert_eq!(sanitize_fts_query("OPS-1234"), Some("\"OPS-1234\"".into()));
+    }
+
+    #[test]
+    fn sanitize_multiple_words() {
+        assert_eq!(
+            sanitize_fts_query("cargo test"),
+            Some("cargo test".into())
+        );
+    }
+
+    #[test]
+    fn sanitize_preserves_fts_operators() {
+        // AND, OR, NOT should pass through as FTS5 operators
+        assert_eq!(
+            sanitize_fts_query("auth OR cargo"),
+            Some("auth OR cargo".into())
+        );
+    }
+
+    #[test]
+    fn sanitize_quoted_phrase_passthrough() {
+        assert_eq!(
+            sanitize_fts_query("\"already quoted\""),
+            Some("\"already quoted\"".into())
+        );
+    }
+
+    #[test]
+    fn sanitize_empty_input() {
+        assert_eq!(sanitize_fts_query(""), None);
+        assert_eq!(sanitize_fts_query("   "), None);
+    }
+
+    #[test]
+    fn sanitize_path_with_slashes() {
+        assert_eq!(
+            sanitize_fts_query("/src/auth.rs"),
+            Some("\"/src/auth.rs\"".into())
+        );
+    }
+
+    #[test]
+    fn sanitize_mixed_plain_and_special() {
+        assert_eq!(
+            sanitize_fts_query("fix OPS-1234 bug"),
+            Some("fix \"OPS-1234\" bug".into())
+        );
+    }
+}

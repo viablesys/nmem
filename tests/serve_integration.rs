@@ -58,6 +58,69 @@ fn result_json(result: &rmcp::model::CallToolResult) -> serde_json::Value {
 // --- search tests ---
 
 #[test]
+fn search_hyphenated_term_does_not_crash() {
+    let server = make_server();
+    // OPS-1234 previously caused "no such column: 1234" because FTS5 parsed
+    // the hyphen as NOT operator. Sanitization should quote the term.
+    let result = server
+        .do_search(SearchParams {
+            query: "OPS-1234".into(),
+            project: None,
+            obs_type: None,
+            limit: None,
+            offset: None,
+            order_by: None,
+            before: None,
+            after: None,
+        })
+        .unwrap();
+
+    assert!(!result.is_error.unwrap_or(false));
+    // No matching data, but should return empty array, not error
+    assert_eq!(result_json(&result).as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn search_fts_operators_in_query() {
+    let server = make_server();
+    // Bare NOT, AND, OR should not cause FTS5 parse errors
+    let result = server
+        .do_search(SearchParams {
+            query: "NOT AND OR".into(),
+            project: None,
+            obs_type: None,
+            limit: None,
+            offset: None,
+            order_by: None,
+            before: None,
+            after: None,
+        })
+        .unwrap();
+
+    assert!(!result.is_error.unwrap_or(false));
+}
+
+#[test]
+fn search_empty_query_returns_empty() {
+    let server = make_server();
+    let result = server
+        .do_search(SearchParams {
+            query: "   ".into(),
+            project: None,
+            obs_type: None,
+            limit: None,
+            offset: None,
+            order_by: None,
+            before: None,
+            after: None,
+        })
+        .unwrap();
+
+    assert!(!result.is_error.unwrap_or(false));
+    assert_eq!(result_json(&result).as_array().unwrap().len(), 0);
+}
+
+#[test]
 fn search_finds_by_content() {
     let server = make_server();
     let result = server

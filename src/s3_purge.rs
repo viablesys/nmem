@@ -164,11 +164,13 @@ fn build_obs_where(args: &PurgeArgs) -> Result<(String, Vec<String>), NmemError>
     }
 
     if let Some(ref search) = args.search {
+        let sanitized = crate::sanitize_fts_query(search)
+            .ok_or_else(|| NmemError::Config("search query produced no usable terms".into()))?;
         clauses.push(format!(
             "id IN (SELECT rowid FROM observations_fts WHERE observations_fts MATCH ?{})",
             values.len() + 1
         ));
-        values.push(search.clone());
+        values.push(sanitized);
     }
 
     if clauses.is_empty() {
@@ -204,12 +206,17 @@ fn delete_prompts_before(conn: &Connection, ts: i64) -> Result<usize, NmemError>
 }
 
 fn delete_session(conn: &Connection, session_id: &str) -> Result<usize, NmemError> {
+    conn.execute("DELETE FROM work_units WHERE session_id = ?1", params![session_id])?;
     conn.execute("DELETE FROM _cursor WHERE session_id = ?1", params![session_id])?;
     let deleted = conn.execute("DELETE FROM sessions WHERE id = ?1", params![session_id])?;
     Ok(deleted)
 }
 
 fn delete_sessions_for_project(conn: &Connection, project: &str) -> Result<usize, NmemError> {
+    conn.execute(
+        "DELETE FROM work_units WHERE session_id IN (SELECT id FROM sessions WHERE project = ?1)",
+        params![project],
+    )?;
     conn.execute(
         "DELETE FROM _cursor WHERE session_id IN (SELECT id FROM sessions WHERE project = ?1)",
         params![project],
@@ -219,6 +226,7 @@ fn delete_sessions_for_project(conn: &Connection, project: &str) -> Result<usize
 }
 
 pub fn cleanup_orphans(conn: &Connection) -> Result<usize, NmemError> {
+    conn.execute_batch("DELETE FROM work_units WHERE session_id NOT IN (SELECT id FROM sessions)")?;
     conn.execute_batch("DELETE FROM _cursor WHERE session_id NOT IN (SELECT id FROM sessions)")?;
     conn.execute_batch(
         "DELETE FROM prompts WHERE session_id NOT IN (SELECT id FROM sessions)",

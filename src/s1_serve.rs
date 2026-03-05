@@ -425,6 +425,11 @@ impl NmemServer {
         let limit = clamp(params.limit, 20, 100);
         let offset = params.offset.unwrap_or(0).max(0);
 
+        let query = match crate::sanitize_fts_query(&params.query) {
+            Some(q) => q,
+            None => return Ok(CallToolResult::success(vec![Content::text("[]")])),
+        };
+
         let blended = match params.order_by.as_deref() {
             None | Some("relevance") => false,
             Some("blended") => true,
@@ -494,7 +499,7 @@ impl NmemServer {
 
         let results: Vec<SearchResult> = stmt
             .query_map(
-                rusqlite::params![params.query, params.project, params.obs_type, params.before, params.after, limit, offset],
+                rusqlite::params![query, params.project, params.obs_type, params.before, params.after, limit, offset],
                 |row| {
                     Ok(SearchResult {
                         id: row.get(0)?,
@@ -1508,7 +1513,7 @@ impl NmemServer {
     }
 
     #[tool(
-        description = "Search observations by full-text query. Returns ranked index with IDs and previews. Use optional before/after Unix timestamps to scope results to a time range.",
+        description = "Search past agent actions (file reads, edits, commands, searches) by full-text query. Only contains records of what the agent did in prior sessions — not external data. Returns ranked index with IDs and previews. Use optional before/after Unix timestamps to scope results to a time range.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn search(
@@ -1666,7 +1671,7 @@ impl NmemServer {
 impl ServerHandler for NmemServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            instructions: Some("nmem: cross-session observation search and retrieval".into()),
+            instructions: Some("nmem: cross-session memory for AI coding agents. Stores records of what the agent did in prior sessions (files read/edited, commands run, searches performed). NOT a general-purpose database — only contains the agent's own past actions and their context.".into()),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
         }

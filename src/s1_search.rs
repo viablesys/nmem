@@ -30,6 +30,15 @@ struct FullObservation {
 }
 
 pub fn handle_search(db_path: &Path, args: &SearchArgs) -> Result<(), NmemError> {
+    let query = match crate::sanitize_fts_query(&args.query) {
+        Some(q) => q,
+        None => {
+            println!("[]");
+            eprintln!("nmem: 0 results");
+            return Ok(());
+        }
+    };
+
     let conn = open_db_readonly(db_path)?;
     let limit = args.limit.clamp(1, 100);
 
@@ -48,11 +57,11 @@ pub fn handle_search(db_path: &Path, args: &SearchArgs) -> Result<(), NmemError>
     }
 
     if args.ids {
-        print_ids(&conn, &args.query, args.project.as_deref(), args.obs_type.as_deref(), limit, blended)?;
+        print_ids(&conn, &query, args.project.as_deref(), args.obs_type.as_deref(), limit, blended)?;
     } else if args.full {
-        print_full(&conn, &args.query, args.project.as_deref(), args.obs_type.as_deref(), limit, blended)?;
+        print_full(&conn, &query, args.project.as_deref(), args.obs_type.as_deref(), limit, blended)?;
     } else {
-        print_index(&conn, &args.query, args.project.as_deref(), args.obs_type.as_deref(), limit, blended)?;
+        print_index(&conn, &query, args.project.as_deref(), args.obs_type.as_deref(), limit, blended)?;
     }
 
     Ok(())
