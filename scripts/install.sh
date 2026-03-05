@@ -64,6 +64,11 @@ fi
 
 chmod +x "${INSTALL_DIR}/nmem"
 
+# Ad-hoc codesign on macOS — required to avoid SIGKILL from Gatekeeper
+if [ "$OS" = "Darwin" ] && command -v codesign >/dev/null 2>&1; then
+  codesign --force --sign - "${INSTALL_DIR}/nmem" 2>/dev/null || true
+fi
+
 # Create nmem data directory
 mkdir -p "$HOME/.nmem"
 

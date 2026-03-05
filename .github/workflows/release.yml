@@ -50,6 +50,10 @@ jobs:
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
 
+      - name: Sign binary (macOS)
+        if: runner.os == 'macOS'
+        run: codesign --force --sign - target/${{ matrix.target }}/release/nmem
+
       - name: Package binary
         run: |
           mkdir -p dist
