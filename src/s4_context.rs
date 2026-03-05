@@ -587,14 +587,13 @@ pub fn generate_context(conn: &Connection, project: &str, local_limit: i64, cros
 pub fn handle_context(db_path: &std::path::Path, args: &crate::cli::ContextArgs) -> Result<(), NmemError> {
     let conn = crate::db::open_db_readonly(db_path)?;
 
+    let config = crate::config::load_config()?;
     let project = args.project.clone().unwrap_or_else(|| {
         let cwd = std::env::current_dir()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
-        crate::project::derive_project(&cwd)
+        crate::project::derive_project_with_strategy(&cwd, config.project.strategy)
     });
-
-    let config = crate::config::load_config()?;
     let (local_limit, cross_limit) = crate::config::resolve_context_limits(&config, &project, false);
 
     let ctx = generate_context(&conn, &project, local_limit, cross_limit, None)?;

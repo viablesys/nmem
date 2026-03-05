@@ -256,6 +256,7 @@ fn prompt_path_for_task(task_id: i64) -> PathBuf {
 // --- Queue ---
 
 pub fn handle_queue(db_path: &Path, args: &QueueArgs) -> Result<(), NmemError> {
+    let config = crate::s5_config::load_config().unwrap_or_default();
     let cwd = args
         .cwd
         .clone()
@@ -263,7 +264,7 @@ pub fn handle_queue(db_path: &Path, args: &QueueArgs) -> Result<(), NmemError> {
 
     let project = args.project.clone().or_else(|| {
         cwd.as_deref()
-            .map(crate::s5_project::derive_project)
+            .map(|c| crate::s5_project::derive_project_with_strategy(c, config.project.strategy))
     });
 
     let run_after = parse_schedule(&args.after)?;
@@ -307,9 +308,10 @@ pub fn handle_dispatch(db_path: &Path, args: &DispatchArgs) -> Result<(), NmemEr
         let cwd = tf
             .cwd
             .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()));
+        let config = crate::s5_config::load_config().unwrap_or_default();
         let project = tf.project.or_else(|| {
             cwd.as_deref()
-                .map(crate::s5_project::derive_project)
+                .map(|c| crate::s5_project::derive_project_with_strategy(c, config.project.strategy))
         });
         let run_after: Option<i64> = tf
             .after

@@ -1,4 +1,5 @@
 use crate::s5_filter::FilterParams;
+use crate::s5_project::ProjectStrategy;
 use crate::NmemError;
 use regex::Regex;
 use serde::Deserialize;
@@ -10,6 +11,8 @@ pub struct NmemConfig {
     #[serde(default)]
     pub filter: FilterConfig,
     #[serde(default)]
+    pub project: ProjectDetectionConfig,
+    #[serde(default)]
     pub projects: HashMap<String, ProjectConfig>,
     #[serde(default)]
     pub encryption: EncryptionConfig,
@@ -19,6 +22,12 @@ pub struct NmemConfig {
     pub metrics: crate::metrics::MetricsConfig,
     #[serde(default)]
     pub summarization: SummarizationConfig,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ProjectDetectionConfig {
+    #[serde(default)]
+    pub strategy: ProjectStrategy,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -532,5 +541,35 @@ extra_patterns = ["MYCO-[A-Za-z0-9]{32}"]
         .unwrap();
         let params = resolve_filter_params(&config, None);
         assert_eq!(params.extra_patterns.len(), 1);
+    }
+
+    #[test]
+    fn project_strategy_defaults_to_git() {
+        let config = NmemConfig::default();
+        assert_eq!(config.project.strategy, ProjectStrategy::Git);
+    }
+
+    #[test]
+    fn parse_project_strategy_cwd() {
+        let config: NmemConfig = toml::from_str(
+            r#"
+[project]
+strategy = "cwd"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.project.strategy, ProjectStrategy::Cwd);
+    }
+
+    #[test]
+    fn parse_project_strategy_git() {
+        let config: NmemConfig = toml::from_str(
+            r#"
+[project]
+strategy = "git"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.project.strategy, ProjectStrategy::Git);
     }
 }

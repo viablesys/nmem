@@ -7,7 +7,7 @@ use crate::s2_novelty;
 use crate::s2_scope;
 use crate::s5_config::{load_config, resolve_filter_params, NmemConfig};
 use crate::s5_filter::{SecretFilter, redact_json_value_with};
-use crate::s5_project::derive_project;
+use crate::s5_project::derive_project_with_strategy;
 use crate::db::{open_db, retry_on_busy};
 use crate::NmemError;
 use rusqlite::{Connection, params};
@@ -46,7 +46,7 @@ fn now_ts() -> i64 {
         .as_secs() as i64
 }
 
-fn ensure_session(conn: &Connection, session_id: &str, cwd: &str, ts: i64) -> Result<(), NmemError> {
+fn ensure_session(conn: &Connection, session_id: &str, project: &str, ts: i64) -> Result<(), NmemError> {
     let exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?1)",
         params![session_id],
@@ -54,7 +54,6 @@ fn ensure_session(conn: &Connection, session_id: &str, cwd: &str, ts: i64) -> Re
     )?;
 
     if !exists {
-        let project = derive_project(cwd);
         conn.execute(
             "INSERT INTO sessions (id, project, started_at) VALUES (?1, ?2, ?3)",
             params![session_id, project, ts],
@@ -73,7 +72,7 @@ fn handle_session_start(
     let ts = now_ts();
     let tx = conn.unchecked_transaction()?;
 
-    ensure_session(&tx, &payload.session_id, &payload.cwd, ts)?;
+    ensure_session(&tx, &payload.session_id, project, ts)?;
 
     let source = payload.source.as_deref().unwrap_or("startup");
     if matches!(source, "compact" | "resume" | "clear") {
@@ -110,6 +109,7 @@ fn handle_user_prompt(
     conn: &Connection,
     payload: &HookPayload,
     filter: &SecretFilter,
+    project: &str,
 ) -> Result<(), NmemError> {
     let prompt = match payload.prompt.as_deref() {
         Some(p) if !p.is_empty() && !p.starts_with("<system-reminder>") => p,
@@ -119,7 +119,7 @@ fn handle_user_prompt(
     let ts = now_ts();
     let tx = conn.unchecked_transaction()?;
 
-    ensure_session(&tx, &payload.session_id, &payload.cwd, ts)?;
+    ensure_session(&tx, &payload.session_id, project, ts)?;
 
     // Truncate and filter secrets
     let truncated: String = prompt.chars().take(500).collect();
@@ -139,6 +139,7 @@ fn handle_post_tool_use(
     payload: &HookPayload,
     filter: &SecretFilter,
     source_event: &str,
+    project: &str,
 ) -> Result<(), NmemError> {
     let tool_name = match payload.tool_name.as_deref() {
         Some(n) => n,
@@ -153,7 +154,7 @@ fn handle_post_tool_use(
     let ts = now_ts();
     let tx = conn.unchecked_transaction()?;
 
-    ensure_session(&tx, &payload.session_id, &payload.cwd, ts)?;
+    ensure_session(&tx, &payload.session_id, project, ts)?;
 
     // Scan transcript for thinking blocks
     let prompt_id = if let Some(tp) = payload.transcript_path.as_deref() {
@@ -290,7 +291,7 @@ fn handle_post_tool_use(
     // Stream to VictoriaLogs — non-fatal, fire-and-forget
     stream_observation_to_logs(
         &payload.session_id,
-        &derive_project(&payload.cwd),
+        project,
         obs_type,
         tool_name,
         file_path.as_deref(),
@@ -497,7 +498,7 @@ pub fn handle_record(db_path: &Path) -> Result<(), NmemError> {
 
     // Load config and create project-aware filter
     let config = load_config().unwrap_or_default();
-    let project = derive_project(&payload.cwd);
+    let project = derive_project_with_strategy(&payload.cwd, config.project.strategy);
     let params = resolve_filter_params(&config, Some(&project));
     let filter = SecretFilter::with_params(params);
 
@@ -506,9 +507,9 @@ pub fn handle_record(db_path: &Path) -> Result<(), NmemError> {
         let conn = open_db(db_path)?;
         match payload.hook_event_name.as_str() {
             "SessionStart" => handle_session_start(&conn, &payload, &config, &project),
-            "UserPromptSubmit" => handle_user_prompt(&conn, &payload, &filter),
-            "PostToolUse" => handle_post_tool_use(&conn, &payload, &filter, "PostToolUse"),
-            "PostToolUseFailure" => handle_post_tool_use(&conn, &payload, &filter, "PostToolUseFailure"),
+            "UserPromptSubmit" => handle_user_prompt(&conn, &payload, &filter, &project),
+            "PostToolUse" => handle_post_tool_use(&conn, &payload, &filter, "PostToolUse", &project),
+            "PostToolUseFailure" => handle_post_tool_use(&conn, &payload, &filter, "PostToolUseFailure", &project),
             "Stop" => handle_stop(&conn, &payload, &config, db_path),
             _ => Ok(()),
         }

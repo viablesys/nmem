@@ -7,7 +7,7 @@ use crate::s2_novelty;
 use crate::s2_scope;
 use crate::s5_config::{load_config, resolve_filter_params};
 use crate::s5_filter::SecretFilter;
-use crate::s5_project::derive_project;
+use crate::s5_project::derive_project_with_strategy;
 use crate::NmemError;
 use rusqlite::params;
 use std::path::Path;
@@ -25,7 +25,9 @@ pub fn handle_mark(db_path: &Path, args: &MarkArgs) -> Result<(), NmemError> {
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
-    let project = args.project.clone().unwrap_or_else(|| derive_project(&cwd));
+    let project = args.project.clone().unwrap_or_else(|| {
+        derive_project_with_strategy(&cwd, config.project.strategy)
+    });
 
     // Filter secrets
     let filter_params = resolve_filter_params(&config, Some(&project));
