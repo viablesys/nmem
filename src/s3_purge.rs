@@ -25,6 +25,17 @@ fn parse_date_to_ts(date: &str) -> Result<i64, NmemError> {
         return Err(NmemError::Config(format!("invalid date: {date}")));
     }
 
+    // Validate days per month
+    let is_leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let max_day: i64 = match m {
+        2 => if is_leap { 29 } else { 28 },
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if d > max_day {
+        return Err(NmemError::Config(format!("invalid date: {date} (month {m} has {max_day} days)")));
+    }
+
     // Simple days-since-epoch calculation (good enough for purge cutoffs)
     let days = (y - 1970) * 365 + (y - 1969) / 4 - (y - 1901) / 100 + (y - 1601) / 400;
     let month_days = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
@@ -130,7 +141,8 @@ fn build_obs_where(args: &PurgeArgs) -> Result<(String, Vec<String>), NmemError>
     let mut values: Vec<String> = Vec::new();
 
     if let Some(id) = args.id {
-        clauses.push(format!("id = {id}"));
+        clauses.push(format!("id = ?{}", values.len() + 1));
+        values.push(id.to_string());
     }
 
     if let Some(ref session) = args.session {
@@ -206,6 +218,8 @@ fn delete_prompts_before(conn: &Connection, ts: i64) -> Result<usize, NmemError>
 }
 
 fn delete_session(conn: &Connection, session_id: &str) -> Result<usize, NmemError> {
+    conn.execute("DELETE FROM observations WHERE session_id = ?1", params![session_id])?;
+    conn.execute("DELETE FROM prompts WHERE session_id = ?1", params![session_id])?;
     conn.execute("DELETE FROM work_units WHERE session_id = ?1", params![session_id])?;
     conn.execute("DELETE FROM _cursor WHERE session_id = ?1", params![session_id])?;
     let deleted = conn.execute("DELETE FROM sessions WHERE id = ?1", params![session_id])?;
@@ -213,6 +227,14 @@ fn delete_session(conn: &Connection, session_id: &str) -> Result<usize, NmemErro
 }
 
 fn delete_sessions_for_project(conn: &Connection, project: &str) -> Result<usize, NmemError> {
+    conn.execute(
+        "DELETE FROM observations WHERE session_id IN (SELECT id FROM sessions WHERE project = ?1)",
+        params![project],
+    )?;
+    conn.execute(
+        "DELETE FROM prompts WHERE session_id IN (SELECT id FROM sessions WHERE project = ?1)",
+        params![project],
+    )?;
     conn.execute(
         "DELETE FROM work_units WHERE session_id IN (SELECT id FROM sessions WHERE project = ?1)",
         params![project],
@@ -226,11 +248,12 @@ fn delete_sessions_for_project(conn: &Connection, project: &str) -> Result<usize
 }
 
 pub fn cleanup_orphans(conn: &Connection) -> Result<usize, NmemError> {
+    // Delete leaf rows referencing missing sessions
+    conn.execute_batch("DELETE FROM observations WHERE session_id NOT IN (SELECT id FROM sessions)")?;
+    conn.execute_batch("DELETE FROM prompts WHERE session_id NOT IN (SELECT id FROM sessions)")?;
     conn.execute_batch("DELETE FROM work_units WHERE session_id NOT IN (SELECT id FROM sessions)")?;
     conn.execute_batch("DELETE FROM _cursor WHERE session_id NOT IN (SELECT id FROM sessions)")?;
-    conn.execute_batch(
-        "DELETE FROM prompts WHERE session_id NOT IN (SELECT id FROM sessions)",
-    )?;
+    // Delete sessions that have no observations or prompts left
     let orphaned = conn.execute(
         "DELETE FROM sessions WHERE id NOT IN (
             SELECT DISTINCT session_id FROM observations
@@ -330,6 +353,39 @@ pub fn handle_purge(db_path: &Path, args: &PurgeArgs) -> Result<(), NmemError> {
 mod tests {
     use super::*;
 
+    fn setup_test_db() -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::schema::MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        conn
+    }
+
+    fn insert_session(conn: &Connection, id: &str, project: &str) {
+        conn.execute(
+            "INSERT INTO sessions (id, project, started_at) VALUES (?1, ?2, ?3)",
+            params![id, project, 1700000000],
+        )
+        .unwrap();
+    }
+
+    fn insert_observation(conn: &Connection, session_id: &str, content: &str) {
+        conn.execute(
+            "INSERT INTO observations (session_id, timestamp, obs_type, source_event, content)
+             VALUES (?1, ?2, 'command', 'PostToolUse', ?3)",
+            params![session_id, 1700000000, content],
+        )
+        .unwrap();
+    }
+
+    fn insert_prompt(conn: &Connection, session_id: &str, content: &str) {
+        conn.execute(
+            "INSERT INTO prompts (session_id, timestamp, source, content)
+             VALUES (?1, ?2, 'human', ?3)",
+            params![session_id, 1700000000, content],
+        )
+        .unwrap();
+    }
+
     #[test]
     fn parse_date_known_epoch() {
         // 2025-01-01 should be 1735689600
@@ -342,5 +398,126 @@ mod tests {
         assert!(parse_date_to_ts("not-a-date").is_err());
         assert!(parse_date_to_ts("2025-13-01").is_err());
         assert!(parse_date_to_ts("2025-01-32").is_err());
+    }
+
+    #[test]
+    fn parse_date_rejects_invalid_day_for_month() {
+        // April has 30 days, not 31
+        assert!(parse_date_to_ts("2025-04-31").is_err());
+        // February never has 30 days
+        assert!(parse_date_to_ts("2025-02-30").is_err());
+        // February 29 in a non-leap year
+        assert!(parse_date_to_ts("2025-02-29").is_err());
+        // February 29 in a leap year should succeed
+        assert!(parse_date_to_ts("2024-02-29").is_ok());
+    }
+
+    #[test]
+    fn delete_session_with_observations_and_prompts() {
+        let conn = setup_test_db();
+        insert_session(&conn, "sess-1", "test-project");
+        insert_observation(&conn, "sess-1", "cargo build");
+        insert_prompt(&conn, "sess-1", "build the project");
+
+        // Should succeed — must delete observations and prompts before session
+        let result = delete_session(&conn, "sess-1");
+        assert!(result.is_ok(), "delete_session failed: {result:?}");
+
+        // Verify everything is gone
+        let obs_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM observations WHERE session_id = 'sess-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(obs_count, 0);
+
+        let prompt_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM prompts WHERE session_id = 'sess-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(prompt_count, 0);
+    }
+
+    #[test]
+    fn delete_sessions_for_project_with_dependents() {
+        let conn = setup_test_db();
+        insert_session(&conn, "sess-a", "proj-x");
+        insert_session(&conn, "sess-b", "proj-x");
+        insert_observation(&conn, "sess-a", "test obs a");
+        insert_observation(&conn, "sess-b", "test obs b");
+        insert_prompt(&conn, "sess-a", "prompt a");
+
+        let result = delete_sessions_for_project(&conn, "proj-x");
+        assert!(result.is_ok(), "delete_sessions_for_project failed: {result:?}");
+
+        let obs_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM observations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(obs_count, 0);
+
+        let prompt_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM prompts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(prompt_count, 0);
+    }
+
+    #[test]
+    fn purge_id_is_parameterized() {
+        // If build_obs_where uses format!("id = {id}") instead of a parameter,
+        // a crafted id could inject SQL. Verify it uses proper parameterization
+        // by checking that the generated clause uses a bind parameter.
+        let args = PurgeArgs {
+            id: Some(42),
+            before: None,
+            project: None,
+            session: None,
+            obs_type: None,
+            older_than: None,
+            search: None,
+            confirm: false,
+        };
+        let (clause, values) = build_obs_where(&args).unwrap();
+        // Should use a bind parameter like "id = ?1", not "id = 42"
+        assert!(
+            clause.contains('?'),
+            "id filter should use parameterized query, got: {clause}"
+        );
+        assert!(
+            !clause.contains("42"),
+            "id value should not be interpolated into SQL, got: {clause}"
+        );
+        assert_eq!(values.len(), 1, "should have one bind value");
+    }
+
+    #[test]
+    fn cleanup_orphans_removes_dangling_observations() {
+        let conn = setup_test_db();
+        insert_session(&conn, "sess-1", "test");
+        insert_observation(&conn, "sess-1", "test content");
+
+        // Disable FK checks temporarily to simulate orphaned state
+        conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+        conn.execute("DELETE FROM sessions WHERE id = 'sess-1'", [])
+            .unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+
+        // Now we have an observation with no parent session
+        let orphan_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM observations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(orphan_count, 1);
+
+        cleanup_orphans(&conn).unwrap();
+
+        // Orphaned observations should be cleaned up
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM observations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0, "orphaned observations should be deleted");
     }
 }

@@ -34,10 +34,23 @@ pub fn classify_bash(command: &str) -> &'static str {
     }
 }
 
+/// Split a command string on both `&&` and `;` delimiters.
+fn split_command_chain(cmd: &str) -> Vec<&str> {
+    let mut segments = Vec::new();
+    for part in cmd.split("&&") {
+        for sub in part.split(';') {
+            let trimmed = sub.trim();
+            if !trimmed.is_empty() {
+                segments.push(trimmed);
+            }
+        }
+    }
+    segments
+}
+
 fn contains_git_cmd(cmd: &str, subcmd: &str) -> bool {
     // Match: "git push", "git -C /path push", "git commit", etc.
-    for segment in cmd.split("&&").chain(cmd.split(';')) {
-        let segment = segment.trim();
+    for segment in split_command_chain(cmd) {
         let words: Vec<&str> = segment.split_whitespace().collect();
         if let Some(pos) = words.iter().position(|&w| w == "git")
             && words[pos + 1..].contains(&subcmd)
@@ -49,8 +62,7 @@ fn contains_git_cmd(cmd: &str, subcmd: &str) -> bool {
 }
 
 fn contains_cmd(cmd: &str, target: &str) -> bool {
-    for segment in cmd.split("&&").chain(cmd.split(';')) {
-        let segment = segment.trim();
+    for segment in split_command_chain(cmd) {
         if segment.split_whitespace().next() == Some(target) {
             return true;
         }
@@ -351,5 +363,37 @@ mod tests {
     fn test_extract_git_metadata_empty() {
         let meta = extract_git_metadata("command", "some output");
         assert!(meta.is_empty());
+    }
+
+    #[test]
+    fn classify_bash_no_false_positive_across_semicolons() {
+        // "echo git; echo push" has "git" and "push" in separate commands.
+        // It should NOT be classified as git_push.
+        assert_eq!(
+            classify_bash("echo git; echo push"),
+            "command",
+            "should not match git_push across separate semicolon-delimited commands"
+        );
+    }
+
+    #[test]
+    fn classify_bash_no_false_positive_across_and_chains() {
+        // Same bug pattern with &&
+        assert_eq!(
+            classify_bash("echo git && echo push"),
+            "command",
+            "should not match git_push across separate &&-delimited commands"
+        );
+    }
+
+    #[test]
+    fn extract_content_null_tool_input() {
+        // Null tool_input should not panic, should return fallback
+        let result = extract_content("Bash", &Value::Null);
+        assert_eq!(result, "");
+        let result = extract_content("Read", &Value::Null);
+        assert_eq!(result, "");
+        let result = extract_content("Grep", &Value::Null);
+        assert_eq!(result, "");
     }
 }

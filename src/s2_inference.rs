@@ -484,6 +484,37 @@ mod tests {
     }
 
     #[test]
+    fn classify_empty_text_no_panic() {
+        // Empty text should not panic — classification depends on model bias alone.
+        let model = Model {
+            classes: vec!["negative".into(), "positive".into()],
+            word: VectorizerWeights {
+                vocabulary: HashMap::new(),
+                idf: vec![],
+                weights: vec![],
+                ngram_range: [1, 2],
+                binary: false,
+                sublinear_tf: true,
+            },
+            char: VectorizerWeights {
+                vocabulary: HashMap::new(),
+                idf: vec![],
+                weights: vec![],
+                ngram_range: [3, 4],
+                binary: false,
+                sublinear_tf: true,
+            },
+            bias: 0.5,
+            hash: "test".into(),
+        };
+        let (label, confidence) = classify_binary(&model, "");
+        // With positive bias 0.5, sigmoid(0.5) > 0.5, so should classify as positive
+        assert_eq!(label, "positive");
+        assert!(confidence > 0.5);
+        assert!(confidence <= 1.0);
+    }
+
+    #[test]
     fn test_sigmoid() {
         let raw = 0.0_f64;
         let prob = 1.0 / (1.0 + (-raw).exp());
