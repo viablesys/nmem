@@ -1,7 +1,7 @@
 use git2::{Patch, Repository, Sort};
 use regex::Regex;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -259,4 +259,119 @@ pub fn dense_summary(history: &FileHistory) -> String {
     }
 
     out
+}
+
+#[derive(Debug, Clone)]
+pub struct BlameHunk {
+    pub start_line: usize, // 1-based
+    pub line_count: usize,
+    pub oid: String,       // 8-char prefix
+    pub author: String,
+    pub timestamp: i64,
+    pub message: String,   // first line
+    pub co_changed: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CachedBlame {
+    pub hunks: Vec<BlameHunk>,
+}
+
+impl CachedBlame {
+    pub fn find_hunk(&self, line: usize) -> Option<&BlameHunk> {
+        self.hunks.iter().find(|h| line >= h.start_line && line < h.start_line + h.line_count)
+    }
+}
+
+pub fn blame_file(repo_path: &Path, file_path: &str) -> Result<CachedBlame, NmemError> {
+    let repo = Repository::discover(repo_path)
+        .map_err(|e| NmemError::Config(format!("git: {e}")))?;
+
+    let blame = repo.blame_file(Path::new(file_path), None)
+        .map_err(|e| NmemError::Config(format!("git blame: {e}")))?;
+
+    // Collect commit metadata, deduplicating by OID
+    let mut commit_cache: HashMap<git2::Oid, (String, i64, String, Vec<String>)> = HashMap::new();
+    let mut seen_oids: HashSet<git2::Oid> = HashSet::new();
+
+    let mut raw_hunks: Vec<(usize, usize, git2::Oid)> = Vec::new();
+
+    for i in 0..blame.len() {
+        let hunk = blame.get_index(i)
+            .ok_or_else(|| NmemError::Config("blame hunk index out of bounds".into()))?;
+
+        let oid = hunk.final_commit_id();
+        let start = hunk.final_start_line(); // already 1-based
+        let count = hunk.lines_in_hunk();
+
+        raw_hunks.push((start, count, oid));
+        seen_oids.insert(oid);
+    }
+
+    // Populate commit cache
+    for &oid in &seen_oids {
+        if oid.is_zero() {
+            commit_cache.insert(oid, ("(uncommitted)".into(), 0, "(uncommitted changes)".into(), vec![]));
+            continue;
+        }
+        let commit = match repo.find_commit(oid) {
+            Ok(c) => c,
+            Err(_) => {
+                commit_cache.insert(oid, ("unknown".into(), 0, "".into(), vec![]));
+                continue;
+            }
+        };
+
+        let author = commit.author().name().unwrap_or("unknown").to_string();
+        let timestamp = commit.time().seconds();
+        let message = commit.message().unwrap_or("").lines().next().unwrap_or("").to_string();
+
+        // Co-changed files: diff commit tree vs parent tree
+        let co_changed = co_changed_files(&repo, &commit, file_path);
+
+        commit_cache.insert(oid, (author, timestamp, message, co_changed));
+    }
+
+    let hunks = raw_hunks.into_iter().map(|(start, count, oid)| {
+        let (author, timestamp, message, co_changed) = commit_cache.get(&oid)
+            .cloned()
+            .unwrap_or_default();
+        BlameHunk {
+            start_line: start,
+            line_count: count,
+            oid: format!("{:.8}", oid),
+            author,
+            timestamp,
+            message,
+            co_changed,
+        }
+    }).collect();
+
+    Ok(CachedBlame { hunks })
+}
+
+fn co_changed_files(repo: &Repository, commit: &git2::Commit, exclude_path: &str) -> Vec<String> {
+    let tree = match commit.tree() {
+        Ok(t) => t,
+        Err(_) => return vec![],
+    };
+
+    let parent_tree = if commit.parent_count() > 0 {
+        commit.parent(0).ok().and_then(|p| p.tree().ok())
+    } else {
+        None
+    };
+
+    let diff = match repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None) {
+        Ok(d) => d,
+        Err(_) => return vec![],
+    };
+
+    diff.deltas()
+        .filter_map(|delta| {
+            let path = delta.new_file().path().or_else(|| delta.old_file().path())?;
+            let s = path.to_string_lossy();
+            if s == exclude_path { None } else { Some(s.to_string()) }
+        })
+        .collect()
 }

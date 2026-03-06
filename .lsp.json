@@ -1,6 +1,6 @@
 {
   "nmem": {
-    "command": "/home/bpd/workspace/nmem/target/release/nmem",
+    "command": "nmem",
     "args": ["lsp"],
     "extensionToLanguage": {
       ".rs": "rust",

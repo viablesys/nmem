@@ -1,3 +1,4 @@
+use serde_json::json;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
@@ -282,4 +283,147 @@ fn lsp_dedup_skips_second_open() {
     stdin.write_all(&lsp_message(exit)).unwrap();
     stdin.flush().unwrap();
     child.wait().unwrap();
+}
+
+#[test]
+fn lsp_hover_returns_blame_info() {
+    // Create a temp repo with two commits by different authors on different lines
+    let dir = tempfile::TempDir::new().unwrap();
+    let repo = git2::Repository::init(dir.path()).unwrap();
+
+    // First commit: author A writes two lines
+    let sig_a = git2::Signature::new("Alice", "alice@test.com", &git2::Time::new(1700000000, 0)).unwrap();
+    std::fs::write(dir.path().join("code.rs"), "fn main() {}\nfn helper() {}\n").unwrap();
+    let mut index = repo.index().unwrap();
+    index.add_path(std::path::Path::new("code.rs")).unwrap();
+    index.write().unwrap();
+    let tree_oid = index.write_tree().unwrap();
+    let tree = repo.find_tree(tree_oid).unwrap();
+    let commit1 = repo.commit(Some("HEAD"), &sig_a, &sig_a, "initial setup", &tree, &[]).unwrap();
+    let commit1_obj = repo.find_commit(commit1).unwrap();
+
+    // Second commit: author B modifies line 2 and adds line 3
+    let sig_b = git2::Signature::new("Bob", "bob@test.com", &git2::Time::new(1700100000, 0)).unwrap();
+    std::fs::write(dir.path().join("code.rs"), "fn main() {}\nfn updated() {}\nfn new_fn() {}\n").unwrap();
+    let mut index = repo.index().unwrap();
+    index.add_path(std::path::Path::new("code.rs")).unwrap();
+    index.write().unwrap();
+    let tree_oid = index.write_tree().unwrap();
+    let tree = repo.find_tree(tree_oid).unwrap();
+    repo.commit(Some("HEAD"), &sig_b, &sig_b, "update helper", &tree, &[&commit1_obj]).unwrap();
+
+    let bin = nmem_bin();
+    let mut child = Command::new(&bin)
+        .arg("lsp")
+        .current_dir(dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let stdin = child.stdin.as_mut().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+
+    // Initialize
+    let init_req = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}"#;
+    stdin.write_all(&lsp_message(init_req)).unwrap();
+    stdin.flush().unwrap();
+
+    // Read initialize response — verify hover capability
+    let init_resp = read_lsp_response(&mut reader);
+    let init_json: serde_json::Value = serde_json::from_str(&init_resp).unwrap();
+    assert!(
+        init_json["result"]["capabilities"]["hoverProvider"] == json!(true),
+        "hoverProvider should be true: {:?}",
+        init_json["result"]["capabilities"]
+    );
+
+    // Send initialized
+    let initialized = r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#;
+    stdin.write_all(&lsp_message(initialized)).unwrap();
+    stdin.flush().unwrap();
+
+    // Send didOpen
+    let file_uri = format!("file://{}/code.rs", dir.path().display());
+    let did_open = format!(
+        r#"{{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{{"textDocument":{{"uri":"{}","languageId":"rust","version":1,"text":"fn main() {{}}\nfn updated() {{}}\nfn new_fn() {{}}\n"}}}}}}"#,
+        file_uri
+    );
+    stdin.write_all(&lsp_message(&did_open)).unwrap();
+    stdin.flush().unwrap();
+
+    // Drain notifications (logMessage, diagnostics) before sending hover
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        let response = read_lsp_response(&mut reader);
+        let j: serde_json::Value = serde_json::from_str(&response).unwrap();
+        if j["method"] == "textDocument/publishDiagnostics" {
+            break;
+        }
+    }
+
+    // Hover on line 0 (should be Alice's "initial setup" commit)
+    let hover_req = format!(
+        r#"{{"jsonrpc":"2.0","id":10,"method":"textDocument/hover","params":{{"textDocument":{{"uri":"{}"}},"position":{{"line":0,"character":0}}}}}}"#,
+        file_uri
+    );
+    stdin.write_all(&lsp_message(&hover_req)).unwrap();
+    stdin.flush().unwrap();
+
+    // Read hover response (skip any interleaved notifications)
+    let hover_json = loop {
+        let resp = read_lsp_response(&mut reader);
+        let j: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        if j.get("id").is_some_and(|id| id == 10) {
+            break j;
+        }
+    };
+
+    let hover_content = hover_json["result"]["contents"]["value"].as_str()
+        .expect("hover should return markdown content");
+    assert!(hover_content.contains("Alice"), "hover should show author Alice: {hover_content}");
+    assert!(hover_content.contains("initial setup"), "hover should show commit message: {hover_content}");
+
+    // Hover on line 1 (should be Bob's "update helper" commit)
+    let hover_req2 = format!(
+        r#"{{"jsonrpc":"2.0","id":11,"method":"textDocument/hover","params":{{"textDocument":{{"uri":"{}"}},"position":{{"line":1,"character":0}}}}}}"#,
+        file_uri
+    );
+    stdin.write_all(&lsp_message(&hover_req2)).unwrap();
+    stdin.flush().unwrap();
+
+    let hover_json2 = loop {
+        let resp = read_lsp_response(&mut reader);
+        let j: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        if j.get("id").is_some_and(|id| id == 11) {
+            break j;
+        }
+    };
+
+    let hover_content2 = hover_json2["result"]["contents"]["value"].as_str()
+        .expect("hover should return markdown content for line 1");
+    assert!(hover_content2.contains("Bob"), "hover should show author Bob: {hover_content2}");
+    assert!(hover_content2.contains("update helper"), "hover should show commit message: {hover_content2}");
+
+    // Shutdown
+    let shutdown = r#"{"jsonrpc":"2.0","id":99,"method":"shutdown","params":null}"#;
+    stdin.write_all(&lsp_message(shutdown)).unwrap();
+    stdin.flush().unwrap();
+
+    loop {
+        let resp = read_lsp_response(&mut reader);
+        let j: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        if j.get("id").is_some_and(|id| id == 99) {
+            break;
+        }
+    }
+
+    let exit = r#"{"jsonrpc":"2.0","method":"exit","params":null}"#;
+    stdin.write_all(&lsp_message(exit)).unwrap();
+    stdin.flush().unwrap();
+
+    let status = child.wait().unwrap();
+    assert!(status.success());
 }
