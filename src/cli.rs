@@ -46,6 +46,8 @@ pub enum Command {
     Backfill(BackfillArgs),
     /// Create an agent-authored marker observation
     Mark(MarkArgs),
+    /// Run LSP server (stdio) — emits git history diagnostics on file open/save
+    Lsp,
 }
 
 #[derive(Parser)]

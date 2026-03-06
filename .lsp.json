@@ -1,0 +1,20 @@
+{
+  "nmem": {
+    "command": "/home/bpd/workspace/nmem/target/release/nmem",
+    "args": ["lsp"],
+    "extensionToLanguage": {
+      ".rs": "rust",
+      ".py": "python",
+      ".ts": "typescript",
+      ".tsx": "typescriptreact",
+      ".js": "javascript",
+      ".jsx": "javascriptreact",
+      ".go": "go",
+      ".md": "markdown",
+      ".toml": "toml",
+      ".yaml": "yaml",
+      ".yml": "yaml",
+      ".json": "json"
+    }
+  }
+}

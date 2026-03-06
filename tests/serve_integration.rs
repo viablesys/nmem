@@ -1,7 +1,7 @@
 use nmem::db::register_udfs;
 use nmem::serve::{
-    FileHistoryParams, GetObservationsParams, NmemServer, RecentContextParams, SearchParams,
-    SessionSummariesParams, SessionTraceParams, TimelineParams,
+    FileHistoryParams, GetObservationsParams, GitFileSummaryParams, NmemServer,
+    RecentContextParams, SearchParams, SessionSummariesParams, SessionTraceParams, TimelineParams,
 };
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
@@ -1264,4 +1264,118 @@ fn file_history_includes_summary_intent() {
         sessions[0]["summary_intent"].as_str().unwrap(),
         "refactor auth module"
     );
+}
+
+// --- git_file_summary tests ---
+
+fn make_git_server() -> (NmemServer, tempfile::TempDir) {
+    use git2::{Repository, Signature, Time};
+    use std::fs;
+    use std::path::Path;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let repo = Repository::init(dir.path()).unwrap();
+
+    let sig = Signature::new("Test", "test@test.com", &Time::new(1000000, 0)).unwrap();
+    let mut index = repo.index().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/lib.rs"), "fn main() {}").unwrap();
+    index.add_path(Path::new("src/lib.rs")).unwrap();
+    index.write().unwrap();
+    let tree_oid = index.write_tree().unwrap();
+    let tree = repo.find_tree(tree_oid).unwrap();
+    repo.commit(Some("HEAD"), &sig, &sig, "initial commit", &tree, &[]).unwrap();
+
+    let sig2 = Signature::new("Test", "test@test.com", &Time::new(1000100, 0)).unwrap();
+    fs::write(dir.path().join("src/lib.rs"), "fn main() {\n    println!(\"hello\");\n}").unwrap();
+    let mut index = repo.index().unwrap();
+    index.add_path(Path::new("src/lib.rs")).unwrap();
+    index.write().unwrap();
+    let tree_oid = index.write_tree().unwrap();
+    let tree = repo.find_tree(tree_oid).unwrap();
+    let parent = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.commit(Some("HEAD"), &sig2, &sig2, "add hello", &tree, &[&parent]).unwrap();
+
+    // The server needs a db but git_file_summary doesn't use it — use in-memory
+    let mut conn = Connection::open_in_memory().unwrap();
+    nmem::schema_migrations().to_latest(&mut conn).unwrap();
+    register_udfs(&conn).unwrap();
+    let server = NmemServer::new(Arc::new(Mutex::new(conn)));
+
+    (server, dir)
+}
+
+#[test]
+fn git_file_summary_returns_dense_summary() {
+    let (server, dir) = make_git_server();
+
+    // Must set cwd to the git repo for the tool to find it
+    let _guard = SetCwd::new(dir.path());
+
+    let result = server
+        .do_git_file_summary(GitFileSummaryParams {
+            file_path: "src/lib.rs".into(),
+            max_commits: 50,
+            full: false,
+        })
+        .unwrap();
+
+    let text = result_text(&result);
+    assert!(text.contains("src/lib.rs:"), "summary should start with file path: {text}");
+    assert!(text.contains("2 commits"), "should show 2 commits: {text}");
+    assert!(text.contains("Recent:"), "should have recent section: {text}");
+    // Token budget check: ~40 tokens ≈ <500 chars
+    assert!(text.len() < 500, "summary too long: {} chars", text.len());
+}
+
+#[test]
+fn git_file_summary_full_returns_json() {
+    let (server, dir) = make_git_server();
+    let _guard = SetCwd::new(dir.path());
+
+    let result = server
+        .do_git_file_summary(GitFileSummaryParams {
+            file_path: "src/lib.rs".into(),
+            max_commits: 50,
+            full: true,
+        })
+        .unwrap();
+
+    let json: serde_json::Value = serde_json::from_str(&result_text(&result)).unwrap();
+    assert_eq!(json["path"], "src/lib.rs");
+    assert_eq!(json["churn"]["total_commits"], 2);
+    assert!(json["commits"].as_array().unwrap().len() == 2);
+}
+
+#[test]
+fn git_file_summary_nonexistent_file_errors() {
+    let (server, dir) = make_git_server();
+    let _guard = SetCwd::new(dir.path());
+
+    let result = server.do_git_file_summary(GitFileSummaryParams {
+        file_path: "nonexistent.rs".into(),
+        max_commits: 50,
+        full: false,
+    });
+
+    assert!(result.is_err());
+}
+
+/// RAII guard to temporarily change cwd and restore on drop.
+struct SetCwd {
+    prev: std::path::PathBuf,
+}
+
+impl SetCwd {
+    fn new(path: &std::path::Path) -> Self {
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(path).unwrap();
+        Self { prev }
+    }
+}
+
+impl Drop for SetCwd {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.prev);
+    }
 }

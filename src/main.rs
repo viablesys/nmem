@@ -30,6 +30,7 @@ fn run() -> Result<(), NmemError> {
         Command::Task(args) => nmem::dispatch::handle_task(&db_path, &args),
         Command::Learn(args) => nmem::learn::handle_learn(&db_path, &args),
         Command::Mark(args) => nmem::mark::handle_mark(&db_path, &args),
+        Command::Lsp => nmem::s1_lsp::handle_lsp(&db_path),
         Command::Backfill(args) => match args.dimension.as_str() {
             "phase" => nmem::s2_classify::handle_backfill(&db_path, &args),
             "scope" => nmem::s2_scope::handle_backfill_scope(&db_path, &args),

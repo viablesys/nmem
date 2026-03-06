@@ -59,6 +59,22 @@ nmem is a single Rust binary (`nmem`) with two subcommands: `record` (synchronou
 - Schema migrations (`rusqlite_migration`) handle DB upgrades — but what about config format changes?
 - Breaking changes in hook payload format — how to handle version skew between Claude Code and nmem?
 
+> **[ANNOTATION 2026-03-05, v0.3]:** Investigated Q1 and Q4 in the context of v1.0.6. Findings and candidate features:
+>
+> **Marketplace update mechanism (Q1/Q4):** The Claude Code marketplace does not have built-in support for distributing or auto-updating platform-specific binaries. It handles plugin components (hooks, MCP config, manifest) but not native binaries. The nmem architecture already separates these: binary via GitHub Releases + install script, plugin via marketplace. Auto-update (self-replacing binary) was considered and rejected — too much implicit trust. The marketplace should own plugin updates; the binary is a separate concern.
+>
+> **Candidate features for upgrade path (Q4):**
+>
+> 1. **Version check at SessionStart** — During context injection, compare `env!("CARGO_PKG_VERSION")` against the latest GitHub release tag. Cache the result (e.g. `~/.nmem/latest-version` with a TTL) to avoid hitting the API on every session. If stale, emit a one-line notice: `nmem: update available (v1.0.6 → v1.0.7). Run: curl -fsSL ... | sh`. No auto-download, no self-modification — just information.
+>
+> 2. **Config drift detection** — Add `nmem config check` subcommand that loads `~/.nmem/config.toml` and diffs it against the current binary's expected schema. Reports: missing new sections/keys (with defaults and descriptions), unknown/deprecated keys, and values outside valid ranges. Optional: a `version` key in config.toml to track which binary version last wrote it. Pairs with the version check — when a new release introduces config options, the user learns about them.
+>
+> 3. **SessionStart config nudge** — If `config check` detects drift, surface a one-liner during context injection alongside the version notice. Keeps the user informed without blocking.
+>
+> **Design constraint:** All three features are informational only. No auto-modification of binaries or config. The user runs the install script or edits config manually. This matches the project's "breaking changes over legacy hacks" principle — tell the user what changed, don't paper over it.
+>
+> **Activation trigger:** Implement when the config schema starts changing between releases (currently stable) or when marketplace adoption creates a user base that wouldn't check GitHub releases manually.
+
 ### Q5: Platform Support
 - Linux x86_64 is primary (Fedora dev machine).
 - macOS arm64 is the largest Claude Code user base — cross-compilation with SQLCipher?
@@ -77,3 +93,4 @@ nmem is a single Rust binary (`nmem`) with two subcommands: `record` (synchronou
 |------|---------|---------|
 | 2026-02-15 | 0.1 | Draft with open questions, dev install note. |
 | 2026-02-21 | 0.2 | Annotated stale subcommand count (2 → 16). |
+| 2026-03-05 | 0.3 | Q4 annotation: marketplace has no binary update mechanism; three candidate features (version check, config drift, SessionStart nudge) with activation trigger. |

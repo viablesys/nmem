@@ -2,6 +2,18 @@
 
 Cross-session memory for Claude Code. Captures observations (file reads, edits, commands, errors) via hooks, stores in encrypted SQLite, retrieves via MCP server and CLI search.
 
+## Rust Tutorials
+
+The user is learning Rust by walking through nmem code line-by-line. Sessions are tracked via nmem markers tagged `tutorial:`. Search `tutorial` in nmem to find prior sessions.
+
+**Format**: User picks a function or section. Agent decomposes each line/construct, explains what it does and why Rust requires it. No code writing — reading only.
+
+**Marker convention**: After each session, create a marker with:
+- Tag: `tutorial:`
+- File and line range covered
+- Concepts introduced
+- Where to pick up next
+
 ## Build & Test
 
 ```bash

@@ -1,0 +1,1 @@
+disallowed-macros = ["eprintln", "dbg"]

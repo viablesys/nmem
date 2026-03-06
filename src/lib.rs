@@ -7,6 +7,8 @@ pub mod status;
 
 // S1 Operations — capture, store, retrieve
 pub mod s1_extract;
+pub mod s1_git;
+pub mod s1_lsp;
 pub mod s1_mark;
 pub mod s1_pin;
 pub mod s1_record;

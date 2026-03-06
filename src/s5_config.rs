@@ -22,6 +22,8 @@ pub struct NmemConfig {
     pub metrics: crate::metrics::MetricsConfig,
     #[serde(default)]
     pub summarization: SummarizationConfig,
+    #[serde(default)]
+    pub lsp: LspConfig,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -54,6 +56,21 @@ impl Default for SummarizationConfig {
             fallback_endpoint: None,
         }
     }
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct LspConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_lsp_extensions")]
+    pub extensions: Vec<String>,
+}
+
+fn default_lsp_extensions() -> Vec<String> {
+    ["rs", "py", "ts", "tsx", "js", "jsx", "go", "md", "toml", "yaml", "yml", "json"]
+        .into_iter()
+        .map(String::from)
+        .collect()
 }
 
 fn default_summarization_endpoint() -> String {

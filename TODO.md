@@ -78,6 +78,15 @@ Periodic synthesis over work unit summaries to produce cross-session patterns. C
 
 **Depends on**: Work unit summaries as input, `syntheses` table (schema designed in ADR-002 Q3 but not created).
 
+### `nmem learn` refinement (S4 concern)
+`s3_learn.rs` is currently in S3 but `detect_patterns` is an S4 intelligence function — it synthesizes cross-session patterns. Needs reclassification.
+
+`detect_unresolved_reads` specifically is low-value: finds files read across multiple sessions but never edited, which isn't a meaningful signal. Files are read constantly for context; repeated reading without editing is normal investigation, not an unresolved problem. The "unresolved investigations" section in `learnings.md` produces false positives (e.g., `db.rs` flagged despite being heavily edited in other sessions — the query only considers sessions where it was *not* edited).
+
+**Refinement direction**: Replace read-counting heuristic with intervention-based signals. A file that was edited in a failure episode across multiple sessions is genuinely unresolved. A file that was only read is just being referenced.
+
+**Trigger**: File history refinement (recording criteria change to interventions-only) removes the `file_read` observation rows that `detect_unresolved_reads` depends on.
+
 ### Auto-pinning (landmark detection)
 Automatic identification of important observations exempt from retention. Manual `nmem pin <id>` works; intelligence-driven pinning requires S4.
 

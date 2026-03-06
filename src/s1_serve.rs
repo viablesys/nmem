@@ -160,6 +160,22 @@ pub struct CreateMarkerParams {
     pub project: Option<String>,
 }
 
+fn default_50() -> usize {
+    50
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct GitFileSummaryParams {
+    /// File path relative to repo root.
+    pub file_path: String,
+    /// Max commits to analyze (default 50).
+    #[serde(default = "default_50")]
+    pub max_commits: usize,
+    /// Include full commit list (default: summary only).
+    #[serde(default)]
+    pub full: bool,
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub struct CurrentStanceParams {
     /// Optional session ID. Defaults to the most recent session.
@@ -1063,6 +1079,28 @@ impl NmemServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
+    pub fn do_git_file_summary(
+        &self,
+        params: GitFileSummaryParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        let cwd = std::env::current_dir().map_err(|e| db_err(&e))?;
+        let opts = crate::s1_git::QueryOpts {
+            max_commits: params.max_commits,
+            ..Default::default()
+        };
+
+        let history = crate::s1_git::file_history(&cwd, &params.file_path, &opts)
+            .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("{e}"), None))?;
+
+        if params.full {
+            let json = serde_json::to_string(&history).map_err(|e| db_err(&e))?;
+            Ok(CallToolResult::success(vec![Content::text(json)]))
+        } else {
+            let summary = crate::s1_git::dense_summary(&history);
+            Ok(CallToolResult::success(vec![Content::text(summary)]))
+        }
+    }
+
     pub fn do_queue_task(&self, params: QueueTaskParams) -> Result<CallToolResult, ErrorData> {
         // Shell out to `nmem queue` to keep MCP server read-only.
         // Same pattern as hooks calling `nmem record`.
@@ -1621,6 +1659,20 @@ impl NmemServer {
         let start = std::time::Instant::now();
         let result = self.do_file_history(p.0);
         record_query_metrics("file_history", start);
+        result
+    }
+
+    #[tool(
+        description = "Get git history summary for a file: commits, churn, co-changes, recent messages. Returns ~40 tokens by default. Set full=true for complete commit list as JSON.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn git_file_summary(
+        &self,
+        p: Parameters<GitFileSummaryParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let start = std::time::Instant::now();
+        let result = self.do_git_file_summary(p.0);
+        record_query_metrics("git_file_summary", start);
         result
     }
 
