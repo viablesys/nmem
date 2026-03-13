@@ -396,6 +396,33 @@ The frontmatter is parsed at push time and synced to the `library_docs` table. T
 
 **Implication for ensemble sizing:** N=5 is sufficient for research (lifts p=0.947 to 99.7%). N=7 adds marginal accuracy but provides stronger disagreement signal for edge cases. For binary yes/no questions with structural answers, even N=5 yields unanimous agreement — the ensemble's value there is confidence certification, not error correction.
 
+**Case study: Helm/Flux resource lifecycle (N=7, Q&A)**
+
+Question: "If a Flux HelmRelease is suspended, and I do a manual `helm upgrade` that adds a new resource with a unique name, will that resource be deleted when Flux resumes?"
+
+7 independent agents, no shared context, same prompt. Results:
+
+| Claim | k/7 |
+|-------|-----|
+| Flux uses Helm SDK, not CLI | 7/7 |
+| Equivalent of `helm upgrade --install` | 7/7 |
+| Default is `--reset-values` | 7/7 |
+| Manual values discarded on reconcile | 7/7 |
+| Helm three-way merge deletes absent resources | 7/7 |
+| Deletion done by Helm, not Flux | 7/7 |
+| Manual upgrade bumps revision, Flux detects drift | 7/7 |
+| Helm-controller does NOT track individual resources | 7/7 |
+| Kustomization only manages HelmRelease CR, not children | 5/7 |
+| `helm.sh/resource-policy: keep` as escape hatch | 1/7 |
+| `kubectl apply` (not `helm upgrade`) would NOT be deleted | 2/7 |
+| `.spec.upgrade.preserveValues` field existence | 4/7 (all flagged uncertain) |
+| `.spec.upgrade.force` delete+recreate behavior | 3/7 |
+| Resume triggers immediate reconciliation | 4/7 |
+
+Answer: **Yes, deleted.** 7/7 unanimous on the 5-step causal chain: resume → reset-values → re-render without resource → three-way merge detects absence → Helm deletes. One escape hatch surfaced by a single agent: annotate with `helm.sh/resource-policy: keep`.
+
+This demonstrates the ensemble pattern for high-stakes infrastructure questions: the core mechanism achieves 100% agreement (8 architectural claims at 7/7), while edge cases and caveats show expected variance (1/7 to 4/7). The disagreement distribution cleanly separates load-bearing facts from exploratory observations. q_final = 1.0 because zero corrections were needed on any claim where agents expressed confidence.
+
 **MCP tools for RAG:**
 - `list_library_docs` — list locally available library docs with metadata
 - `search_library_docs` — FTS5 search over library doc content
