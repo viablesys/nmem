@@ -384,6 +384,18 @@ The frontmatter is parsed at push time and synced to the `library_docs` table. T
 
 **Interpretation:** `q_final: 0.997` means "99.7% confident after fact-checking." The decomposition is stored for auditability — anyone can drill from the headline number to the raw agreement distribution.
 
+**Observed baselines from real ensemble runs:**
+
+| Run | N | Type | Claims | Corrections | p_hat | ensemble_acc | calibration | q_final |
+|-----|---|------|--------|-------------|-------|-------------|-------------|---------|
+| library docs (5 topics) | 5 | research | ~190 | 10 | 0.947 | 99.7% | 0.80 | 0.798 raw / 0.997 post-correction |
+| ADR-015 rewrite | 5 | design | ~13 | 0 | 1.0 (arch) | 1.0 | 1.0 | 1.0 |
+| Helm/Flux question | 7 | Q&A | 14 | 0 | 1.0 (core) | 1.0 | 1.0 | 1.0 |
+
+**Pattern:** Error clusters in numerical/factual claims (sizes, speeds, version numbers), not architectural or mechanistic claims. Design and Q&A ensembles achieve q_final = 1.0 because the claims are structural — overdetermined by constraints. Research docs hit ~95% single-agent accuracy because they contain numerical facts the model is less certain about.
+
+**Implication for ensemble sizing:** N=5 is sufficient for research (lifts p=0.947 to 99.7%). N=7 adds marginal accuracy but provides stronger disagreement signal for edge cases. For binary yes/no questions with structural answers, even N=5 yields unanimous agreement — the ensemble's value there is confidence certification, not error correction.
+
 **MCP tools for RAG:**
 - `list_library_docs` — list locally available library docs with metadata
 - `search_library_docs` — FTS5 search over library doc content
