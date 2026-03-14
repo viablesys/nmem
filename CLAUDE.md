@@ -187,6 +187,8 @@ ADRs in `design/ADR/`. Read before changing load-bearing decisions:
 
 ## Library docs by module
 
+Library docs are in the `dojo/` submodule (e.g., `dojo/rusqlite.md`).
+
 | Module | Read first |
 |--------|------------|
 | `db.rs` | `rusqlite.md`, `sqlcipher.md` |
