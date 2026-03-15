@@ -243,13 +243,21 @@ pub async fn heartbeat(
         }
     }
 
-    // Calibrated timeout: max observed RTT × 3, floor at 100ms
+    // Calibrated timeout: max observed RTT × 3, floor at 500ms
+    //
+    // Why ×3: absorbs jitter, GC pauses, load spikes, model-loading delays.
+    // Why 500ms floor: cross-continent RTT is 60-300ms. An agent on the
+    // opposite coast with a loaded machine can spike well past 100ms.
+    // 500ms floor means even localhost fleets have room for a bad moment.
+    //
+    // The initial_timeout for first heartbeat should be generous (3-5s)
+    // because we don't know fleet geography yet.
     let max_rtt = instances
         .iter()
         .map(|(_, d)| *d)
         .max()
-        .unwrap_or(Duration::from_millis(100));
-    let calibrated = (max_rtt * 3).max(Duration::from_millis(100));
+        .unwrap_or(Duration::from_millis(500));
+    let calibrated = (max_rtt * 3).max(Duration::from_millis(500));
 
     FleetState {
         instances,
@@ -395,12 +403,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Step 1: Heartbeat — discover fleet, calibrate timeout
-    // Initial timeout is generous (1s) since we don't know fleet latency yet
+    // Initial timeout is generous (3s) since we don't know fleet geography yet
     let fleet = heartbeat(
         &client,
         "nmem.demo.heartbeat",
         "demo-runner",
-        Duration::from_secs(1),
+        Duration::from_secs(3),
     )
     .await;
 
@@ -1255,10 +1263,10 @@ mod tests {
         names.sort();
         assert_eq!(names, vec!["node-0", "node-1", "node-2"]);
 
-        // Calibrated timeout should be >= 100ms (floor)
+        // Calibrated timeout should be >= 500ms (floor)
         assert!(
-            fleet.calibrated_timeout >= Duration::from_millis(100),
-            "calibrated timeout should be at least 100ms"
+            fleet.calibrated_timeout >= Duration::from_millis(500),
+            "calibrated timeout should be at least 500ms"
         );
 
         for h in handles {
@@ -1282,11 +1290,11 @@ mod tests {
         .await;
 
         assert_eq!(fleet.instances.len(), 0, "no instances should respond");
-        // No responses: fallback max_rtt=100ms, ×3 = 300ms
+        // No responses: fallback max_rtt=500ms, ×3 = 1500ms, floor=500ms → 1500ms
         assert_eq!(
             fleet.calibrated_timeout,
-            Duration::from_millis(300),
-            "should use fallback timeout (100ms × 3) when no responses"
+            Duration::from_millis(1500),
+            "should use fallback timeout (500ms × 3) when no responses"
         );
     }
 
@@ -1347,15 +1355,15 @@ mod tests {
 
         assert_eq!(fleet.instances.len(), 2);
 
-        // Slow instance has ~100ms delay, so max RTT should be > 100ms
-        // Calibrated = max_rtt × 3, so should be > 300ms
+        // Slow instance has ~100ms delay, so max RTT > 100ms
+        // Calibrated = max(max_rtt × 3, 500ms), so should be >= 500ms
         assert!(
-            fleet.calibrated_timeout >= Duration::from_millis(300),
-            "calibrated timeout ({:?}) should be >= 300ms (slow RTT × 3)",
+            fleet.calibrated_timeout >= Duration::from_millis(500),
+            "calibrated timeout ({:?}) should be >= 500ms (floor)",
             fleet.calibrated_timeout
         );
 
-        // But not absurdly large — should be well under 3s (1s timeout × 3)
+        // But not absurdly large — should be well under 3s
         assert!(
             fleet.calibrated_timeout < Duration::from_secs(3),
             "calibrated timeout ({:?}) should be < 3s",
@@ -1444,5 +1452,235 @@ mod tests {
         for h in handles {
             h.await.unwrap();
         }
+    }
+
+    // --- Group 8: Latency simulation — fleet geography ---
+
+    /// Helper: spawn a heartbeat responder with simulated network delay.
+    async fn spawn_delayed_responder(
+        client: &async_nats::Client,
+        subject: &str,
+        name: String,
+        delay: Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        let c = client.clone();
+        let mut sub = c.subscribe(subject.to_string()).await.unwrap();
+        tokio::spawn(async move {
+            if let Some(msg) = sub.next().await {
+                tokio::time::sleep(delay).await; // simulate network latency
+                let ping: HeartbeatPing =
+                    serde_json::from_slice(&msg.payload).unwrap();
+                let pong = HeartbeatPong {
+                    responder: name,
+                    echo_ms: ping.sent_ms,
+                };
+                if let Some(reply) = msg.reply {
+                    c.publish(reply, serde_json::to_vec(&pong).unwrap().into())
+                        .await
+                        .unwrap();
+                }
+            }
+        })
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_latency_same_coast() {
+        // Two agents on the same coast: ~10-20ms RTT
+        let server = NatsTestServer::start(14243).await;
+        let client = async_nats::connect(&server.url()).await.unwrap();
+
+        let h0 = spawn_delayed_responder(
+            &client, "nmem.viablesys.heartbeat", "sf-office".into(),
+            Duration::from_millis(10),
+        ).await;
+        let h1 = spawn_delayed_responder(
+            &client, "nmem.viablesys.heartbeat", "la-home".into(),
+            Duration::from_millis(20),
+        ).await;
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let fleet = heartbeat(
+            &client, "nmem.viablesys.heartbeat", "test",
+            Duration::from_secs(3),
+        ).await;
+
+        assert_eq!(fleet.instances.len(), 2);
+        // 20ms × 3 = 60ms, but floor is 500ms
+        assert_eq!(fleet.calibrated_timeout, Duration::from_millis(500));
+
+        h0.await.unwrap();
+        h1.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_latency_cross_us() {
+        // Agents on opposite coasts: ~60-80ms RTT
+        let server = NatsTestServer::start(14244).await;
+        let client = async_nats::connect(&server.url()).await.unwrap();
+
+        let h0 = spawn_delayed_responder(
+            &client, "nmem.viablesys.heartbeat", "nyc-office".into(),
+            Duration::from_millis(10),
+        ).await;
+        let h1 = spawn_delayed_responder(
+            &client, "nmem.viablesys.heartbeat", "sf-home".into(),
+            Duration::from_millis(80),
+        ).await;
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let fleet = heartbeat(
+            &client, "nmem.viablesys.heartbeat", "test",
+            Duration::from_secs(3),
+        ).await;
+
+        assert_eq!(fleet.instances.len(), 2);
+        // 80ms × 3 = 240ms, but floor is 500ms
+        assert_eq!(fleet.calibrated_timeout, Duration::from_millis(500));
+
+        h0.await.unwrap();
+        h1.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_latency_global() {
+        // Agents on different continents: ~150-300ms RTT
+        let server = NatsTestServer::start(14245).await;
+        let client = async_nats::connect(&server.url()).await.unwrap();
+
+        let h0 = spawn_delayed_responder(
+            &client, "nmem.viablesys.heartbeat", "nyc".into(),
+            Duration::from_millis(10),
+        ).await;
+        let h1 = spawn_delayed_responder(
+            &client, "nmem.viablesys.heartbeat", "london".into(),
+            Duration::from_millis(150),
+        ).await;
+        let h2 = spawn_delayed_responder(
+            &client, "nmem.viablesys.heartbeat", "tokyo".into(),
+            Duration::from_millis(250),
+        ).await;
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let fleet = heartbeat(
+            &client, "nmem.viablesys.heartbeat", "test",
+            Duration::from_secs(3),
+        ).await;
+
+        assert_eq!(fleet.instances.len(), 3);
+        // 250ms × 3 = 750ms, above 500ms floor
+        assert!(
+            fleet.calibrated_timeout >= Duration::from_millis(750),
+            "global fleet timeout ({:?}) should be >= 750ms",
+            fleet.calibrated_timeout
+        );
+        assert!(
+            fleet.calibrated_timeout < Duration::from_secs(2),
+            "should be bounded"
+        );
+
+        h0.await.unwrap();
+        h1.await.unwrap();
+        h2.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_latency_degraded() {
+        // Worst case: global + loaded machine (model loading, GC, slow network)
+        let server = NatsTestServer::start(14246).await;
+        let client = async_nats::connect(&server.url()).await.unwrap();
+
+        let h0 = spawn_delayed_responder(
+            &client, "nmem.viablesys.heartbeat", "fast-local".into(),
+            Duration::from_millis(5),
+        ).await;
+        let h1 = spawn_delayed_responder(
+            &client, "nmem.viablesys.heartbeat", "slow-global".into(),
+            Duration::from_millis(500),
+        ).await;
+        let h2 = spawn_delayed_responder(
+            &client, "nmem.viablesys.heartbeat", "degraded".into(),
+            Duration::from_millis(800),
+        ).await;
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let fleet = heartbeat(
+            &client, "nmem.viablesys.heartbeat", "test",
+            Duration::from_secs(5),
+        ).await;
+
+        assert_eq!(fleet.instances.len(), 3);
+        // 800ms × 3 = 2400ms
+        assert!(
+            fleet.calibrated_timeout >= Duration::from_secs(2),
+            "degraded fleet timeout ({:?}) should be >= 2s",
+            fleet.calibrated_timeout
+        );
+        assert!(
+            fleet.calibrated_timeout < Duration::from_secs(5),
+            "should be bounded under initial timeout"
+        );
+
+        h0.await.unwrap();
+        h1.await.unwrap();
+        h2.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_latency_one_drops_out() {
+        // Global fleet where the slowest node exceeds heartbeat timeout
+        let server = NatsTestServer::start(14247).await;
+        let client = async_nats::connect(&server.url()).await.unwrap();
+
+        let h0 = spawn_delayed_responder(
+            &client, "nmem.viablesys.heartbeat", "fast".into(),
+            Duration::from_millis(10),
+        ).await;
+        let h1 = spawn_delayed_responder(
+            &client, "nmem.viablesys.heartbeat", "medium".into(),
+            Duration::from_millis(200),
+        ).await;
+        // This one is too slow — will miss the 1s heartbeat window
+        let h2 = spawn_delayed_responder(
+            &client, "nmem.viablesys.heartbeat", "unreachable".into(),
+            Duration::from_millis(2000),
+        ).await;
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let fleet = heartbeat(
+            &client, "nmem.viablesys.heartbeat", "test",
+            Duration::from_secs(1), // tight initial timeout
+        ).await;
+
+        // Only 2 instances responded — unreachable missed the window
+        assert_eq!(
+            fleet.instances.len(), 2,
+            "should only see 2 (unreachable misses the 1s window)"
+        );
+
+        let names: Vec<&str> = fleet.instances.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"fast"));
+        assert!(names.contains(&"medium"));
+        assert!(!names.contains(&"unreachable"));
+
+        // Calibrated from medium's ~200ms: 200ms × 3 = 600ms, above 500ms floor
+        assert!(
+            fleet.calibrated_timeout >= Duration::from_millis(500),
+            "timeout ({:?}) should be >= 500ms",
+            fleet.calibrated_timeout
+        );
+
+        h0.await.unwrap();
+        h1.await.unwrap();
+        h2.abort(); // don't wait 2s
     }
 }
