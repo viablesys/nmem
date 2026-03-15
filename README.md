@@ -146,6 +146,66 @@ Each episode is annotated with:
 
 Episodes are the bridge between raw observations (too granular) and session summaries (too compressed). They feed context injection for recent sessions and enable safe forgetting — once an episode's observation trace is frozen, S3 can sweep the raw observations.
 
+## Git integration and context enrichment
+
+nmem fuses two information sources that are normally separate: **session memory** (what the agent did with a file across sessions) and **git history** (what happened to a file across all contributors). Both are extracted at write time and surfaced through passive and active channels — the agent doesn't need to ask for context it already has.
+
+### Git metadata extraction
+
+When the hook handler sees a `git commit` or `git push`, it parses the tool response into structured metadata — commit hash, message, branch, diffstat, remote URL, hash range — and stores it alongside the observation. This means every commit and push in nmem's history carries machine-readable fields, not just raw command output. VictoriaLogs receives these fields as first-class log attributes, enabling queries like `obs_type:git_commit AND branch:main` or dashboards showing commit frequency and change magnitude over time.
+
+The hook pipeline also formats human-readable log messages from the structured data:
+```
+git_commit: [5356097] Add S2 scope classifier (921+/29−)
+git_push: 0164631..5356097 main → https://github.com/viablesys/nmem.git
+```
+
+### File history and co-change analysis
+
+The `s1_git` module uses [git2](https://github.com/rust-lang/git2-rs) (libgit2 bindings) to extract rich file-level history directly from the repository — no shelling out to `git`. For any file path, it produces:
+
+- **Commit history** — every commit that touched the file, with per-commit insertions/deletions, author, and timestamp
+- **Churn metrics** — total commits, total churn, time span, revert count
+- **Co-change analysis** — files that frequently appear in the same commits, ranked by frequency. If `schema.rs` appears in 8 of 10 commits that touch `db.rs`, that coupling is surfaced
+- **Revert detection** — commits matching revert/rollback patterns are flagged
+- **Dense summaries** — all of the above compressed into a single line: `main.rs: 42 commits over 180d, +5234/-892, 3 reverts. Co-changes: schema.rs(28), db.rs(15)`
+
+### Blame with context
+
+`blame_file()` produces per-hunk attribution with cached commit metadata. Each blame hunk carries the author, commit hash, age, first line of the commit message, and the list of files co-changed in that commit. The blame cache is populated once per file and reused for subsequent queries.
+
+### LSP server
+
+The `nmem lsp` subcommand runs a Language Server Protocol server over stdio, registered via `.lsp.json` as a Claude Code plugin. When the agent opens a file, the LSP server publishes a diagnostic containing the file's dense git summary — commit count, churn, reverts, co-changes, recent commits. On hover, it returns blame information for the current line: who wrote it, when, what the commit message said, and what other files changed in the same commit.
+
+This is **passive context injection** — the agent receives file-level history without making an explicit query. Diagnostics are deduplicated (one publish per file per session) and refreshed on save. Blame lookups run on a blocking thread to avoid stalling the async LSP event loop.
+
+The LSP server covers common file types (`.rs`, `.py`, `.ts`, `.tsx`, `.js`, `.go`, `.md`, `.toml`, `.yaml`, `.json`) and coexists with language-specific LSP servers. Its diagnostics are tagged with `source: "nmem"` to distinguish memory context from code errors.
+
+### What the agent sees
+
+When the agent reads `src/s4_context.rs`, three things can happen depending on the channel:
+
+**LSP diagnostic (passive, on file open)** — Claude Code injects this automatically in a `<new-diagnostics>` block:
+```
+src/s4_context.rs: 42 commits over 180d, +5234/-892, 3 reverts.
+Co-changes: schema.rs(28), s1_serve.rs(15).
+Recent: "Fix episode window timezone bug" (2d ago), "Add cross-project context" (8d ago).
+```
+
+**LSP hover (passive, on cursor position)** — when the agent hovers over line 87:
+```
+bpd  19d2ea5  3 days ago
+
+Add episode-level friction to context injection
+
+Co-changed: s4_memory.rs, s1_4_summarize.rs
+```
+
+**MCP `git_file_summary` tool (active, on query)** — when the agent calls the tool directly, it gets the same dense summary as the diagnostic, or with `full=true`, the complete commit list as JSON with per-commit churn, co-changes, and revert flags.
+
+All three channels draw from the same `s1_git` module. The LSP channels are zero-effort (the agent gets context just by touching a file), while the MCP tool is available for deeper investigation when the dense summary raises a question.
+
 ## MCP tools
 
 These tools are available to the agent during a session:
