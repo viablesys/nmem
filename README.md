@@ -56,6 +56,53 @@ Every tool call the agent makes becomes a typed observation:
 | `web_fetch` | WebFetch | Research |
 | `web_search` | WebSearch | Research |
 | `mcp_call` | MCP tools | External tool |
+| `marker` | `create_marker` / `nmem mark` | Agent-authored conclusion |
+
+## Markers
+
+Markers are agent-authored observations — conclusions, decisions, and waypoints that the agent records explicitly rather than nmem inferring from tool use. They're created via the `create_marker` MCP tool or `nmem mark` CLI, classified on all five dimensions, and stored alongside regular observations.
+
+Markers serve as durable cross-session anchors. Because they're full-text indexed and attached to sessions, they surface in `search`, `session_summaries`, and `file_history` queries. Common uses:
+
+**Design decisions** — record architectural choices with rationale so future sessions don't re-derive them:
+```
+ADR-015 Fleet Beacon written. Covers: query federation architecture
+(NATS request/reply, not data store), GitHub org SSO (OAuth Device Flow),
+identity model (one user = one nmem = one machine)...
+```
+
+**Research findings** — preserve investigation results with sources and trade-offs:
+```
+fleet-beacon: Authentication flow — OAuth Device Flow + GitHub org
+membership validation. Research findings (gh CLI vs GitHub MCP server):
+gh CLI uses OAuth Device Flow (RFC 8628)... Decision: Use gh CLI's
+OAuth Device Flow pattern for fleet beacon auth.
+```
+
+**Implementation plans** — capture what to build, what files to touch, and what not to do:
+```
+ADR-016: Direct Inference — Implementation Ready
+...
+## What NOT to do
+- Do NOT add GBNF grammar — crashes on small models
+- Do NOT use rust-lld for ROCm builds — use GNU ld via linker="gcc"
+```
+
+**Tutorial progress** — track learning sessions with concepts covered and pickup points:
+```
+tutorial: Rust walkthrough session 1. Covered stream_observation_to_logs
+in src/s1_record.rs (lines 309-380). Concepts covered: if let Some/Ok
+pattern matching, turbofish... Next: pick up from build_log_message.
+```
+
+**Rollback points** — snapshot the state before risky changes:
+```
+rollback-point: git-file-history + LSP integration. Base commit: 19d2ea5.
+New files: src/s1_git.rs, src/s1_lsp.rs... To rollback: git checkout
+19d2ea5 -- .
+```
+
+Unlike session summaries (generated automatically by the LLM at session end), markers are intentional — the agent decides something is worth recording mid-session. They complement the automatic capture pipeline with explicit knowledge preservation.
 
 ## Five classifier dimensions
 
