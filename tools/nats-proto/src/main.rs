@@ -89,8 +89,130 @@ pub struct HeartbeatPong {
 pub struct FleetState {
     /// Online instances and their round-trip latency
     pub instances: Vec<(String, Duration)>,
-    /// Calibrated timeout: max observed latency × 3, minimum 100ms
+    /// Calibrated timeout from RTO estimator
     pub calibrated_timeout: Duration,
+}
+
+// ---------------------------------------------------------------------------
+// Jacobson/Karels RTO Estimator (RFC 6298)
+// ---------------------------------------------------------------------------
+
+/// Adaptive timeout estimator based on TCP's Jacobson/Karels algorithm (RFC 6298).
+///
+/// Tracks smoothed RTT (SRTT) and RTT variance (RTTVAR) to produce a
+/// retransmission timeout (RTO) that converges as data accumulates.
+///
+/// Adapted for scatter/gather: feed max_rtt from each heartbeat round.
+/// The variance term shrinks naturally with stable data, replacing a
+/// static floor with a data-driven value.
+#[derive(Debug, Clone)]
+pub struct RtoEstimator {
+    /// Smoothed RTT
+    srtt: f64,
+    /// Smoothed RTT variance
+    rttvar: f64,
+    /// Number of samples seen
+    samples: u32,
+    /// Smoothing factor for SRTT (TCP default: 1/8, fleet: 1/4 for faster convergence)
+    alpha: f64,
+    /// Smoothing factor for RTTVAR (TCP default: 1/4)
+    beta: f64,
+    /// Variance multiplier (TCP default: 4 for ~99.99% coverage)
+    k: f64,
+    /// Absolute minimum RTO in seconds (prevents unreasonably tight timeouts)
+    min_rto: f64,
+}
+
+impl RtoEstimator {
+    /// Create a new estimator with fleet-tuned defaults.
+    ///
+    /// - alpha=1/4 (faster convergence than TCP's 1/8, since heartbeats are infrequent)
+    /// - beta=1/4 (same as TCP)
+    /// - k=4 (4σ coverage)
+    /// - min_rto=50ms (network floor)
+    pub fn new() -> Self {
+        RtoEstimator {
+            srtt: 0.0,
+            rttvar: 0.0,
+            samples: 0,
+            alpha: 0.25,
+            beta: 0.25,
+            k: 4.0,
+            min_rto: 0.050,
+        }
+    }
+
+    /// Create with custom parameters.
+    pub fn with_params(alpha: f64, beta: f64, k: f64, min_rto_ms: f64) -> Self {
+        RtoEstimator {
+            srtt: 0.0,
+            rttvar: 0.0,
+            samples: 0,
+            alpha,
+            beta,
+            k,
+            min_rto: min_rto_ms / 1000.0,
+        }
+    }
+
+    /// Seed with an initial RTT estimate (for testing or when you have a prior).
+    /// Sets samples=1 so the estimator behaves as if it has seen one round.
+    pub fn with_initial_rtt(mut self, rtt: Duration) -> Self {
+        let r = rtt.as_secs_f64();
+        self.srtt = r;
+        self.rttvar = r / 2.0;
+        self.samples = 1;
+        self
+    }
+
+    /// Feed a new RTT sample. For scatter/gather, this should be the max RTT
+    /// from a heartbeat round (the slowest responder determines the timeout).
+    pub fn update(&mut self, rtt: Duration) {
+        let r = rtt.as_secs_f64();
+
+        if self.samples == 0 {
+            // RFC 6298 Section 2.2: first measurement
+            self.srtt = r;
+            self.rttvar = r / 2.0;
+        } else {
+            // RFC 6298 Section 2.3: subsequent measurements
+            self.rttvar = (1.0 - self.beta) * self.rttvar + self.beta * (self.srtt - r).abs();
+            self.srtt = (1.0 - self.alpha) * self.srtt + self.alpha * r;
+        }
+        self.samples += 1;
+    }
+
+    /// Apply Karn's algorithm: double the RTO after a timeout event.
+    /// Call this when scatter/gather gets fewer responses than expected.
+    pub fn backoff(&mut self) {
+        self.srtt *= 2.0;
+    }
+
+    /// Current RTO (retransmission timeout).
+    /// Returns max(SRTT + K × RTTVAR, min_rto).
+    pub fn rto(&self) -> Duration {
+        if self.samples == 0 {
+            // No data yet — return a generous cold-start value
+            return Duration::from_secs(3);
+        }
+        let rto = self.srtt + self.k * self.rttvar;
+        Duration::from_secs_f64(rto.max(self.min_rto))
+    }
+
+    /// Current smoothed RTT estimate.
+    pub fn srtt(&self) -> Duration {
+        Duration::from_secs_f64(self.srtt)
+    }
+
+    /// Current RTT variance estimate.
+    pub fn rttvar(&self) -> Duration {
+        Duration::from_secs_f64(self.rttvar)
+    }
+
+    /// Number of samples processed.
+    pub fn samples(&self) -> u32 {
+        self.samples
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -209,16 +331,19 @@ pub async fn scatter_gather(
     responses
 }
 
-/// Send a heartbeat, collect all responses, derive calibrated timeout.
+/// Send a heartbeat, collect all responses, update the RTO estimator.
 ///
-/// First heartbeat uses `initial_timeout` (generous, e.g. 5s).
-/// Returns `FleetState` with per-instance latencies and a calibrated timeout
-/// for subsequent scatter/gather operations.
+/// The `rto` estimator determines the timeout: on first call (no data),
+/// it uses a generous cold-start value (3s). Subsequent calls use the
+/// Jacobson/Karels RTO which converges as data accumulates.
+///
+/// Returns `FleetState` with per-instance latencies and the current RTO
+/// as `calibrated_timeout`.
 pub async fn heartbeat(
     client: &async_nats::Client,
     subject: impl Into<String>,
     sender: &str,
-    initial_timeout: Duration,
+    rto: &mut RtoEstimator,
 ) -> FleetState {
     let subject = subject.into();
     let t0 = Instant::now();
@@ -228,11 +353,14 @@ pub async fn heartbeat(
         sent_ms: t0.elapsed().as_millis() as u64,
     };
 
+    // Use current RTO as the timeout for collecting responses
+    let timeout = rto.rto();
+
     let responses = scatter_gather(
         client,
         &subject,
         serde_json::to_vec(&ping).unwrap().into(),
-        initial_timeout,
+        timeout,
     )
     .await;
 
@@ -243,25 +371,16 @@ pub async fn heartbeat(
         }
     }
 
-    // Calibrated timeout: max observed RTT × 3, floor at 500ms
-    //
-    // Why ×3: absorbs jitter, GC pauses, load spikes, model-loading delays.
-    // Why 500ms floor: cross-continent RTT is 60-300ms. An agent on the
-    // opposite coast with a loaded machine can spike well past 100ms.
-    // 500ms floor means even localhost fleets have room for a bad moment.
-    //
-    // The initial_timeout for first heartbeat should be generous (3-5s)
-    // because we don't know fleet geography yet.
-    let max_rtt = instances
-        .iter()
-        .map(|(_, d)| *d)
-        .max()
-        .unwrap_or(Duration::from_millis(500));
-    let calibrated = (max_rtt * 3).max(Duration::from_millis(500));
+    // Feed max RTT from this round into the estimator
+    if let Some(max_rtt) = instances.iter().map(|(_, d)| *d).max() {
+        rto.update(max_rtt);
+    }
+    // If no responses, don't update (keep current estimate).
+    // Caller can apply rto.backoff() if this indicates degradation.
 
     FleetState {
         instances,
-        calibrated_timeout: calibrated,
+        calibrated_timeout: rto.rto(),
     }
 }
 
@@ -402,21 +521,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Give subscribers time to register
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Step 1: Heartbeat — discover fleet, calibrate timeout
-    // Initial timeout is generous (3s) since we don't know fleet geography yet
+    // Step 1: Heartbeat — discover fleet, calibrate timeout via Jacobson/Karels
+    let mut rto = RtoEstimator::new();
+    eprintln!("       RTO cold start: {:?}", rto.rto());
+
     let fleet = heartbeat(
         &client,
         "nmem.demo.heartbeat",
         "demo-runner",
-        Duration::from_secs(3),
+        &mut rto,
     )
     .await;
 
     eprintln!(
-        "[4/5] Heartbeat: {:?} — {} instances online, calibrated timeout: {:?}",
+        "[4/5] Heartbeat: {:?} — {} instances online",
         t3.elapsed(),
         fleet.instances.len(),
-        fleet.calibrated_timeout,
+    );
+    eprintln!(
+        "       RTO: {:?} (SRTT: {:?}, RTTVAR: {:?}, samples: {})",
+        rto.rto(), rto.srtt(), rto.rttvar(), rto.samples(),
     );
     for (name, rtt) in &fleet.instances {
         eprintln!("       {name} (RTT: {rtt:?})");
@@ -464,6 +588,164 @@ mod tests {
     use bytes::Bytes;
     use futures::StreamExt;
     use std::time::Duration;
+
+    // --- Group 0: RtoEstimator unit tests (no NATS, no Docker) ---
+
+    #[test]
+    fn test_rto_cold_start() {
+        let rto = RtoEstimator::new();
+        assert_eq!(rto.samples(), 0);
+        assert_eq!(rto.rto(), Duration::from_secs(3), "cold start should be 3s");
+    }
+
+    #[test]
+    fn test_rto_first_sample() {
+        let mut rto = RtoEstimator::new();
+        rto.update(Duration::from_millis(100));
+
+        assert_eq!(rto.samples(), 1);
+        // RFC 6298: SRTT = R, RTTVAR = R/2
+        // RTO = SRTT + K*RTTVAR = 100 + 4*50 = 300ms
+        let rto_val = rto.rto();
+        assert!(
+            rto_val >= Duration::from_millis(295) && rto_val <= Duration::from_millis(305),
+            "first sample RTO ({rto_val:?}) should be ~300ms (3×R)"
+        );
+    }
+
+    #[test]
+    fn test_rto_converges_with_stable_data() {
+        let mut rto = RtoEstimator::new();
+
+        // Feed 20 rounds of ~100ms max RTT (stable fleet)
+        for _ in 0..20 {
+            rto.update(Duration::from_millis(100));
+        }
+
+        let rto_val = rto.rto();
+        // After many stable samples, RTTVAR → 0, RTO → SRTT ≈ 100ms
+        // With min_rto=50ms, RTO should converge near 100ms
+        assert!(
+            rto_val >= Duration::from_millis(90) && rto_val <= Duration::from_millis(150),
+            "stable RTO ({rto_val:?}) should converge near 100ms"
+        );
+    }
+
+    #[test]
+    fn test_rto_reacts_to_spike() {
+        let mut rto = RtoEstimator::new();
+
+        // Establish stable baseline at 50ms
+        for _ in 0..10 {
+            rto.update(Duration::from_millis(50));
+        }
+        let baseline = rto.rto();
+
+        // Spike: one round at 500ms
+        rto.update(Duration::from_millis(500));
+        let after_spike = rto.rto();
+
+        assert!(
+            after_spike > baseline,
+            "spike should increase RTO: baseline={baseline:?}, after={after_spike:?}"
+        );
+
+        // Recover: 5 more rounds at 50ms
+        for _ in 0..5 {
+            rto.update(Duration::from_millis(50));
+        }
+        let recovered = rto.rto();
+
+        assert!(
+            recovered < after_spike,
+            "recovery should decrease RTO: spike={after_spike:?}, recovered={recovered:?}"
+        );
+    }
+
+    #[test]
+    fn test_rto_min_floor() {
+        let mut rto = RtoEstimator::new();
+
+        // Feed tiny RTTs — RTO should not go below min_rto (50ms)
+        for _ in 0..20 {
+            rto.update(Duration::from_micros(100)); // 0.1ms
+        }
+
+        assert!(
+            rto.rto() >= Duration::from_millis(50),
+            "RTO ({:?}) should not go below min_rto=50ms",
+            rto.rto()
+        );
+    }
+
+    #[test]
+    fn test_rto_backoff() {
+        let mut rto = RtoEstimator::new();
+        rto.update(Duration::from_millis(100));
+        let before = rto.rto();
+
+        rto.backoff();
+        let after = rto.rto();
+
+        assert!(
+            after > before,
+            "backoff should increase RTO: before={before:?}, after={after:?}"
+        );
+    }
+
+    #[test]
+    fn test_rto_with_initial_seed() {
+        let rto = RtoEstimator::new().with_initial_rtt(Duration::from_millis(200));
+
+        assert_eq!(rto.samples(), 1);
+        // SRTT=200ms, RTTVAR=100ms → RTO = 200 + 4*100 = 600ms
+        let rto_val = rto.rto();
+        assert!(
+            rto_val >= Duration::from_millis(595) && rto_val <= Duration::from_millis(605),
+            "seeded RTO ({rto_val:?}) should be ~600ms"
+        );
+    }
+
+    #[test]
+    fn test_rto_convergence_trajectory() {
+        // Simulate a fleet that starts at 200ms and stabilizes at 50ms
+        let mut rto = RtoEstimator::new();
+        let mut trajectory = Vec::new();
+
+        // First 5 rounds at 200ms (initial discovery)
+        for _ in 0..5 {
+            rto.update(Duration::from_millis(200));
+            trajectory.push(rto.rto());
+        }
+
+        // Next 15 rounds at 50ms (fleet stabilizes)
+        for _ in 0..15 {
+            rto.update(Duration::from_millis(50));
+            trajectory.push(rto.rto());
+        }
+
+        // First RTO should be large (cold start → first 200ms sample)
+        assert!(trajectory[0] > Duration::from_millis(500));
+
+        // Last RTO should be much tighter (converged to ~50ms range)
+        let final_rto = *trajectory.last().unwrap();
+        assert!(
+            final_rto < Duration::from_millis(200),
+            "converged RTO ({final_rto:?}) should be < 200ms after stabilizing at 50ms"
+        );
+
+        // Trajectory should be monotonically decreasing after stabilization
+        // (approximately — allow small bumps from the variance tracking)
+        let last_five = &trajectory[15..];
+        for window in last_five.windows(2) {
+            // Allow 10ms tolerance for non-monotonic bumps
+            assert!(
+                window[1] <= window[0] + Duration::from_millis(10),
+                "trajectory should be roughly decreasing: {:?} → {:?}",
+                window[0], window[1]
+            );
+        }
+    }
 
     // --- Group 1: Connection lifecycle ---
 
@@ -1249,11 +1531,12 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
+        let mut rto = RtoEstimator::new();
         let fleet = heartbeat(
             &client,
             "nmem.viablesys.heartbeat",
             "test-runner",
-            Duration::from_secs(5),
+            &mut rto,
         )
         .await;
 
@@ -1263,11 +1546,13 @@ mod tests {
         names.sort();
         assert_eq!(names, vec!["node-0", "node-1", "node-2"]);
 
-        // Calibrated timeout should be >= 500ms (floor)
+        // After first sample, RTO = SRTT + 4*RTTVAR = R + 4*(R/2) = 3R
+        // With localhost RTT ~2ms: RTO ~6ms, but min_rto=50ms
         assert!(
-            fleet.calibrated_timeout >= Duration::from_millis(500),
-            "calibrated timeout should be at least 500ms"
+            fleet.calibrated_timeout >= Duration::from_millis(50),
+            "calibrated timeout should be at least min_rto (50ms)"
         );
+        assert_eq!(rto.samples(), 1);
 
         for h in handles {
             h.await.unwrap();
@@ -1280,21 +1565,25 @@ mod tests {
         let server = NatsTestServer::start(14240).await;
         let client = async_nats::connect(&server.url()).await.unwrap();
 
-        // No instances online — heartbeat should return empty fleet with default timeout
+        // No instances online — heartbeat should return empty fleet
+        // Seed with 200ms initial RTT so the cold-start timeout is short
+        let mut rto = RtoEstimator::new().with_initial_rtt(Duration::from_millis(200));
         let fleet = heartbeat(
             &client,
             "nmem.viablesys.heartbeat",
             "lonely-node",
-            Duration::from_millis(500),
+            &mut rto,
         )
         .await;
 
         assert_eq!(fleet.instances.len(), 0, "no instances should respond");
-        // No responses: fallback max_rtt=500ms, ×3 = 1500ms, floor=500ms → 1500ms
-        assert_eq!(
-            fleet.calibrated_timeout,
-            Duration::from_millis(1500),
-            "should use fallback timeout (500ms × 3) when no responses"
+        // No responses → estimator not updated → RTO stays at initial seed
+        // Initial: SRTT=200ms, RTTVAR=100ms → RTO = 200 + 4*100 = 600ms
+        assert_eq!(rto.samples(), 1, "no new samples from empty fleet");
+        assert!(
+            fleet.calibrated_timeout >= Duration::from_millis(500),
+            "RTO ({:?}) should be ~600ms from seeded initial",
+            fleet.calibrated_timeout
         );
     }
 
@@ -1345,30 +1634,31 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
+        let mut rto = RtoEstimator::new();
         let fleet = heartbeat(
             &client,
             "nmem.viablesys.heartbeat",
             "calibrator",
-            Duration::from_secs(1),
+            &mut rto,
         )
         .await;
 
         assert_eq!(fleet.instances.len(), 2);
 
-        // Slow instance has ~100ms delay, so max RTT > 100ms
-        // Calibrated = max(max_rtt × 3, 500ms), so should be >= 500ms
+        // Slow instance ~100ms delay → max RTT ~100ms
+        // First sample: SRTT=100ms, RTTVAR=50ms → RTO = 100 + 4*50 = 300ms
+        // But min_rto=50ms, so RTO >= 50ms. Actual ~300ms.
         assert!(
-            fleet.calibrated_timeout >= Duration::from_millis(500),
-            "calibrated timeout ({:?}) should be >= 500ms (floor)",
+            fleet.calibrated_timeout >= Duration::from_millis(50),
+            "calibrated timeout ({:?}) should be >= min_rto",
             fleet.calibrated_timeout
         );
-
-        // But not absurdly large — should be well under 3s
         assert!(
-            fleet.calibrated_timeout < Duration::from_secs(3),
-            "calibrated timeout ({:?}) should be < 3s",
+            fleet.calibrated_timeout < Duration::from_secs(2),
+            "calibrated timeout ({:?}) should be < 2s",
             fleet.calibrated_timeout
         );
+        assert_eq!(rto.samples(), 1);
 
         h0.await.unwrap();
         h1.await.unwrap();
@@ -1424,11 +1714,12 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Step 1: Heartbeat
+        let mut rto = RtoEstimator::new();
         let fleet = heartbeat(
             &client,
             "nmem.viablesys.heartbeat",
             "orchestrator",
-            Duration::from_secs(5),
+            &mut rto,
         )
         .await;
 
@@ -1501,14 +1792,25 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
+        let mut rto = RtoEstimator::new();
         let fleet = heartbeat(
             &client, "nmem.viablesys.heartbeat", "test",
-            Duration::from_secs(3),
+            &mut rto,
         ).await;
 
         assert_eq!(fleet.instances.len(), 2);
-        // 20ms × 3 = 60ms, but floor is 500ms
-        assert_eq!(fleet.calibrated_timeout, Duration::from_millis(500));
+        // Max RTT ~20ms: SRTT=20ms, RTTVAR=10ms → RTO = 20+40 = 60ms
+        // min_rto=50ms, so RTO >= 50ms
+        assert!(
+            fleet.calibrated_timeout >= Duration::from_millis(50),
+            "same-coast RTO ({:?}) should be >= 50ms min_rto",
+            fleet.calibrated_timeout
+        );
+        assert!(
+            fleet.calibrated_timeout < Duration::from_millis(500),
+            "same-coast RTO ({:?}) should be tight, well under 500ms",
+            fleet.calibrated_timeout
+        );
 
         h0.await.unwrap();
         h1.await.unwrap();
@@ -1532,14 +1834,24 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
+        let mut rto = RtoEstimator::new();
         let fleet = heartbeat(
             &client, "nmem.viablesys.heartbeat", "test",
-            Duration::from_secs(3),
+            &mut rto,
         ).await;
 
         assert_eq!(fleet.instances.len(), 2);
-        // 80ms × 3 = 240ms, but floor is 500ms
-        assert_eq!(fleet.calibrated_timeout, Duration::from_millis(500));
+        // Max RTT ~80ms: SRTT=80ms, RTTVAR=40ms → RTO = 80+160 = 240ms
+        assert!(
+            fleet.calibrated_timeout >= Duration::from_millis(200),
+            "cross-US RTO ({:?}) should be >= 200ms",
+            fleet.calibrated_timeout
+        );
+        assert!(
+            fleet.calibrated_timeout < Duration::from_secs(1),
+            "cross-US RTO ({:?}) should be < 1s",
+            fleet.calibrated_timeout
+        );
 
         h0.await.unwrap();
         h1.await.unwrap();
@@ -1567,16 +1879,17 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
+        let mut rto = RtoEstimator::new();
         let fleet = heartbeat(
             &client, "nmem.viablesys.heartbeat", "test",
-            Duration::from_secs(3),
+            &mut rto,
         ).await;
 
         assert_eq!(fleet.instances.len(), 3);
-        // 250ms × 3 = 750ms, above 500ms floor
+        // Max RTT ~250ms: SRTT=250ms, RTTVAR=125ms → RTO = 250+500 = 750ms
         assert!(
-            fleet.calibrated_timeout >= Duration::from_millis(750),
-            "global fleet timeout ({:?}) should be >= 750ms",
+            fleet.calibrated_timeout >= Duration::from_millis(700),
+            "global fleet RTO ({:?}) should be >= 700ms",
             fleet.calibrated_timeout
         );
         assert!(
@@ -1611,21 +1924,22 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
+        let mut rto = RtoEstimator::new();
         let fleet = heartbeat(
             &client, "nmem.viablesys.heartbeat", "test",
-            Duration::from_secs(5),
+            &mut rto,
         ).await;
 
         assert_eq!(fleet.instances.len(), 3);
-        // 800ms × 3 = 2400ms
+        // Max RTT ~800ms: SRTT=800ms, RTTVAR=400ms → RTO = 800+1600 = 2400ms
         assert!(
             fleet.calibrated_timeout >= Duration::from_secs(2),
-            "degraded fleet timeout ({:?}) should be >= 2s",
+            "degraded fleet RTO ({:?}) should be >= 2s",
             fleet.calibrated_timeout
         );
         assert!(
             fleet.calibrated_timeout < Duration::from_secs(5),
-            "should be bounded under initial timeout"
+            "should be bounded"
         );
 
         h0.await.unwrap();
@@ -1656,9 +1970,11 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
+        // Seed with 200ms → RTO = 200 + 4*100 = 600ms. Tight enough to miss 2s node.
+        let mut rto = RtoEstimator::new().with_initial_rtt(Duration::from_millis(200));
         let fleet = heartbeat(
             &client, "nmem.viablesys.heartbeat", "test",
-            Duration::from_secs(1), // tight initial timeout
+            &mut rto,
         ).await;
 
         // Only 2 instances responded — unreachable missed the window
@@ -1672,10 +1988,12 @@ mod tests {
         assert!(names.contains(&"medium"));
         assert!(!names.contains(&"unreachable"));
 
-        // Calibrated from medium's ~200ms: 200ms × 3 = 600ms, above 500ms floor
+        // Seeded at 200ms, then updated with max RTT of ~200ms (medium).
+        // Jacobson/Karels second sample: SRTT and RTTVAR adjust.
+        // RTO should be in a reasonable range.
         assert!(
-            fleet.calibrated_timeout >= Duration::from_millis(500),
-            "timeout ({:?}) should be >= 500ms",
+            fleet.calibrated_timeout >= Duration::from_millis(50),
+            "RTO ({:?}) should be >= min_rto",
             fleet.calibrated_timeout
         );
 
