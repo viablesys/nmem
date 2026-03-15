@@ -4,7 +4,7 @@
 Accepted (2026-03-14) — Position B: direct inference, HTTP removed
 
 ## Decision
-Embed a GGUF model via `llama-cpp-2` for session summarization. Remove the LM Studio HTTP dependency entirely. The `ureq` crate remains for VictoriaLogs streaming but is no longer in the summarization path. Use GBNF grammar constraints to guarantee valid JSON output — the `SessionSummary` struct schema becomes the grammar, eliminating parse failures entirely.
+Embed a GGUF model via `llama-cpp-2` for session summarization. Remove the LM Studio HTTP dependency entirely. The `ureq` crate remains for VictoriaLogs streaming but is no longer in the summarization path.
 
 ## Framing
 *Should nmem embed a GGUF model and run inference directly via `llama-cpp-2`, or continue calling an external LM Studio endpoint for session summarization?*
@@ -27,7 +27,6 @@ The adversarial angles:
 ## Unlocks
 - Zero-dependency summarization — no LM Studio, no network, no external process
 - Catch-up summarization for missed sessions (can run anytime, not just at session end)
-- GBNF grammar-constrained generation — structurally valid JSON guaranteed at the token level
 - Potential reuse of the inference engine for other S4 capabilities (episode narrative, pattern detection)
 - LoRA adapter path for task-specific fine-tuning without model replacement
 - Distribution simplicity (ADR-008) — single binary, single model file
@@ -176,7 +175,9 @@ From `cpu-inference-performance.md`: use physical cores only, never logical core
 
 ```toml
 # New
-llama-cpp-2 = { version = "=0.1.133", default-features = false }
+llama-cpp-2 = { version = "=0.1.138", default-features = false }
+hf-hub = "0.5"          # model download from HuggingFace Hub
+encoding_rs = "0.8"     # UTF-8 decoder for token_to_piece()
 
 # GPU feature flags — compile-time selection
 [features]
@@ -189,6 +190,17 @@ ureq = { version = "3", features = ["json"] }
 ```
 
 Build requirements: cmake, C++ toolchain (g++ or clang++). GPU builds additionally require CUDA Toolkit (NVIDIA) or ROCm (AMD). Metal is auto-detected on macOS.
+
+**ROCm build workaround** (prototype-validated):
+```toml
+# .cargo/config.toml — required for ROCm builds
+[target.x86_64-unknown-linux-gnu]
+linker = "gcc"
+```
+```bash
+# Build with ROCm
+CMAKE_POSITION_INDEPENDENT_CODE=ON HSA_OVERRIDE_GFX_VERSION=11.0.0 cargo build --release --features rocm
+```
 
 ### CI: two-tier build workflow
 
@@ -238,8 +250,8 @@ Sampling parameters are per-task, not per-engine. Different models have differen
 
 | File | Change |
 |------|--------|
-| `s1_4_summarize.rs` | Replace `call_completion()` / `try_endpoint()` with call to `s1_4_inference`. Remove HTTP logic, `strip_fences()`, and `string_or_vec` deserializer (grammar guarantees valid JSON). Remove truncation limits in `gather_session_payload()` and `format_action_line()` — see payload changes below. |
-| `s1_4_inference.rs` | **New.** LlamaBackend init, model loading, chat template application, GBNF grammar constraint, generation loop, greedy sampling. |
+| `s1_4_summarize.rs` | Replace `call_completion()` / `try_endpoint()` with call to `s1_4_inference`. Remove HTTP logic. Retain `strip_fences()` and `string_or_vec` — prototype validated both are still needed. Remove truncation limits in `gather_session_payload()` and `format_action_line()` — see payload changes below. |
+| `s1_4_inference.rs` | **New.** LlamaBackend init, model loading, chat template application, generation loop, greedy sampling. |
 | `s5_config.rs` | `SummarizationConfig`: replace `endpoint`/`model`/`timeout_secs`/`fallback_endpoint` with `model_path`/`temperature`/`max_tokens`/`n_ctx`/`n_threads`/`n_gpu_layers`/`lora_path` (optional). |
 | `s3_maintain.rs` | Add `--catch-up` flag: find sessions with `ended_at IS NOT NULL AND summary IS NULL AND obs_count >= 3`, summarize each. |
 | `s1_record.rs` | `handle_stop()`: write sentinel summary for empty sessions (< 3 observations) so they don't block S3 sweep. |
@@ -257,11 +269,10 @@ Stop hook → spawn `nmem maintain --session <id>`
              → load GGUF model (mmap, n_gpu_layers from params)
              → create context (n_ctx=32768, n_threads from params)
              → apply chat template from GGUF metadata
-             → build GBNF grammar from SessionSummary JSON schema
-             → build sampler chain (grammar + temp from params)
+             → build sampler (greedy or temp-based from params)
              → decode prompt (GPU-accelerated if available), generate up to max_tokens
-             → output is guaranteed valid JSON
-         → deserialize directly → store in sessions.summary
+         → strip_fences() + serde parse with string_or_vec fallback
+         → store in sessions.summary
          → exit (model dropped, memory freed)
 ```
 
@@ -293,56 +304,32 @@ Note: successful `tool_response` content (command output, file contents, search 
 
 For the 2% of sessions exceeding 32K tokens (the largest observed: 62K tokens), truncate the **oldest observations first** — most recent observations are more relevant for summary quality. The system prompt, user prompts, and agent reasoning are never truncated.
 
-### GBNF grammar-constrained generation
+### GBNF grammar — evaluated and rejected
 
-The key capability that direct inference enables over HTTP. `llama-cpp-2` provides `json_schema_to_grammar()` which converts a JSON schema into a GBNF grammar string. The grammar sampler filters the token probability distribution at each step — the model literally cannot produce tokens that violate the schema.
+GBNF grammar-constrained generation via `json_schema_to_grammar()` was evaluated in the prototype and rejected. The grammar sampler filters the token probability distribution at each step to enforce structural validity. In theory, this guarantees valid JSON matching the `SessionSummary` schema.
 
-The `SessionSummary` JSON schema:
+**What the prototype found:**
+- The grammar crashed with `GGML_ASSERT(!stacks.empty())` during generation
+- Root cause: the model strongly prefers to produce strings where the grammar demands arrays (e.g. `learned` field). The grammar filters out all tokens the model wants to produce, leaving an empty valid token set → assertion failure
+- This is a fundamental tension between small model behavior and strict grammar enforcement — the model fights the constraint instead of conforming to it
+- Without grammar, the model produces valid JSON reliably — just with occasional type mismatches (string where array expected), which `string_or_vec` already handles
 
-```json
-{
-  "type": "object",
-  "properties": {
-    "intent": { "type": "string" },
-    "learned": { "type": "array", "items": { "type": "string" } },
-    "completed": { "type": "array", "items": { "type": "string" } },
-    "next_steps": { "type": "array", "items": { "type": "string" } },
-    "files_read": { "type": "array", "items": { "type": "string" } },
-    "files_edited": { "type": "array", "items": { "type": "string" } },
-    "notes": {}
-  },
-  "required": ["intent", "learned", "completed", "next_steps", "files_read", "files_edited"]
-}
-```
+**Decision:** No grammar constraint. The existing `strip_fences()` + `string_or_vec` deserializer handles the model's output patterns. These have been proven in 99 production summaries via LM Studio. Adding grammar introduces fragility (crashes) without meaningful gain.
 
-This schema becomes the grammar constraint. The sampler chain adapts to temperature:
+### Sampler chain
+
+Temperature-driven, no grammar:
 
 ```rust
-let grammar_str = json_schema_to_grammar(SUMMARY_SCHEMA)?;
 let sampler = if params.temperature == 0.0 {
-    // Greedy — deterministic (Granite, or any model that recommends temp=0)
-    LlamaSampler::chain_simple([
-        LlamaSampler::grammar(&model, &grammar_str, "root")?,
-        LlamaSampler::greedy(),
-    ])
+    LlamaSampler::greedy()
 } else {
-    // Sampling — for models that benefit from temperature (Qwen, Phi)
     LlamaSampler::chain_simple([
-        LlamaSampler::grammar(&model, &grammar_str, "root")?,
         LlamaSampler::temp(params.temperature),
         LlamaSampler::dist(42),  // fixed seed for reproducibility
     ])
 };
 ```
-
-**What this eliminates:**
-- `strip_fences()` — model can't emit code fences, grammar only allows JSON
-- `string_or_vec` deserializer — grammar enforces arrays where arrays are required
-- Parse failures from malformed JSON — structurally impossible
-- Missing required fields — grammar enforces all required keys
-- Retry loops for bad output — every generation is valid
-
-The prompt still describes the desired content (what "intent" means, what "learned" should contain). The grammar enforces the *structure*; the prompt guides the *content*.
 
 ### Empty session resolution
 
@@ -398,7 +385,6 @@ pub struct InferenceParams {
     pub max_tokens: u32,           // generation limit
     pub n_threads: u32,            // 0 = auto-detect physical cores
     pub n_gpu_layers: u32,         // 0 = CPU only, 999 = full offload
-    pub json_schema: Option<String>, // GBNF grammar from JSON schema
     pub lora_path: Option<PathBuf>,  // optional LoRA adapter
 }
 
@@ -419,21 +405,21 @@ This is the "flat now, profiles later" approach: each task section carries its o
 
 ### Phase 1 — Replace HTTP with direct inference (the ADR-016 implementation)
 
-Core lifecycle + GBNF grammar + GPU support + full session payload + chat templates + catch-up + empty session sentinel.
+Core lifecycle + GPU support + full session payload + chat templates + catch-up + empty session sentinel.
 
 | Component | Detail |
 |-----------|--------|
-| Inference engine | `s1_4_inference.rs`: Backend → Model (with GPU layers) → Context → Batch → Grammar Sampler → generate loop |
-| Grammar constraint | `json_schema_to_grammar()` from `SessionSummary` schema — day-one, not an optimization |
+| Inference engine | `s1_4_inference.rs`: Backend → Model (with GPU layers) → Context → Batch → Sampler → generate loop |
 | Chat template | Read from GGUF metadata via `model.chat_template()` — model-agnostic |
-| Sampling | Config-driven: greedy at temp=0.0 (Granite), temp sampling for other models. Grammar constraint applied regardless |
+| Sampling | Config-driven: greedy at temp=0.0 (Granite), temp sampling for other models |
 | Params struct | `InferenceParams` — model-agnostic, constructed per-task from config. Flat config now, profiles at rule-of-three |
 | GPU support | Compile-time feature flags (`cuda`, `rocm`). `n_gpu_layers` in config. CPU-only default build, GPU in release matrix |
 | Full payload | Remove truncation limits in `gather_session_payload()` — all prompts, all observations, full content. `n_ctx = 32768` covers 98% of sessions untruncated |
 | Empty sessions | Sentinel summary in Stop hook for < 3 observations |
 | Catch-up | `nmem maintain --catch-up` — batch process missed sessions, load model once |
 | Config | `model_path`, `temperature`, `max_tokens`, `n_ctx`, `n_threads`, `n_gpu_layers` |
-| HTTP removal | Delete `call_completion()`, `try_endpoint()`, `strip_fences()`, `string_or_vec` |
+| HTTP removal | Delete `call_completion()`, `try_endpoint()`. Retain `strip_fences()` and `string_or_vec` — prototype proved both needed |
+| Model download | `hf-hub` crate, `repo:filename` format, cache-first at `~/.cache/huggingface/hub/` |
 | CI | Two-tier: dev (CPU-only, fast) + release (full platform × GPU matrix) |
 
 **Validates**: model quality, inference speed (CPU + GPU), memory footprint, build integration, full-payload summary quality vs truncated.
@@ -459,12 +445,70 @@ When summary quality needs improvement or new S4 features need generation.
 | Embeddings | `LlamaContextParams::with_embeddings(true)` — semantic search for nmem retrieval. Requires embedding-capable model, changes process model (model must be loaded for search, not just session end). Separate evaluation needed |
 | Session save/load | Cache system prompt KV state to disk. Amortize prompt encoding across multiple summarizations in `--catch-up` |
 
+### Prototype results (2026-03-14)
+
+Standalone test binary at `tools/inference-test/`. Validated the full integration surface against Granite 4.0 H Tiny Q4_K_M on Framework 13 AI (AMD Ryzen, DDR5, Fedora 43).
+
+#### Performance
+
+| Metric | CPU (12 threads) | GPU (ROCm) |
+|--------|-----------------|-----------|
+| Model load (mmap) | 1.73s | 1.02s |
+| Prompt eval — small (554 tokens) | 2.76s (201 tok/s) | 0.90s (613 tok/s) |
+| Prompt eval — real session (4195 tokens) | — | 6.08s (690 tok/s) |
+| Generation (~300 tokens) | 5.55s (38.6 tok/s) | 7.20s (41.8 tok/s) |
+| Total — small payload | 10.1s | 9.2s |
+| Total — real session (106 obs) | — | 18.4s |
+
+GPU accelerates prompt eval 3x but generation speed is roughly equal (memory-bandwidth bound). For large untruncated payloads (4K+ tokens), GPU prompt eval becomes the dominant advantage.
+
+#### Capabilities validated
+
+| Capability | Result |
+|-----------|--------|
+| Model loading (mmap) | Working |
+| Chat template from GGUF metadata | Working — model-agnostic, no manual formatting |
+| Greedy sampling (temp=0.0) | Working — deterministic, clean JSON output |
+| `string_or_vec` fallback | Required — model returns string where array expected |
+| `strip_fences` | Available — not triggered in tests, retained as safety net |
+| GPU offloading (ROCm) | Working — requires build workaround (see below) |
+| Chunked batch decode | Required — prompts >2048 tokens must be decoded in chunks |
+| Real session payload (106 obs) | Working — accurate summary, correct file lists |
+| HuggingFace model download | Working — `repo:filename` format, cache-first |
+| Timing metadata | Working — stdout JSON with `_meta` block |
+
+#### Lessons learned
+
+**1. GBNF grammar crashes on small models — rejected.**
+`json_schema_to_grammar()` produces a grammar that crashes (`GGML_ASSERT(!stacks.empty())`) when the model's generation preferences conflict with the grammar constraint. Root cause: the model wants to produce a string where the grammar demands an array (e.g. `learned` field). The grammar filters out all tokens the model prefers, leaving an empty valid set → assertion failure. This is a fundamental tension between small model behavior and strict grammar enforcement. Decision: no grammar. The existing `strip_fences()` + `string_or_vec` fallback handles the model's actual output patterns reliably.
+
+**2. Version pin must be 0.1.138, not 0.1.133.**
+The `rocm` feature flag was added in 0.1.134. API changes between versions:
+- `token_to_str()` → `token_to_piece()` with `encoding_rs::Decoder` parameter
+- `n_threads` type changed from `u32` to `i32`
+- New dependency: `encoding_rs` (transitive from llama-cpp-2)
+
+Core inference API (Backend→Model→Context→Batch→Sampler) is stable across these versions. Changes are type adjustments and renames, not structural.
+
+**3. ROCm build requires two workarounds.**
+- `CMAKE_POSITION_INDEPENDENT_CODE=ON` env var — llama-cpp-sys-2 passes `CMAKE_*` env vars to cmake (build.rs line 531-536). Without this, HIP/CUDA objects are compiled without `-fPIC`, causing linker relocation errors.
+- `linker = "gcc"` in `.cargo/config.toml` — rust-lld (the default Rust linker) rejects non-PIC static objects. GNU ld handles them via linker relaxation.
+
+**4. Prompts >2048 tokens require chunked batch decode.**
+The default `n_batch = 2048` in llama.cpp means `ctx.decode()` asserts if the batch contains more tokens. Prompts must be split into chunks of `n_batch` size. This would have been a runtime crash in production for any session with >2K tokens in the payload — exactly the sessions we want to stop truncating.
+
+**5. Model download via hf-hub works cleanly.**
+`hf-hub` 0.5 with `repo:filename` specifier format. Cache-first behavior at `~/.cache/huggingface/hub/`. No auth needed for public models. The dojo doc references 0.4 with `features = ["sync"]` — v0.5 removed the feature flag, sync API is default. The download adds `reqwest` as a transitive dependency.
+
+**6. Summary quality is good without grammar.**
+The model consistently produces valid JSON with correct field names, accurate intent extraction, and useful learned/completed/next_steps entries. The only type issue is occasional string-instead-of-array for `learned`, which `string_or_vec` handles. No code fences observed in greedy mode with the current prompt.
+
 ### API churn mitigation
 
 `llama-cpp-2` releases every ~9 days, does not follow semver. Empirical analysis (0.1.133 → 0.1.138, 5 releases) shows the core API (Backend/Model/Context/Batch/Sampler) is stable — churn is additive features (`llguidance`, `mtmd`, session save/load), not breaking changes to the inference lifecycle.
 
 Mitigation:
-1. **Pin exact version**: `"=0.1.133"` — update on our schedule, not theirs
-2. **Minimal API surface**: Use only core lifecycle + grammar + chat template. No advanced features in Phase 1
+1. **Pin exact version**: `"=0.1.138"` — prototype-validated. Update on our schedule, not theirs
+2. **Minimal API surface**: Use only core lifecycle + chat template. No grammar, no advanced features
 3. **Thin wrapper**: `s1_4_inference.rs` exposes `generate()`. If the underlying API shifts, one file changes
-4. **Update deliberately**: Bump pin, test, commit. Not reactive to upstream releases
+4. **Update deliberately**: Bump pin, test against prototype, commit. The prototype catches API changes (it already found 3 between 0.1.133 and 0.1.138)
