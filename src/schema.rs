@@ -156,6 +156,7 @@ ALTER TABLE observations ADD COLUMN friction_run_id INTEGER REFERENCES classifie
 ",
         ),
         M::up("ALTER TABLE work_units ADD COLUMN obs_trace TEXT;"),
+        M::up("ALTER TABLE sessions ADD COLUMN summarization_ms INTEGER;"),
     ])
 });
 

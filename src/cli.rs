@@ -190,9 +190,13 @@ pub struct MaintainArgs {
     #[arg(long)]
     pub sweep: bool,
 
-    /// Regenerate all session summaries via LLM (requires LM Studio)
+    /// Regenerate all existing session summaries via LLM
     #[arg(long)]
     pub resummarize: bool,
+
+    /// Summarize sessions that were missed (ended but never summarized, >= 3 observations)
+    #[arg(long)]
+    pub catch_up: bool,
 }
 
 #[derive(Parser)]

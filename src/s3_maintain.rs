@@ -75,6 +75,16 @@ pub fn handle_maintain(db_path: &Path, args: &MaintainArgs) -> Result<(), NmemEr
         }
     }
 
+    // Catch up: summarize missed sessions
+    if args.catch_up {
+        let config = load_config().unwrap_or_default();
+        if !config.summarization.enabled {
+            eprintln!("nmem: catch-up skipped (summarization not enabled)");
+        } else {
+            catch_up_unsummarized(&conn, &config.summarization)?;
+        }
+    }
+
     let size_after = std::fs::metadata(db_path)?.len();
     eprintln!("nmem: database: {} → {}", fmt_size(size_before), fmt_size(size_after));
 
@@ -95,10 +105,13 @@ fn resummarize_all(
     let total = session_ids.len();
     eprintln!("nmem: resummarizing {total} sessions...");
 
+    let inference_params = crate::s1_4_inference::params_from_config(config)?;
+    let engine = crate::s1_4_inference::InferenceEngine::new(inference_params)?;
+
     let mut success = 0u64;
     let mut failed = 0u64;
     for (i, sid) in session_ids.iter().enumerate() {
-        match crate::s1_4_summarize::summarize_session(conn, sid, config) {
+        match crate::s1_4_summarize::summarize_session_with_engine(conn, sid, &engine) {
             Ok(()) => {
                 success += 1;
                 eprint!("\rnmem: [{}/{}] {} ok, {} failed", i + 1, total, success, failed);
@@ -111,6 +124,82 @@ fn resummarize_all(
         }
     }
     eprintln!("\nnmem: resummarize complete — {success} ok, {failed} failed");
+
+    Ok(())
+}
+
+fn catch_up_unsummarized(
+    conn: &rusqlite::Connection,
+    config: &crate::s5_config::SummarizationConfig,
+) -> Result<(), NmemError> {
+    // First: write sentinel summaries for ended sessions with < 3 observations.
+    // These can't be summarized but need summary IS NOT NULL to unblock S3 sweep.
+    let sentinel_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sessions s
+         WHERE s.ended_at IS NOT NULL
+           AND s.summary IS NULL
+           AND (SELECT COUNT(*) FROM observations WHERE session_id = s.id) < 3",
+        [],
+        |r| r.get(0),
+    )?;
+
+    if sentinel_count > 0 {
+        let mut stmt = conn.prepare(
+            "SELECT s.id FROM sessions s
+             WHERE s.ended_at IS NOT NULL
+               AND s.summary IS NULL
+               AND (SELECT COUNT(*) FROM observations WHERE session_id = s.id) < 3",
+        )?;
+        let ids: Vec<String> = stmt.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
+        for sid in &ids {
+            crate::s1_4_summarize::write_sentinel_summary(conn, sid)?;
+        }
+        eprintln!("nmem: catch-up — {sentinel_count} empty sessions given sentinel summaries");
+    }
+
+    // Then: summarize sessions with enough observations
+    let mut stmt = conn.prepare(
+        "SELECT s.id FROM sessions s
+         WHERE s.ended_at IS NOT NULL
+           AND s.summary IS NULL
+           AND (SELECT COUNT(*) FROM observations WHERE session_id = s.id) >= 3
+         ORDER BY s.started_at ASC",
+    )?;
+    let session_ids: Vec<String> = stmt
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+
+    if session_ids.is_empty() && sentinel_count == 0 {
+        eprintln!("nmem: catch-up — no unsummarized sessions");
+        return Ok(());
+    }
+
+    if session_ids.is_empty() {
+        return Ok(());
+    }
+
+    let total = session_ids.len();
+    eprintln!("nmem: catch-up — {total} sessions to summarize");
+
+    let inference_params = crate::s1_4_inference::params_from_config(config)?;
+    let engine = crate::s1_4_inference::InferenceEngine::new(inference_params)?;
+
+    let mut success = 0u64;
+    let mut failed = 0u64;
+    for (i, sid) in session_ids.iter().enumerate() {
+        match crate::s1_4_summarize::summarize_session_with_engine(conn, sid, &engine) {
+            Ok(()) => {
+                success += 1;
+                eprint!("\rnmem: [{}/{}] {} ok, {} failed", i + 1, total, success, failed);
+            }
+            Err(e) => {
+                failed += 1;
+                eprint!("\rnmem: [{}/{}] {} ok, {} failed", i + 1, total, success, failed);
+                eprintln!(" — {sid}: {e}");
+            }
+        }
+    }
+    eprintln!("\nnmem: catch-up complete — {success} ok, {failed} failed");
 
     Ok(())
 }

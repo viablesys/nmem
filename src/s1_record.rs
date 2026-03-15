@@ -425,8 +425,8 @@ fn handle_stop(conn: &Connection, payload: &HookPayload, _config: &NmemConfig, d
         scan_transcript(&tx, &payload.session_id, tp, ts)?;
     }
 
-    // Compute session signature (scope stmt so borrow is dropped before commit)
-    let sig_json = {
+    // Compute session signature and obs count
+    let (sig_json, obs_count) = {
         let mut stmt = tx.prepare(
             "SELECT obs_type, COUNT(*) as n FROM observations
              WHERE session_id = ?1 GROUP BY obs_type ORDER BY n DESC",
@@ -437,11 +437,13 @@ fn handle_stop(conn: &Connection, payload: &HookPayload, _config: &NmemConfig, d
             })?
             .collect::<Result<_, _>>()?;
 
-        if signature.is_empty() {
+        let count: i64 = signature.iter().map(|(_, n)| n).sum();
+        let json = if signature.is_empty() {
             None
         } else {
             Some(serde_json::to_string(&signature)?)
-        }
+        };
+        (json, count)
     };
 
     tx.execute(
@@ -449,10 +451,18 @@ fn handle_stop(conn: &Connection, payload: &HookPayload, _config: &NmemConfig, d
         params![ts, sig_json, payload.session_id],
     )?;
 
+    // Sentinel summary for empty sessions (< 3 observations) — unblocks S3 sweep
+    if obs_count < 3 {
+        crate::s1_4_summarize::write_sentinel_summary(&tx, &payload.session_id)?;
+    }
+
     tx.commit()?;
 
     // Spawn deferred maintenance as a detached background process
-    spawn_deferred_maintain(&payload.session_id, db_path);
+    // (only if there's enough data to summarize)
+    if obs_count >= 3 {
+        spawn_deferred_maintain(&payload.session_id, db_path);
+    }
 
     Ok(())
 }

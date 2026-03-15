@@ -6,6 +6,10 @@ use tempfile::TempDir;
 fn nmem_cmd(db_path: &PathBuf) -> Command {
     let mut cmd = Command::cargo_bin("nmem").unwrap();
     cmd.env("NMEM_DB", db_path);
+    // Point to a nonexistent config so spawned maintain processes use defaults
+    // (summarization.enabled = false). Without this, maintain processes read
+    // ~/.nmem/config.toml, try to download a GGUF model, and hang.
+    cmd.env("NMEM_CONFIG", "/dev/null/nonexistent");
     cmd
 }
 

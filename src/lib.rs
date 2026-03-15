@@ -23,6 +23,7 @@ pub mod s2_novelty;
 pub mod s2_scope;
 
 // S1's S4 — session intelligence (VSM recursion within S1)
+pub mod s1_4_inference;
 pub mod s1_4_summarize;
 pub mod s1_4_transcript;
 

@@ -36,24 +36,33 @@ pub struct ProjectDetectionConfig {
 pub struct SummarizationConfig {
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default = "default_summarization_endpoint")]
-    pub endpoint: String,
-    #[serde(default = "default_summarization_model")]
-    pub model: String,
-    #[serde(default = "default_summarization_timeout")]
-    pub timeout_secs: u64,
+    #[serde(default = "default_model_path")]
+    pub model_path: String,
     #[serde(default)]
-    pub fallback_endpoint: Option<String>,
+    pub temperature: f32,
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
+    #[serde(default = "default_n_ctx")]
+    pub n_ctx: u32,
+    #[serde(default)]
+    pub n_threads: u32,
+    #[serde(default = "default_n_gpu_layers")]
+    pub n_gpu_layers: u32,
+    #[serde(default)]
+    pub lora_path: Option<String>,
 }
 
 impl Default for SummarizationConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            endpoint: default_summarization_endpoint(),
-            model: default_summarization_model(),
-            timeout_secs: default_summarization_timeout(),
-            fallback_endpoint: None,
+            model_path: default_model_path(),
+            temperature: 0.0,
+            max_tokens: default_max_tokens(),
+            n_ctx: default_n_ctx(),
+            n_threads: 0,
+            n_gpu_layers: default_n_gpu_layers(),
+            lora_path: None,
         }
     }
 }
@@ -73,16 +82,20 @@ fn default_lsp_extensions() -> Vec<String> {
         .collect()
 }
 
-fn default_summarization_endpoint() -> String {
-    "http://localhost:1234/v1/chat/completions".into()
+fn default_model_path() -> String {
+    "lmstudio-community/granite-4.0-h-tiny-GGUF:granite-4.0-h-tiny-Q4_K_M.gguf".into()
 }
 
-fn default_summarization_model() -> String {
-    "ibm/granite-4-h-tiny".into()
+fn default_max_tokens() -> u32 {
+    1024
 }
 
-fn default_summarization_timeout() -> u64 {
-    30
+fn default_n_ctx() -> u32 {
+    32768
+}
+
+fn default_n_gpu_layers() -> u32 {
+    999
 }
 
 #[derive(Debug, Deserialize, Default)]

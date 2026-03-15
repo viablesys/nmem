@@ -519,7 +519,7 @@ fn gather_episode_payload(
     Ok(Some(out))
 }
 
-/// Generate narrative for a single episode via LLM.
+/// Generate narrative for a single episode via direct LLM inference.
 fn generate_narrative(
     conn: &Connection,
     episode: &WorkUnitRow,
@@ -536,54 +536,16 @@ fn generate_narrative(
         .replace("{OBS_COUNT}", &episode.obs_count.to_string())
         .replace("{PAYLOAD}", &payload);
 
-    let body = serde_json::json!({
-        "model": config.model,
-        "messages": [
-            {"role": "system", "content": EPISODE_SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ],
-        "temperature": 0.0,
-        "max_tokens": 512,
-    });
+    let mut inference_params = crate::s1_4_inference::params_from_config(config)?;
+    inference_params.max_tokens = 512; // episodes need shorter output than sessions
 
-    let agent = ureq::Agent::new_with_config(
-        ureq::config::Config::builder()
-            .timeout_global(Some(std::time::Duration::from_secs(config.timeout_secs)))
-            .build(),
-    );
+    let result = crate::s1_4_inference::generate(
+        &inference_params,
+        EPISODE_SYSTEM_PROMPT,
+        &user_content,
+    )?;
 
-    let result = agent
-        .post(&config.endpoint)
-        .send_json(&body)
-        .map_err(|e| NmemError::Config(format!("episode narrative request: {e}")));
-
-    let resp: serde_json::Value = match result {
-        Ok(mut r) => r
-            .body_mut()
-            .read_json()
-            .map_err(|e| NmemError::Config(format!("episode narrative response: {e}")))?,
-        Err(e) => {
-            // Try fallback if available
-            if let Some(fallback) = &config.fallback_endpoint {
-                let mut r = agent
-                    .post(fallback)
-                    .send_json(&body)
-                    .map_err(|e| NmemError::Config(format!("episode narrative fallback: {e}")))?;
-                r.body_mut()
-                    .read_json()
-                    .map_err(|e| NmemError::Config(format!("episode narrative fallback response: {e}")))?
-            } else {
-                return Err(e);
-            }
-        }
-    };
-
-    let text = resp
-        .pointer("/choices/0/message/content")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| NmemError::Config("no content in episode narrative response".into()))?;
-
-    Ok(Some(text.to_string()))
+    Ok(Some(result.text))
 }
 
 /// Update a work_unit row with narrative summary.

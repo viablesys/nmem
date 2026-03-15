@@ -1,3 +1,4 @@
+use crate::s1_4_inference;
 use crate::s5_config::SummarizationConfig;
 use crate::NmemError;
 use rusqlite::{Connection, params};
@@ -75,6 +76,9 @@ where
 
 /// Gather prompts and observations for the session into a text payload.
 /// Returns None if fewer than 3 observations exist.
+///
+/// No truncation — all prompts, all observations, full content.
+/// With n_ctx=32768 this covers 98% of sessions untruncated.
 pub fn gather_session_payload(conn: &Connection, session_id: &str) -> Result<Option<String>, NmemError> {
     let obs_count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM observations WHERE session_id = ?1",
@@ -88,11 +92,11 @@ pub fn gather_session_payload(conn: &Connection, session_id: &str) -> Result<Opt
 
     let mut out = String::new();
 
-    // Gather user prompts (up to 10, chronological)
+    // Gather all user prompts (chronological, full content)
     let mut prompt_stmt = conn.prepare(
         "SELECT content FROM prompts
          WHERE session_id = ?1 AND source = 'user'
-         ORDER BY timestamp ASC LIMIT 10",
+         ORDER BY timestamp ASC",
     )?;
     let prompts: Vec<String> = prompt_stmt
         .query_map(params![session_id], |r| r.get(0))?
@@ -101,17 +105,16 @@ pub fn gather_session_payload(conn: &Connection, session_id: &str) -> Result<Opt
     if !prompts.is_empty() {
         out.push_str("User prompts:\n");
         for p in &prompts {
-            let truncated: String = p.chars().take(100).collect();
-            out.push_str(&format!("- {truncated}\n"));
+            out.push_str(&format!("- {p}\n"));
         }
         out.push('\n');
     }
 
-    // Gather thinking blocks (up to 5, chronological)
+    // Gather all thinking blocks (chronological, full content)
     let mut thinking_stmt = conn.prepare(
         "SELECT content FROM prompts
          WHERE session_id = ?1 AND source = 'agent'
-         ORDER BY timestamp ASC LIMIT 5",
+         ORDER BY timestamp ASC",
     )?;
     let thinking: Vec<String> = thinking_stmt
         .query_map(params![session_id], |r| r.get(0))?
@@ -120,19 +123,17 @@ pub fn gather_session_payload(conn: &Connection, session_id: &str) -> Result<Opt
     if !thinking.is_empty() {
         out.push_str("Agent reasoning:\n");
         for t in &thinking {
-            let truncated: String = t.chars().take(200).collect();
-            out.push_str(&format!("- {truncated}\n"));
+            out.push_str(&format!("- {t}\n"));
         }
         out.push('\n');
     }
 
-    // Gather observations (most recent 50, chronological)
-    // Include classifier labels and failure metadata for S4 consumers
+    // Gather all observations (chronological, full content)
     let mut obs_stmt = conn.prepare(
         "SELECT obs_type, file_path, content, phase, scope, locus, novelty, metadata
          FROM observations
          WHERE session_id = ?1
-         ORDER BY timestamp ASC LIMIT 50",
+         ORDER BY timestamp ASC",
     )?;
 
     out.push_str("Actions:\n");
@@ -160,7 +161,8 @@ pub fn gather_session_payload(conn: &Connection, session_id: &str) -> Result<Opt
 }
 
 /// Format a single observation action line for LLM payloads.
-/// Includes classifier stance labels and failure metadata when present.
+/// Includes classifier stance labels and full failure metadata when present.
+/// No truncation — full content and full error responses.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn format_action_line(
     obs_type: &str,
@@ -180,32 +182,29 @@ pub(crate) fn format_action_line(
     if let Some(n) = novelty { tag_parts.push(n); }
     let tag = tag_parts.join("|");
 
-    // Base display: [tag] file_path - content_preview
+    // Base display: [tag] file_path - content (full, no truncation)
     let base = if let Some(fp) = file_path {
-        let preview: String = content.chars().take(60).collect();
-        if preview.is_empty() {
+        if content.is_empty() {
             format!("[{tag}] {fp}")
         } else {
-            format!("[{tag}] {fp} - {preview}")
+            format!("[{tag}] {fp} - {content}")
         }
     } else {
-        let preview: String = content.chars().take(80).collect();
-        format!("[{tag}] {preview}")
+        format!("[{tag}] {content}")
     };
 
-    // Append failure info if present
+    // Append full failure info if present
     if let Some(ms) = metadata_str
         && let Ok(meta) = serde_json::from_str::<serde_json::Value>(ms)
         && meta.get("failed").and_then(|v| v.as_bool()).unwrap_or(false)
     {
-        let error_preview = meta.get("response")
+        let error_text = meta.get("response")
             .and_then(|v| v.as_str())
-            .map(|s| s.chars().take(120).collect::<String>())
             .unwrap_or_default();
-        if error_preview.is_empty() {
+        if error_text.is_empty() {
             return format!("{base} FAILED");
         }
-        return format!("{base} FAILED: {error_preview}");
+        return format!("{base} FAILED: {error_text}");
     }
 
     base
@@ -225,66 +224,8 @@ fn strip_fences(text: &str) -> &str {
     t
 }
 
-/// Call OpenAI-compatible chat completions endpoint, with optional fallback.
-fn call_completion(config: &SummarizationConfig, payload: &str) -> Result<SessionSummary, NmemError> {
-    let user_content = USER_PROMPT_TEMPLATE.replace("{PAYLOAD}", payload);
-    let body = serde_json::json!({
-        "model": config.model,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ],
-        "temperature": 0.0,
-        "max_tokens": 1024,
-    });
-
-    let result = try_endpoint(&config.endpoint, &body, config.timeout_secs);
-
-    match result {
-        Ok(summary) => Ok(summary),
-        Err(primary_err) => {
-            if let Some(fallback) = &config.fallback_endpoint {
-                eprintln!("nmem: primary endpoint failed ({primary_err}), trying fallback");
-                try_endpoint(fallback, &body, config.timeout_secs)
-            } else {
-                Err(primary_err)
-            }
-        }
-    }
-}
-
-fn try_endpoint(
-    endpoint: &str,
-    body: &serde_json::Value,
-    timeout_secs: u64,
-) -> Result<SessionSummary, NmemError> {
-    let agent = ureq::Agent::new_with_config(
-        ureq::config::Config::builder()
-            .timeout_global(Some(std::time::Duration::from_secs(timeout_secs)))
-            .build(),
-    );
-
-    let resp: serde_json::Value = agent
-        .post(endpoint)
-        .send_json(body)
-        .map_err(|e| NmemError::Config(format!("summarization request: {e}")))?
-        .body_mut()
-        .read_json()
-        .map_err(|e| NmemError::Config(format!("summarization response: {e}")))?;
-
-    let text = resp
-        .pointer("/choices/0/message/content")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| NmemError::Config("no content in chat completion response".into()))?;
-
-    let cleaned = strip_fences(text);
-    let summary: SessionSummary = serde_json::from_str(cleaned)
-        .map_err(|e| NmemError::Config(format!("summary parse: {e}")))?;
-
-    Ok(summary)
-}
-
 /// Summarize a session and store the result. Non-fatal — callers should catch errors.
+/// Loads and drops the model each time. Use `summarize_session_with_engine()` for batch work.
 pub fn summarize_session(
     conn: &Connection,
     session_id: &str,
@@ -294,18 +235,41 @@ pub fn summarize_session(
         return Ok(());
     }
 
+    let inference_params = s1_4_inference::params_from_config(config)?;
+    let engine = s1_4_inference::InferenceEngine::new(inference_params)?;
+    summarize_session_with_engine(conn, session_id, &engine)
+}
+
+/// Summarize a session using a pre-loaded engine. Use this in loops to avoid
+/// reloading the model per session.
+pub fn summarize_session_with_engine(
+    conn: &Connection,
+    session_id: &str,
+    engine: &s1_4_inference::InferenceEngine,
+) -> Result<(), NmemError> {
     let payload = match gather_session_payload(conn, session_id)? {
         Some(p) => p,
         None => return Ok(()),
     };
 
-    let summary = call_completion(config, &payload)?;
+    let user_content = USER_PROMPT_TEMPLATE.replace("{PAYLOAD}", &payload);
+
+    let result = engine.generate(SYSTEM_PROMPT, &user_content)?;
+
+    let cleaned = strip_fences(&result.text);
+    let summary: SessionSummary = serde_json::from_str(cleaned)
+        .map_err(|e| NmemError::Config(format!("summary parse: {e}")))?;
     let summary_json = serde_json::to_string(&summary)?;
 
     conn.execute(
-        "UPDATE sessions SET summary = ?1 WHERE id = ?2",
-        params![summary_json, session_id],
+        "UPDATE sessions SET summary = ?1, summarization_ms = ?2 WHERE id = ?3",
+        params![summary_json, result.total_ms as i64, session_id],
     )?;
+
+    eprintln!(
+        "nmem: session summarized ({}ms, {} prompt tokens, {} generated tokens)",
+        result.total_ms, result.prompt_tokens, result.generated_tokens
+    );
 
     // Stream to VictoriaLogs — non-fatal, fire-and-forget
     let project: Option<String> = conn
@@ -315,7 +279,12 @@ pub fn summarize_session(
             |r| r.get(0),
         )
         .ok();
-    stream_summary_to_logs(session_id, project.as_deref().unwrap_or("unknown"), &summary);
+    stream_summary_to_logs(
+        session_id,
+        project.as_deref().unwrap_or("unknown"),
+        &summary,
+        result.total_ms,
+    );
 
     Ok(())
 }
@@ -323,7 +292,12 @@ pub fn summarize_session(
 const VLOGS_ENDPOINT: &str = "http://localhost:9428/insert/jsonline";
 
 /// Stream a session summary to VictoriaLogs as a structured log entry.
-fn stream_summary_to_logs(session_id: &str, project: &str, summary: &SessionSummary) {
+fn stream_summary_to_logs(
+    session_id: &str,
+    project: &str,
+    summary: &SessionSummary,
+    summarization_ms: u64,
+) {
     let completed = summary.completed.join("; ");
     let learned = summary.learned.join("; ");
     let next_steps = summary.next_steps.join("; ");
@@ -340,6 +314,7 @@ fn stream_summary_to_logs(session_id: &str, project: &str, summary: &SessionSumm
         "completed": completed,
         "next_steps": next_steps,
         "files_edited": files_edited,
+        "summarization_ms": summarization_ms,
     });
 
     let body = format!("{}\n", record);
@@ -352,6 +327,25 @@ fn stream_summary_to_logs(session_id: &str, project: &str, summary: &SessionSumm
         .post(VLOGS_ENDPOINT)
         .header("Content-Type", "application/stream+json")
         .send(body.as_bytes());
+}
+
+/// Write a sentinel summary for sessions with fewer than 3 observations.
+/// Unblocks S3 sweep without wasting inference.
+pub fn write_sentinel_summary(conn: &Connection, session_id: &str) -> Result<(), NmemError> {
+    let sentinel = serde_json::json!({
+        "intent": "empty session",
+        "learned": [],
+        "completed": [],
+        "next_steps": [],
+        "files_read": [],
+        "files_edited": [],
+        "notes": null
+    });
+    conn.execute(
+        "UPDATE sessions SET summary = ?1 WHERE id = ?2",
+        params![sentinel.to_string(), session_id],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -469,5 +463,25 @@ mod tests {
         assert!(!config.enabled);
         let result = summarize_session(&conn, "s1", &config);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn sentinel_summary_writes() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::schema::MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO sessions (id, project, started_at) VALUES ('s1', 'test', 1000)",
+            [],
+        )
+        .unwrap();
+
+        write_sentinel_summary(&conn, "s1").unwrap();
+
+        let summary: String = conn
+            .query_row("SELECT summary FROM sessions WHERE id = 's1'", [], |r| r.get(0))
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&summary).unwrap();
+        assert_eq!(parsed["intent"], "empty session");
     }
 }
