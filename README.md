@@ -148,7 +148,7 @@ Episodes are the bridge between raw observations (too granular) and session summ
 
 ## Git integration and context enrichment
 
-nmem fuses two information sources that are normally separate: **session memory** (what the agent did with a file across sessions) and **git history** (what happened to a file across all contributors). Both are extracted at write time and surfaced through passive and active channels — the agent doesn't need to ask for context it already has.
+nmem fuses two information sources that are normally separate: **session memory** (what the agent did with a file across sessions) and **git history** (what happened to a file across all contributors). Git metadata from commits and pushes is extracted at hook time, while file-level history is computed and injected when the agent opens a file — no explicit query needed.
 
 ### Git metadata extraction
 
