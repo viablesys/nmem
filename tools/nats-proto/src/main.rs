@@ -66,6 +66,33 @@ pub struct RagNotification {
     pub tags: Vec<String>,
 }
 
+/// Heartbeat ping broadcast to nmem.{org}.heartbeat
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HeartbeatPing {
+    /// Who sent the heartbeat
+    pub sender: String,
+    /// Millisecond timestamp (monotonic, sender-local)
+    pub sent_ms: u64,
+}
+
+/// Heartbeat pong from each online instance
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HeartbeatPong {
+    /// Identity of the responding instance
+    pub responder: String,
+    /// Echo back the sender's sent_ms for round-trip calculation
+    pub echo_ms: u64,
+}
+
+/// Fleet state derived from a heartbeat round.
+#[derive(Debug, Clone)]
+pub struct FleetState {
+    /// Online instances and their round-trip latency
+    pub instances: Vec<(String, Duration)>,
+    /// Calibrated timeout: max observed latency × 3, minimum 100ms
+    pub calibrated_timeout: Duration,
+}
+
 // ---------------------------------------------------------------------------
 // Section 2: Test Harness — NatsTestServer (Docker lifecycle)
 // ---------------------------------------------------------------------------
@@ -136,20 +163,29 @@ impl Drop for NatsTestServer {
 // Section 3: Scatter/Gather Helper
 // ---------------------------------------------------------------------------
 
+/// A response from scatter/gather with arrival timing.
+pub struct TimedMessage {
+    pub message: async_nats::Message,
+    /// Time elapsed since the scatter was sent
+    pub elapsed: Duration,
+}
+
 /// Scatter/gather: publish a request to a subject, collect all responses within timeout.
 ///
 /// Unlike `client.request()` which returns only the first response, this
 /// collects from all responders (fleet instances) within the timeout window.
+/// Each response is tagged with its arrival time relative to the send.
 pub async fn scatter_gather(
     client: &async_nats::Client,
     subject: impl Into<String>,
     payload: Bytes,
     timeout: Duration,
-) -> Vec<async_nats::Message> {
+) -> Vec<TimedMessage> {
     let subject = subject.into();
     let inbox = client.new_inbox();
     let mut sub = client.subscribe(inbox.clone()).await.expect("subscribe inbox");
 
+    let t0 = Instant::now();
     client
         .publish_with_reply(subject, inbox, payload)
         .await
@@ -161,13 +197,64 @@ pub async fn scatter_gather(
 
     loop {
         match tokio::time::timeout_at(deadline, sub.next()).await {
-            Ok(Some(msg)) => responses.push(msg),
+            Ok(Some(msg)) => responses.push(TimedMessage {
+                message: msg,
+                elapsed: t0.elapsed(),
+            }),
             Ok(None) => break, // subscription closed
             Err(_) => break,   // timeout
         }
     }
 
     responses
+}
+
+/// Send a heartbeat, collect all responses, derive calibrated timeout.
+///
+/// First heartbeat uses `initial_timeout` (generous, e.g. 5s).
+/// Returns `FleetState` with per-instance latencies and a calibrated timeout
+/// for subsequent scatter/gather operations.
+pub async fn heartbeat(
+    client: &async_nats::Client,
+    subject: impl Into<String>,
+    sender: &str,
+    initial_timeout: Duration,
+) -> FleetState {
+    let subject = subject.into();
+    let t0 = Instant::now();
+
+    let ping = HeartbeatPing {
+        sender: sender.to_string(),
+        sent_ms: t0.elapsed().as_millis() as u64,
+    };
+
+    let responses = scatter_gather(
+        client,
+        &subject,
+        serde_json::to_vec(&ping).unwrap().into(),
+        initial_timeout,
+    )
+    .await;
+
+    let mut instances = Vec::new();
+    for timed in &responses {
+        if let Ok(pong) = serde_json::from_slice::<HeartbeatPong>(&timed.message.payload) {
+            instances.push((pong.responder, timed.elapsed));
+        }
+    }
+
+    // Calibrated timeout: max observed RTT × 3, floor at 100ms
+    let max_rtt = instances
+        .iter()
+        .map(|(_, d)| *d)
+        .max()
+        .unwrap_or(Duration::from_millis(100));
+    let calibrated = (max_rtt * 3).max(Duration::from_millis(100));
+
+    FleetState {
+        instances,
+        calibrated_timeout: calibrated,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -258,25 +345,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     responder.await?;
 
-    // --- Scatter/Gather demo ---
+    // --- Heartbeat + Scatter/Gather demo ---
     let t3 = Instant::now();
-    let client_sg = client.clone();
 
-    // Spawn 3 mock fleet instances
+    // Spawn 3 mock fleet instances that respond to both heartbeat and search
     let mut handles = Vec::new();
     for i in 0..3 {
         let c = client.clone();
         let name = format!("instance-{i}");
-        let mut sub = c.subscribe("nmem.demo.fleet.search").await?;
+        // Each instance subscribes to heartbeat AND search
+        let mut hb_sub = c.subscribe("nmem.demo.heartbeat").await?;
+        let mut search_sub = c.subscribe("nmem.demo.fleet.search").await?;
+        let c2 = c.clone();
+        let name2 = name.clone();
         handles.push(tokio::spawn(async move {
-            if let Some(msg) = sub.next().await {
+            // Handle heartbeat
+            if let Some(msg) = hb_sub.next().await {
+                if let Ok(ping) = serde_json::from_slice::<HeartbeatPing>(&msg.payload) {
+                    let pong = HeartbeatPong {
+                        responder: name.clone(),
+                        echo_ms: ping.sent_ms,
+                    };
+                    if let Some(reply) = msg.reply {
+                        c.publish(reply, serde_json::to_vec(&pong).unwrap().into())
+                            .await
+                            .unwrap();
+                    }
+                }
+            }
+        }));
+        handles.push(tokio::spawn(async move {
+            // Handle search
+            if let Some(msg) = search_sub.next().await {
                 let response = SearchResponse {
-                    responder: name,
+                    responder: name2,
                     results: vec![],
                     search_ms: (i as u64 + 1) * 2,
                 };
                 if let Some(reply) = msg.reply {
-                    c.publish(reply, serde_json::to_vec(&response).unwrap().into())
+                    c2.publish(reply, serde_json::to_vec(&response).unwrap().into())
                         .await
                         .unwrap();
                 }
@@ -287,22 +394,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Give subscribers time to register
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let responses = scatter_gather(
-        &client_sg,
-        "nmem.demo.fleet.search",
-        serde_json::to_vec(&request)?.into(),
-        Duration::from_secs(2),
+    // Step 1: Heartbeat — discover fleet, calibrate timeout
+    // Initial timeout is generous (1s) since we don't know fleet latency yet
+    let fleet = heartbeat(
+        &client,
+        "nmem.demo.heartbeat",
+        "demo-runner",
+        Duration::from_secs(1),
     )
     .await;
 
     eprintln!(
-        "[4/4] Scatter/Gather: {:?} — {} responses from fleet",
+        "[4/5] Heartbeat: {:?} — {} instances online, calibrated timeout: {:?}",
         t3.elapsed(),
-        responses.len()
+        fleet.instances.len(),
+        fleet.calibrated_timeout,
     );
-    for msg in &responses {
-        let r: SearchResponse = serde_json::from_slice(&msg.payload).unwrap();
-        eprintln!("       {} ({}ms)", r.responder, r.search_ms);
+    for (name, rtt) in &fleet.instances {
+        eprintln!("       {name} (RTT: {rtt:?})");
+    }
+
+    // Step 2: Scatter/Gather with calibrated timeout
+    let t4 = Instant::now();
+    let responses = scatter_gather(
+        &client,
+        "nmem.demo.fleet.search",
+        serde_json::to_vec(&request)?.into(),
+        fleet.calibrated_timeout,
+    )
+    .await;
+
+    eprintln!(
+        "[5/5] Scatter/Gather: {:?} — {} responses (timeout: {:?})",
+        t4.elapsed(),
+        responses.len(),
+        fleet.calibrated_timeout,
+    );
+    for tm in &responses {
+        let r: SearchResponse = serde_json::from_slice(&tm.message.payload).unwrap();
+        eprintln!("       {} ({}ms, RTT: {:?})", r.responder, r.search_ms, tm.elapsed);
     }
 
     for h in handles {
@@ -631,7 +761,7 @@ mod tests {
         let mut responders: Vec<String> = responses
             .iter()
             .map(|m| {
-                serde_json::from_slice::<SearchResponse>(&m.payload)
+                serde_json::from_slice::<SearchResponse>(&m.message.payload)
                     .unwrap()
                     .responder
             })
@@ -726,7 +856,7 @@ mod tests {
         let mut responders: Vec<String> = responses
             .iter()
             .map(|m| {
-                serde_json::from_slice::<SearchResponse>(&m.payload)
+                serde_json::from_slice::<SearchResponse>(&m.message.payload)
                     .unwrap()
                     .responder
             })
@@ -793,7 +923,7 @@ mod tests {
         .await;
 
         assert_eq!(responses.len(), 1);
-        let response: SearchResponse = serde_json::from_slice(&responses[0].payload).unwrap();
+        let response: SearchResponse = serde_json::from_slice(&responses[0].message.payload).unwrap();
         assert_eq!(response.responder, "alice");
         assert_eq!(response.results.len(), 1);
         assert_eq!(response.results[0].id, 99);
@@ -977,7 +1107,7 @@ mod tests {
         .await;
 
         assert_eq!(responses.len(), 1);
-        let response: SearchResponse = serde_json::from_slice(&responses[0].payload).unwrap();
+        let response: SearchResponse = serde_json::from_slice(&responses[0].message.payload).unwrap();
         assert_eq!(response.results.len(), 20);
         assert_eq!(response.responder, "large-instance");
 
@@ -1018,7 +1148,7 @@ mod tests {
         .await;
 
         assert_eq!(responses.len(), 1);
-        let response: SearchResponse = serde_json::from_slice(&responses[0].payload).unwrap();
+        let response: SearchResponse = serde_json::from_slice(&responses[0].message.payload).unwrap();
         assert!(response.results.is_empty());
         assert_eq!(response.search_ms, 0);
 
@@ -1076,5 +1206,243 @@ mod tests {
             h.await.unwrap();
         }
         responder.await.unwrap();
+    }
+
+    // --- Group 7: Heartbeat + calibrated timeout ---
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_heartbeat_discovers_fleet() {
+        let server = NatsTestServer::start(14239).await;
+        let client = async_nats::connect(&server.url()).await.unwrap();
+
+        // Spawn 3 instances that respond to heartbeat
+        let mut handles = Vec::new();
+        for i in 0..3 {
+            let c = client.clone();
+            let name = format!("node-{i}");
+            let mut sub = c.subscribe("nmem.viablesys.heartbeat").await.unwrap();
+            handles.push(tokio::spawn(async move {
+                if let Some(msg) = sub.next().await {
+                    let ping: HeartbeatPing =
+                        serde_json::from_slice(&msg.payload).unwrap();
+                    let pong = HeartbeatPong {
+                        responder: name,
+                        echo_ms: ping.sent_ms,
+                    };
+                    if let Some(reply) = msg.reply {
+                        c.publish(reply, serde_json::to_vec(&pong).unwrap().into())
+                            .await
+                            .unwrap();
+                    }
+                }
+            }));
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let fleet = heartbeat(
+            &client,
+            "nmem.viablesys.heartbeat",
+            "test-runner",
+            Duration::from_secs(5),
+        )
+        .await;
+
+        assert_eq!(fleet.instances.len(), 3, "should discover 3 instances");
+
+        let mut names: Vec<String> = fleet.instances.iter().map(|(n, _)| n.clone()).collect();
+        names.sort();
+        assert_eq!(names, vec!["node-0", "node-1", "node-2"]);
+
+        // Calibrated timeout should be >= 100ms (floor)
+        assert!(
+            fleet.calibrated_timeout >= Duration::from_millis(100),
+            "calibrated timeout should be at least 100ms"
+        );
+
+        for h in handles {
+            h.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_heartbeat_empty_fleet() {
+        let server = NatsTestServer::start(14240).await;
+        let client = async_nats::connect(&server.url()).await.unwrap();
+
+        // No instances online — heartbeat should return empty fleet with default timeout
+        let fleet = heartbeat(
+            &client,
+            "nmem.viablesys.heartbeat",
+            "lonely-node",
+            Duration::from_millis(500),
+        )
+        .await;
+
+        assert_eq!(fleet.instances.len(), 0, "no instances should respond");
+        // No responses: fallback max_rtt=100ms, ×3 = 300ms
+        assert_eq!(
+            fleet.calibrated_timeout,
+            Duration::from_millis(300),
+            "should use fallback timeout (100ms × 3) when no responses"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_heartbeat_calibrates_timeout() {
+        let server = NatsTestServer::start(14241).await;
+        let client = async_nats::connect(&server.url()).await.unwrap();
+
+        // Instance 0: responds immediately
+        let c0 = client.clone();
+        let mut sub0 = c0.subscribe("nmem.viablesys.heartbeat").await.unwrap();
+        let h0 = tokio::spawn(async move {
+            if let Some(msg) = sub0.next().await {
+                let ping: HeartbeatPing =
+                    serde_json::from_slice(&msg.payload).unwrap();
+                let pong = HeartbeatPong {
+                    responder: "fast".into(),
+                    echo_ms: ping.sent_ms,
+                };
+                if let Some(reply) = msg.reply {
+                    c0.publish(reply, serde_json::to_vec(&pong).unwrap().into())
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+
+        // Instance 1: responds after 100ms delay
+        let c1 = client.clone();
+        let mut sub1 = c1.subscribe("nmem.viablesys.heartbeat").await.unwrap();
+        let h1 = tokio::spawn(async move {
+            if let Some(msg) = sub1.next().await {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let ping: HeartbeatPing =
+                    serde_json::from_slice(&msg.payload).unwrap();
+                let pong = HeartbeatPong {
+                    responder: "slow".into(),
+                    echo_ms: ping.sent_ms,
+                };
+                if let Some(reply) = msg.reply {
+                    c1.publish(reply, serde_json::to_vec(&pong).unwrap().into())
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let fleet = heartbeat(
+            &client,
+            "nmem.viablesys.heartbeat",
+            "calibrator",
+            Duration::from_secs(1),
+        )
+        .await;
+
+        assert_eq!(fleet.instances.len(), 2);
+
+        // Slow instance has ~100ms delay, so max RTT should be > 100ms
+        // Calibrated = max_rtt × 3, so should be > 300ms
+        assert!(
+            fleet.calibrated_timeout >= Duration::from_millis(300),
+            "calibrated timeout ({:?}) should be >= 300ms (slow RTT × 3)",
+            fleet.calibrated_timeout
+        );
+
+        // But not absurdly large — should be well under 3s (1s timeout × 3)
+        assert!(
+            fleet.calibrated_timeout < Duration::from_secs(3),
+            "calibrated timeout ({:?}) should be < 3s",
+            fleet.calibrated_timeout
+        );
+
+        h0.await.unwrap();
+        h1.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_heartbeat_then_scatter_gather() {
+        let server = NatsTestServer::start(14242).await;
+        let client = async_nats::connect(&server.url()).await.unwrap();
+
+        // Spawn 2 instances that respond to both heartbeat and search
+        let mut handles = Vec::new();
+        for i in 0..2 {
+            let c = client.clone();
+            let name = format!("fleet-{i}");
+            let mut hb_sub = c.subscribe("nmem.viablesys.heartbeat").await.unwrap();
+            let mut search_sub = c.subscribe("nmem.viablesys.search").await.unwrap();
+            let c2 = c.clone();
+            let name2 = name.clone();
+
+            handles.push(tokio::spawn(async move {
+                if let Some(msg) = hb_sub.next().await {
+                    let ping: HeartbeatPing =
+                        serde_json::from_slice(&msg.payload).unwrap();
+                    let pong = HeartbeatPong {
+                        responder: name,
+                        echo_ms: ping.sent_ms,
+                    };
+                    if let Some(reply) = msg.reply {
+                        c.publish(reply, serde_json::to_vec(&pong).unwrap().into())
+                            .await
+                            .unwrap();
+                    }
+                }
+            }));
+            handles.push(tokio::spawn(async move {
+                if let Some(msg) = search_sub.next().await {
+                    let response = SearchResponse {
+                        responder: name2,
+                        results: vec![],
+                        search_ms: 5,
+                    };
+                    if let Some(reply) = msg.reply {
+                        c2.publish(reply, serde_json::to_vec(&response).unwrap().into())
+                            .await
+                            .unwrap();
+                    }
+                }
+            }));
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Step 1: Heartbeat
+        let fleet = heartbeat(
+            &client,
+            "nmem.viablesys.heartbeat",
+            "orchestrator",
+            Duration::from_secs(5),
+        )
+        .await;
+
+        assert_eq!(fleet.instances.len(), 2, "heartbeat should find 2 instances");
+
+        // Step 2: Scatter/gather with calibrated timeout
+        let responses = scatter_gather(
+            &client,
+            "nmem.viablesys.search",
+            Bytes::from("query"),
+            fleet.calibrated_timeout,
+        )
+        .await;
+
+        assert_eq!(
+            responses.len(),
+            2,
+            "scatter/gather with calibrated timeout should get both responses"
+        );
+
+        for h in handles {
+            h.await.unwrap();
+        }
     }
 }
