@@ -2,9 +2,8 @@
   "mcpServers": {
     "nmem": {
       "type": "stdio",
-      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/nmem-hook.sh",
-      "args": ["serve"],
-      "env": {}
+      "command": "nmem",
+      "args": ["serve"]
     }
   }
 }

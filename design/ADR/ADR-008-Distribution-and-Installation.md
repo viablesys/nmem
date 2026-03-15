@@ -38,6 +38,8 @@ nmem is a single Rust binary (`nmem`) with two subcommands: `record` (synchronou
 - What's the update mechanism — auto-update, manual, pinned versions?
 - How does the marketplace handle plugins that need post-install setup (key generation, DB init)?
 
+> **[ANNOTATION 2026-03-14, v0.4]:** Found a concrete gap in the plugin MCP resolution model. The project-level `.mcp.json` uses `${CLAUDE_PLUGIN_ROOT}/scripts/nmem-hook.sh` — this resolves correctly in the terminal CLI where plugins are loaded, but **VS Code's Claude Code extension does not resolve `${CLAUDE_PLUGIN_ROOT}`**. The extension reads `.mcp.json` literally, producing a broken command path (`✗ Failed to connect`). Fix: add a user-scope MCP entry (`~/.claude.json` → `mcpServers.nmem`) with the absolute binary path (`/home/bpd/.local/bin/nmem serve`). The project `.mcp.json` remains as-is for plugin distribution. This means nmem requires **two MCP registrations**: plugin-level (for terminal CLI via marketplace) and user-level (for VS Code extension). This dual-registration requirement should be handled by `nmem init` or the install script (Q2).
+
 ### Q2: End-User Binary Install
 - GitHub Releases with prebuilt binaries per platform?
 - Install script (`curl | sh`) that downloads the right binary + writes hook config?
@@ -94,3 +96,4 @@ nmem is a single Rust binary (`nmem`) with two subcommands: `record` (synchronou
 | 2026-02-15 | 0.1 | Draft with open questions, dev install note. |
 | 2026-02-21 | 0.2 | Annotated stale subcommand count (2 → 16). |
 | 2026-03-05 | 0.3 | Q4 annotation: marketplace has no binary update mechanism; three candidate features (version check, config drift, SessionStart nudge) with activation trigger. |
+| 2026-03-14 | 0.4 | Q1 annotation: VS Code extension does not resolve `${CLAUDE_PLUGIN_ROOT}` in `.mcp.json` — requires user-scope MCP registration with absolute path for IDE compatibility. |
