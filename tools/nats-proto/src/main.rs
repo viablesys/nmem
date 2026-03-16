@@ -36,7 +36,38 @@ fn default_limit() -> u32 {
     20
 }
 
-/// Individual search result from a responding instance.
+/// An episode — the primary unit of cross-fleet knowledge exchange.
+///
+/// Episodes are intent-driven work units detected at session end.
+/// They carry enough context for the receiving agent to understand
+/// what happened without needing raw observations.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EpisodeResult {
+    pub id: i64,
+    pub session_id: String,
+    pub started_at: i64,
+    #[serde(default)]
+    pub ended_at: Option<i64>,
+    pub intent: String,
+    /// Hot files touched during this episode (JSON array of paths)
+    #[serde(default)]
+    pub hot_files: Vec<String>,
+    /// Stance breakdown: {"converge":6,"diverge":33,"execute":37,...}
+    #[serde(default)]
+    pub phase_signature: serde_json::Value,
+    pub obs_count: i64,
+    /// LLM-generated narrative summary of the episode
+    #[serde(default)]
+    pub summary: Option<String>,
+    /// Decisions and discoveries
+    #[serde(default)]
+    pub learned: Option<String>,
+    /// Errors, failed approaches
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+/// Individual observation — fallback when episodes aren't available.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SearchResult {
     pub id: i64,
@@ -49,9 +80,15 @@ pub struct SearchResult {
 }
 
 /// Search response from one nmem instance.
+/// Episodes are the primary result; raw observations are fallback.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SearchResponse {
     pub responder: String,
+    /// Episodes matching the query (primary)
+    #[serde(default)]
+    pub episodes: Vec<EpisodeResult>,
+    /// Raw observations (fallback, when no episodes match)
+    #[serde(default)]
     pub results: Vec<SearchResult>,
     pub search_ms: u64,
 }
@@ -434,6 +471,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _req: SearchRequest = serde_json::from_slice(&msg.payload).unwrap();
             let response = SearchResponse {
                 responder: "alice-laptop".into(),
+                episodes: vec![],
                 results: vec![SearchResult {
                     id: 42,
                     timestamp: 1773543500,
@@ -506,6 +544,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(msg) = search_sub.next().await {
                 let response = SearchResponse {
                     responder: name2,
+                    episodes: vec![],
                     results: vec![],
                     search_ms: (i as u64 + 1) * 2,
                 };
@@ -924,6 +963,7 @@ mod tests {
             let _req: SearchRequest = serde_json::from_slice(&msg.payload).unwrap();
             let response = SearchResponse {
                 responder: "alice".into(),
+                episodes: vec![],
                 results: vec![SearchResult {
                     id: 1,
                     timestamp: 1000,
@@ -1023,6 +1063,7 @@ mod tests {
                 if let Some(msg) = sub.next().await {
                     let response = SearchResponse {
                         responder: name,
+                        episodes: vec![],
                         results: vec![],
                         search_ms: i as u64,
                     };
@@ -1077,6 +1118,7 @@ mod tests {
             if let Some(msg) = sub0.next().await {
                 let r = SearchResponse {
                     responder: "fast".into(),
+                    episodes: vec![],
                     results: vec![],
                     search_ms: 1,
                 };
@@ -1096,6 +1138,7 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 let r = SearchResponse {
                     responder: "medium".into(),
+                    episodes: vec![],
                     results: vec![],
                     search_ms: 200,
                 };
@@ -1115,6 +1158,7 @@ mod tests {
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 let r = SearchResponse {
                     responder: "slow".into(),
+                    episodes: vec![],
                     results: vec![],
                     search_ms: 5000,
                 };
@@ -1176,6 +1220,7 @@ mod tests {
 
                 let response = SearchResponse {
                     responder: "alice".into(),
+                    episodes: vec![],
                     results: vec![SearchResult {
                         id: 99,
                         timestamp: 1773543500,
@@ -1375,6 +1420,7 @@ mod tests {
                     .collect();
                 let response = SearchResponse {
                     responder: "large-instance".into(),
+                    episodes: vec![],
                     results,
                     search_ms: 15,
                 };
@@ -1416,6 +1462,7 @@ mod tests {
             if let Some(msg) = sub.next().await {
                 let response = SearchResponse {
                     responder: "empty-instance".into(),
+                    episodes: vec![],
                     results: vec![],
                     search_ms: 0,
                 };
@@ -1460,6 +1507,7 @@ mod tests {
                     let payload = String::from_utf8(msg.payload.to_vec()).unwrap();
                     let response = SearchResponse {
                         responder: format!("reply-to-{payload}"),
+                        episodes: vec![],
                         results: vec![],
                         search_ms: 1,
                     };
@@ -1699,6 +1747,7 @@ mod tests {
                 if let Some(msg) = search_sub.next().await {
                     let response = SearchResponse {
                         responder: name2,
+                        episodes: vec![],
                         results: vec![],
                         search_ms: 5,
                     };
@@ -2000,5 +2049,276 @@ mod tests {
         h0.await.unwrap();
         h1.await.unwrap();
         h2.abort(); // don't wait 2s
+    }
+
+    // --- Group 9: Episode exchange — real memory data over NATS ---
+
+    /// Build a realistic episode from real nmem data patterns.
+    fn sample_episode(id: i64) -> EpisodeResult {
+        EpisodeResult {
+            id,
+            session_id: "b7c284ab-835a-4d5d-a370-22c31ebb81ba".into(),
+            started_at: 1773616087,
+            ended_at: Some(1773616103),
+            intent: "add a substantive description for the novel lsp/git integration".into(),
+            hot_files: vec![
+                "/home/bpd/workspace/nmem/README.md".into(),
+                "/home/bpd/workspace/nmem/src/s1_serve.rs".into(),
+                "/home/bpd/workspace/nmem/src/s1_git.rs".into(),
+            ],
+            phase_signature: serde_json::json!({
+                "converge": 6, "diverge": 33,
+                "execute": 37, "investigate": 2,
+                "internal": 36, "external": 3,
+                "novel": 7, "routine": 32,
+                "failures": 0, "friction": 0, "smooth": 0
+            }),
+            obs_count: 39,
+            summary: Some("Enhanced README with LSP/git integration description. Updated ADR-006 with new interface patterns.".into()),
+            learned: Some("LSP integration provides real-time file tracking without polling".into()),
+            notes: None,
+        }
+    }
+
+    #[test]
+    fn test_episode_serde_roundtrip() {
+        // Episode survives JSON serialization/deserialization
+        let episode = sample_episode(3952);
+        let json = serde_json::to_vec(&episode).unwrap();
+        let recovered: EpisodeResult = serde_json::from_slice(&json).unwrap();
+        assert_eq!(recovered, episode);
+    }
+
+    #[test]
+    fn test_episode_in_search_response() {
+        // SearchResponse with episodes as primary, empty observations
+        let response = SearchResponse {
+            responder: "alice-laptop".into(),
+            episodes: vec![sample_episode(1), sample_episode(2)],
+            results: vec![],
+            search_ms: 12,
+        };
+        let json = serde_json::to_vec(&response).unwrap();
+        let recovered: SearchResponse = serde_json::from_slice(&json).unwrap();
+        assert_eq!(recovered.episodes.len(), 2);
+        assert!(recovered.results.is_empty());
+        assert_eq!(recovered.episodes[0].intent, "add a substantive description for the novel lsp/git integration");
+    }
+
+    #[test]
+    fn test_episode_with_null_optionals() {
+        // Episode with minimal data (no summary, no learned, no notes, no ended_at)
+        let episode = EpisodeResult {
+            id: 100,
+            session_id: "test-session".into(),
+            started_at: 1773000000,
+            ended_at: None,
+            intent: "initial exploration".into(),
+            hot_files: vec![],
+            phase_signature: serde_json::json!({}),
+            obs_count: 3,
+            summary: None,
+            learned: None,
+            notes: None,
+        };
+        let json = serde_json::to_vec(&episode).unwrap();
+        let recovered: EpisodeResult = serde_json::from_slice(&json).unwrap();
+        assert_eq!(recovered, episode);
+        assert!(recovered.summary.is_none());
+        assert!(recovered.hot_files.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_episode_exchange_over_nats() {
+        // Full pipeline: query → episode response → NATS → deserialize
+        let server = NatsTestServer::start(14248).await;
+        let client = async_nats::connect(&server.url()).await.unwrap();
+
+        // Responder: serves episodes
+        let c = client.clone();
+        let mut sub = c.subscribe("nmem.viablesys.search").await.unwrap();
+        let responder = tokio::spawn(async move {
+            if let Some(msg) = sub.next().await {
+                let req: SearchRequest = serde_json::from_slice(&msg.payload).unwrap();
+                assert_eq!(req.query, "lsp integration");
+
+                let response = SearchResponse {
+                    responder: "alice-laptop".into(),
+                    episodes: vec![
+                        sample_episode(3952),
+                        EpisodeResult {
+                            id: 3940,
+                            session_id: "other-session".into(),
+                            started_at: 1773500000,
+                            ended_at: Some(1773500100),
+                            intent: "implement LSP server for file tracking".into(),
+                            hot_files: vec!["src/s1_lsp.rs".into()],
+                            phase_signature: serde_json::json!({
+                                "converge": 15, "diverge": 5,
+                                "execute": 18, "investigate": 2,
+                            }),
+                            obs_count: 20,
+                            summary: Some("Built LSP server with textDocument/didOpen tracking".into()),
+                            learned: Some("tower-lsp-server 0.23 works with rmcp".into()),
+                            notes: None,
+                        },
+                    ],
+                    results: vec![], // no raw observations needed
+                    search_ms: 8,
+                };
+                if let Some(reply) = msg.reply {
+                    c.publish(reply, serde_json::to_vec(&response).unwrap().into())
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Requester: ask about LSP integration
+        let request = SearchRequest {
+            query: "lsp integration".into(),
+            project: Some("nmem".into()),
+            obs_type: None,
+            limit: 10,
+            requester: "bob-desktop".into(),
+        };
+
+        let responses = scatter_gather(
+            &client,
+            "nmem.viablesys.search",
+            serde_json::to_vec(&request).unwrap().into(),
+            Duration::from_secs(2),
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1);
+        let response: SearchResponse =
+            serde_json::from_slice(&responses[0].message.payload).unwrap();
+
+        // Episodes are the primary result
+        assert_eq!(response.episodes.len(), 2);
+        assert!(response.results.is_empty(), "no raw observations needed");
+
+        // First episode: full data
+        let ep = &response.episodes[0];
+        assert_eq!(ep.obs_count, 39);
+        assert_eq!(ep.hot_files.len(), 3);
+        assert!(ep.summary.is_some());
+        assert!(ep.learned.is_some());
+
+        // Phase signature survived roundtrip
+        assert_eq!(ep.phase_signature["converge"], 6);
+        assert_eq!(ep.phase_signature["diverge"], 33);
+
+        // Second episode: different session
+        let ep2 = &response.episodes[1];
+        assert_eq!(ep2.intent, "implement LSP server for file tracking");
+        assert_eq!(ep2.learned.as_deref(), Some("tower-lsp-server 0.23 works with rmcp"));
+
+        responder.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_multi_instance_episode_exchange() {
+        // Two fleet instances respond with different episodes
+        let server = NatsTestServer::start(14249).await;
+        let client = async_nats::connect(&server.url()).await.unwrap();
+
+        // Alice's instance: has LSP episodes
+        let c1 = client.clone();
+        let mut sub1 = c1.subscribe("nmem.viablesys.search").await.unwrap();
+        let h1 = tokio::spawn(async move {
+            if let Some(msg) = sub1.next().await {
+                let response = SearchResponse {
+                    responder: "alice".into(),
+                    episodes: vec![sample_episode(100)],
+                    results: vec![],
+                    search_ms: 5,
+                };
+                if let Some(reply) = msg.reply {
+                    c1.publish(reply, serde_json::to_vec(&response).unwrap().into())
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+
+        // Bob's instance: has different episodes on the same topic
+        let c2 = client.clone();
+        let mut sub2 = c2.subscribe("nmem.viablesys.search").await.unwrap();
+        let h2 = tokio::spawn(async move {
+            if let Some(msg) = sub2.next().await {
+                let response = SearchResponse {
+                    responder: "bob".into(),
+                    episodes: vec![EpisodeResult {
+                        id: 200,
+                        session_id: "bob-session".into(),
+                        started_at: 1773400000,
+                        ended_at: Some(1773400500),
+                        intent: "debug LSP connection drops on large repos".into(),
+                        hot_files: vec!["src/s1_lsp.rs".into(), "src/s1_record.rs".into()],
+                        phase_signature: serde_json::json!({
+                            "converge": 20, "diverge": 10,
+                            "failures": 3, "friction": 1,
+                        }),
+                        obs_count: 30,
+                        summary: Some("Found LSP disconnects caused by timeout in tower-lsp".into()),
+                        learned: Some("tower-lsp needs keepalive pings for long sessions".into()),
+                        notes: Some("Tried increasing timeout first — didn't work".into()),
+                    }],
+                    results: vec![],
+                    search_ms: 3,
+                };
+                if let Some(reply) = msg.reply {
+                    c2.publish(reply, serde_json::to_vec(&response).unwrap().into())
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let request = SearchRequest {
+            query: "lsp".into(),
+            project: None,
+            obs_type: None,
+            limit: 20,
+            requester: "charlie".into(),
+        };
+
+        let responses = scatter_gather(
+            &client,
+            "nmem.viablesys.search",
+            serde_json::to_vec(&request).unwrap().into(),
+            Duration::from_secs(2),
+        )
+        .await;
+
+        assert_eq!(responses.len(), 2, "should get responses from both instances");
+
+        // Collect all episodes from both responders
+        let mut all_episodes: Vec<EpisodeResult> = Vec::new();
+        let mut responders = Vec::new();
+        for tm in &responses {
+            let r: SearchResponse = serde_json::from_slice(&tm.message.payload).unwrap();
+            responders.push(r.responder.clone());
+            all_episodes.extend(r.episodes);
+        }
+        responders.sort();
+        assert_eq!(responders, vec!["alice", "bob"]);
+        assert_eq!(all_episodes.len(), 2, "total 2 episodes from fleet");
+
+        // Bob's episode has friction data (failed approaches)
+        let bob_ep = all_episodes.iter().find(|e| e.id == 200).unwrap();
+        assert_eq!(bob_ep.phase_signature["failures"], 3);
+        assert!(bob_ep.notes.is_some(), "bob's episode has failure notes");
+
+        h1.await.unwrap();
+        h2.await.unwrap();
     }
 }
