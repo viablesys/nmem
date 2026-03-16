@@ -24,6 +24,8 @@ pub struct NmemConfig {
     pub summarization: SummarizationConfig,
     #[serde(default)]
     pub lsp: LspConfig,
+    #[serde(default)]
+    pub beacon: BeaconConfig,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -80,6 +82,49 @@ fn default_lsp_extensions() -> Vec<String> {
         .into_iter()
         .map(String::from)
         .collect()
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct BeaconConfig {
+    /// NATS server URL (default: nats://127.0.0.1:4222)
+    #[serde(default = "default_nats_url")]
+    pub nats_url: String,
+    /// GitHub org name — determines subject hierarchy nmem.{org}.search
+    #[serde(default)]
+    pub org: Option<String>,
+    /// Instance identity string for response attribution (default: hostname)
+    #[serde(default)]
+    pub identity: Option<String>,
+    /// Respond to federated search queries (default: true)
+    #[serde(default = "default_true")]
+    pub respond: bool,
+    /// Max results per federated query response (default: 20)
+    #[serde(default = "default_beacon_limit")]
+    pub limit: u32,
+    /// Path to NATS credentials file (NKey seed or JWT)
+    #[serde(default)]
+    pub credentials_file: Option<PathBuf>,
+}
+
+impl Default for BeaconConfig {
+    fn default() -> Self {
+        Self {
+            nats_url: default_nats_url(),
+            org: None,
+            identity: None,
+            respond: true,
+            limit: 20,
+            credentials_file: None,
+        }
+    }
+}
+
+fn default_nats_url() -> String {
+    "nats://127.0.0.1:4222".into()
+}
+
+fn default_beacon_limit() -> u32 {
+    20
 }
 
 fn default_model_path() -> String {

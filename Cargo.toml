@@ -16,7 +16,7 @@ toml = "0.8"
 ureq = { version = "3", features = ["json"] }
 git2 = { version = "0.20", default-features = false }
 regex = "1.11"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "signal"] }
 tower-lsp-server = "0.23"
 opentelemetry = { version = "0.30", features = ["metrics"] }
 opentelemetry_sdk = { version = "0.30", features = ["metrics", "rt-tokio"] }
@@ -24,11 +24,15 @@ opentelemetry-otlp = { version = "0.30", features = ["metrics", "grpc-tonic", "h
 llama-cpp-2 = { version = "=0.1.138", default-features = false }
 hf-hub = "0.5"
 encoding_rs = "0.8"
+async-nats = "0.46"
+bytes = "1"
+futures = "0.3"
 
 [features]
 default = []
 cuda = ["llama-cpp-2/cuda"]
 rocm = ["llama-cpp-2/rocm"]
+beacon = []
 
 [dev-dependencies]
 assert_cmd = "2"

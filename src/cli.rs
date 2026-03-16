@@ -48,6 +48,24 @@ pub enum Command {
     Mark(MarkArgs),
     /// Run LSP server (stdio) — emits git history diagnostics on file open/save
     Lsp,
+    /// Connect to fleet NATS and respond to federated search queries
+    Beacon(BeaconArgs),
+}
+
+#[derive(Parser)]
+pub struct BeaconArgs {
+    /// NATS server URL (overrides config)
+    #[arg(long, env = "NMEM_NATS_URL")]
+    pub nats_url: Option<String>,
+    /// GitHub org name for subject routing (overrides config)
+    #[arg(long, env = "NMEM_ORG")]
+    pub org: Option<String>,
+    /// Instance identity string (default: hostname)
+    #[arg(long)]
+    pub identity: Option<String>,
+    /// Connect and print queries without responding
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Parser)]
