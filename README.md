@@ -239,7 +239,11 @@ nmem backfill            # Classify historical observations
 
 ## Design
 
-nmem is organized around Stafford Beer's [Viable System Model](https://en.wikipedia.org/wiki/Viable_system_model). Every module maps to a VSM system:
+nmem is organized around Stafford Beer's [Viable System Model](https://en.wikipedia.org/wiki/Viable_system_model) at two recursive levels: the **instance** (one developer's machine) and the **fleet** (all instances in an org).
+
+### Instance level — one nmem
+
+Each nmem is a viable system. Every module maps to a VSM system:
 
 | System | Role | Modules |
 |--------|------|---------|
@@ -247,10 +251,28 @@ nmem is organized around Stafford Beer's [Viable System Model](https://en.wikipe
 | **S1's S4** | Session intelligence (VSM recursion) | `s1_4_summarize`, `s1_4_inference` |
 | **S2** Coordination | Classification, dedup | `s2_inference`, `s2_classify`, `s2_scope`, `s2_locus`, `s2_novelty` |
 | **S3** Control | Retention, compaction, integrity | `s3_sweep`, `s3_maintain`, `s3_purge` |
-| **S4** Intelligence | Context, dispatch, episodes, fleet beacon | `s4_context`, `s4_dispatch`, `s4_memory`, `s4_beacon`, `s3_learn` |
+| **S4** Intelligence | Context injection, episodes, cross-session patterns | `s4_context`, `s4_dispatch`, `s4_memory`, `s3_learn` |
 | **S5** Policy | Config, identity, boundaries | `s5_config`, `s5_filter`, `s5_project` |
 
-Storage is encrypted SQLite (SQLCipher) with FTS5 full-text indexes. Session summarization uses an embedded GGUF model via [llama-cpp-2](https://github.com/utilityai/llama-cpp-rs) — the default model auto-downloads from HuggingFace on first use.
+S4 synthesizes *across sessions* within one instance — it detects episodes, generates narratives, and injects prior context so each session builds on the last.
+
+### Fleet level — many nmems
+
+When instances connect via NATS, a second VSM emerges at the fleet level:
+
+| Fleet system | Role | Implementation |
+|-------------|------|----------------|
+| **Fleet S1** | Each instance's operations | Individual nmem instances (the entire instance-level VSM) |
+| **Fleet S2** | Message routing, no state | NATS subject hierarchy (`nmem.{org}.*`) |
+| **Fleet S4** | Cross-instance intelligence | `s4_beacon` — federates queries, synthesizes across machines |
+
+The beacon (`s4_beacon`) is fleet-level S4: it does for the fleet what instance-level S4 does for sessions. Instance S4 asks "what did prior sessions learn about this?" Fleet S4 asks "what did other developers' agents learn about this?" Same function, different scale.
+
+This is VSM recursion — each instance is S1 from the fleet's perspective, containing its own complete S1-S5 internally. The fleet doesn't need its own S3 or S5 because each instance manages its own retention and policy. NATS is pure S2 — coordination without memory.
+
+### Storage
+
+Encrypted SQLite (SQLCipher) with FTS5 full-text indexes. Session summarization uses an embedded GGUF model via [llama-cpp-2](https://github.com/utilityai/llama-cpp-rs) — auto-downloads from HuggingFace on first use.
 
 Architecture docs: [`design/`](design/) — [DESIGN.md](design/DESIGN.md), [VSM.md](design/VSM.md), [ADR/](design/ADR/).
 
