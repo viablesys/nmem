@@ -33,11 +33,15 @@ For organizations running multiple agents across a codebase, the fleet capabilit
 │                           ├── detect episodes                 │
 │                           ├── summarize (embedded GGUF model) │
 │                           └── retention sweep                 │
+└──────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────┐
+│ Fleet (opt-in, per machine)                                   │
 │                                                               │
-│  fleet (opt-in) ─────► nmem beacon                            │
-│                           ├── subscribe to NATS               │
-│                           ├── respond to federated queries    │
-│                           └── heartbeat discovery             │
+│  nmem beacon ────────► subscribe to nmem.{org}.search         │
+│                           ├── receive query from peer         │
+│                           ├── run tiered FTS5 locally         │
+│                           └── respond with episodes           │
 └──────────────────────────────────────────────────────────────┘
 ```
 
