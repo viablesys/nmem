@@ -276,13 +276,91 @@ Encrypted SQLite (SQLCipher) with FTS5 full-text indexes. Session summarization 
 
 Architecture docs: [`design/`](design/) — [DESIGN.md](design/DESIGN.md), [VSM.md](design/VSM.md), [ADR/](design/ADR/).
 
+## Ensemble research and document trust
+
+AI agents generate reference documents, but how much should you trust them? A single agent researching a topic follows one path through the search space, carries its training biases into every claim, and has no mechanism to distinguish confident knowledge from confident hallucination. The result is a document that reads well but may contain errors invisible to both the agent and the reader. Garbage in, garbage out — except the garbage looks authoritative.
+
+nmem addresses this through an ensemble research capability grounded in both empirical AI safety research and classical voting theory.
+
+### The research
+
+Anthropic's ["The Hot Mess of AI"](https://alignment.anthropic.com/2026/hot-mess-of-ai/) (Hägele et al., ICLR 2026) decomposes AI errors into **bias** (systematic, consistent mistakes) and **variance** (incoherent, unpredictable mistakes) using the classical bias-variance framework. Their key findings:
+
+1. **Longer reasoning produces more incoherent errors.** As tasks get harder and reasoning chains grow, failures become increasingly variance-dominated — the "hot mess" rather than coherent pursuit of wrong goals.
+2. **Ensembling reduces incoherence.** Aggregating multiple independent samples reduces the variance component at rate 1/N, without touching bias.
+3. **Scale reduces bias faster than variance.** Larger models learn *what* to do faster than they learn to *reliably* do it — the gap between knowing and consistently executing grows with capability.
+
+The implication: capable AI agents fail less often, but when they fail, those failures are increasingly random and unpredictable. Ensembling is the direct intervention for this failure mode.
+
+### The test
+
+These findings matched what nmem observed in practice. Sessions where the agent produced reference documents showed exactly this pattern — most content correct, but scattered factual errors (version numbers, performance claims, feature availability) that varied across attempts. The errors weren't systematic; they were the "hot mess" the paper describes. Friction episodes in nmem's episodic memory captured this: novel+external work with inconsistent failures across retries.
+
+### The theory
+
+The ensemble benefit has a 240-year-old mathematical foundation. [Condorcet's jury theorem](https://en.wikipedia.org/wiki/Condorcet%27s_jury_theorem) (1785) proves that if N independent voters each have probability p > 0.5 of being correct, majority-vote accuracy approaches 1 as N increases:
+
+```
+ensemble_acc = Σ_{k=⌈N/2⌉}^{N} C(N,k) · p^k · (1-p)^(N-k)
+```
+
+The mapping to the Hot Mess framework is exact:
+- **Bias** = systematic errors shared by all agents — ensembling cannot fix these (all agents wrong the same way)
+- **Variance** = incoherent errors independent across agents — majority voting cancels these out
+
+The corollary is the true "garbage in, garbage out": if individual accuracy p < 0.5, ensembling doesn't merely fail to help — it actively makes things *worse*, converging toward certainty of the wrong answer as N grows. Condorcet's theorem is a double-edged sword. The ensemble only works when the individual agents are better than chance.
+
+### The codified skill
+
+nmem's ensemble research skill operationalizes this into a six-phase workflow:
+
+1. **Spawn** N independent researchers (default 5) with identical prompts — no pre-assigned angles, no shared context
+2. **Collect** outputs independently
+3. **Correlate** — cross-reference claims across all researchers, build agreement distribution tables
+4. **Fact-check** — verify divergences against authoritative sources (package registries, official docs, release notes)
+5. **Synthesize** — convergence-weighted merge: 5/5 agreement = high confidence, 1/5 = flag for verification
+6. **Produce** final document with quality metrics
+
+The identical-prompt constraint is load-bearing. If researchers get different prompts, differences in output reflect prompt differences, not genuine diversity of findings. Independence — each researcher choosing their own path through the search space — is what makes agreement meaningful.
+
+### Quality metrics
+
+Each ensembled document carries computed quality metrics ([ADR-015](design/ADR/ADR-015-Fleet-Beacon.md)):
+
+| Metric | Definition |
+|--------|-----------|
+| **p_hat** | Estimated single-agent accuracy (Condorcet MLE from agreement distribution) |
+| **ensemble_acc** | Majority-vote accuracy computed from p_hat via the binomial formula |
+| **calibration** | 1 - (verified_wrong / verified_total) — how accurate "verified" claims actually are |
+| **q_final** | ensemble_acc × calibration — post-correction confidence |
+
+Observed baselines from production runs:
+
+| Document type | N | p_hat | ensemble_acc | q_final |
+|--------------|---|-------|-------------|---------|
+| Library reference docs | 5 | 0.947 | 99.7% | 0.798 → 0.997 post-correction |
+| Design/architecture | 5 | 1.0 | 1.0 | 1.0 |
+| Infrastructure Q&A | 7 | 1.0 | 1.0 | 1.0 |
+
+The pattern: errors cluster in numerical/factual claims (versions, sizes, speeds), not in architectural or mechanistic reasoning. Design ensembles achieve q_final = 1.0 because the claims are structural — overdetermined by constraints. Research docs hit ~95% single-agent accuracy because they contain numerical facts the model is less certain about. N=5 is sufficient to lift that to 99.7%.
+
+### Honest limitations
+
+The ensemble research skill was itself verified by ensemble — five independent researchers validated the claim chain from the Hot Mess paper through Condorcet to the quality metrics. All seven core claims achieved 5/5 agreement. But those same researchers unanimously identified the key weakness: **independence**.
+
+Same-architecture LLM agents with identical prompts are not independent in the Condorcet sense. They share training data, architectural biases, and prompt-induced correlations. Empirical work confirms this: studies on LLM ensemble sentiment analysis ([arXiv:2409.00094](https://arxiv.org/abs/2409.00094)) found only marginal improvements from majority voting because models make correlated errors. "Consensus is Not Verification" ([arXiv:2603.06612](https://arxiv.org/abs/2603.06612)) showed that no aggregation strategy consistently beats single-sample baselines when agents share systematic biases.
+
+This means p_hat estimated from agreement is an **upper bound**, not a direct measurement of accuracy. When all five researchers agree on a wrong fact (because it's wrong in their shared training data), agreement is high but accuracy is zero. The correlation and fact-checking phases exist precisely to catch this failure mode — they are not optional polish but the mechanism that converts unreliable consensus into verified accuracy.
+
+The quality metrics are transparent about this: q_final decomposes into ensemble_acc (theoretical, assumes independence) × calibration (empirical, measures how often "verified" claims survived fact-checking). The calibration term is where reality corrects theory.
+
 ## Roadmap
 
-**Implemented:** Session continuity, 5-dimension classification, episodic memory, direct inference (embedded GGUF), git/LSP integration, fleet beacon (NATS query federation), tiered FTS5 rewriting, adaptive timeouts (Jacobson/Karels).
+**Implemented:** Session continuity, 5-dimension classification, episodic memory, direct inference (embedded GGUF), git/LSP integration, fleet beacon (NATS query federation), tiered FTS5 rewriting, adaptive timeouts (Jacobson/Karels), ensemble research skill with Condorcet quality metrics.
 
 **In progress:** Fleet heartbeat coordinator, scatter/gather from MCP server, GitHub org SSO for fleet auth.
 
-**Designed (ADR):** RAG distribution across fleet, ensemble research coordination, TruffleHog secret patterns, autonomous mid-session context injection.
+**Designed (ADR):** RAG distribution across fleet, fleet-distributed ensemble research, TruffleHog secret patterns, autonomous mid-session context injection.
 
 ## License
 
