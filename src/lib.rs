@@ -34,10 +34,11 @@ pub mod s3_maintain;
 pub mod s3_purge;
 pub mod s3_sweep;
 
-// S4 Intelligence — context injection, task dispatch, cross-session patterns, episodic memory, fleet beacon
+// S4 Intelligence — context injection, task dispatch, cross-session patterns, episodic memory, fleet beacon, repo map
 pub mod s4_beacon;
 pub mod s4_context;
 pub mod s4_dispatch;
+pub mod s4_map;
 pub mod s4_memory;
 
 // S5 Policy — config, boundaries, identity

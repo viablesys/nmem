@@ -50,6 +50,8 @@ pub enum Command {
     Lsp,
     /// Connect to fleet NATS and respond to federated search queries
     Beacon(BeaconArgs),
+    /// Generate VSM-shaped repository map
+    Map(MapArgs),
 }
 
 #[derive(Parser)]
@@ -261,6 +263,21 @@ pub struct TaskArgs {
     /// Show output only (for piping)
     #[arg(long)]
     pub output: bool,
+}
+
+#[derive(Parser)]
+pub struct MapArgs {
+    /// Source directory to scan (default: src/)
+    #[arg(long, default_value = "src")]
+    pub src: PathBuf,
+
+    /// Project name (defaults to cwd-derived)
+    #[arg(long)]
+    pub project: Option<String>,
+
+    /// Output directory (default: ~/.nmem/maps/<project>/)
+    #[arg(long)]
+    pub output: Option<PathBuf>,
 }
 
 #[derive(Parser)]

@@ -570,6 +570,14 @@ pub fn generate_context(conn: &Connection, project: &str, local_limit: i64, cros
         out.push('\n');
     }
 
+    // Repo map — scan current project's src/ for structural context
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let src_dir = cwd.join("src");
+    if let Some(map_ctx) = crate::s4_map::generate_map_context(&src_dir) {
+        out.push_str(&map_ctx);
+        out.push('\n');
+    }
+
     let activity = format_activity(&local_rows, &format!("## {project}"));
     if !activity.is_empty() {
         out.push_str(&activity);
