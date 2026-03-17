@@ -284,7 +284,7 @@ nmem addresses this through an ensemble research capability grounded in both emp
 
 ### The research
 
-Anthropic's ["The Hot Mess of AI"](https://alignment.anthropic.com/2026/hot-mess-of-ai/) (Hägele et al., ICLR 2026) decomposes AI errors into **bias** (systematic, consistent mistakes) and **variance** (incoherent, unpredictable mistakes) using the classical bias-variance framework. Their key findings:
+Anthropic's ["The Hot Mess of AI"](https://alignment.anthropic.com/2026/hot-mess-of-ai/) (Hägele et al., ICLR 2026; [arXiv:2601.23045](https://arxiv.org/abs/2601.23045)) decomposes AI errors into **bias** (systematic, consistent mistakes) and **variance** (incoherent, unpredictable mistakes) using the classical bias-variance framework. Their key findings:
 
 1. **Longer reasoning produces more incoherent errors.** As tasks get harder and reasoning chains grow, failures become increasingly variance-dominated — the "hot mess" rather than coherent pursuit of wrong goals.
 2. **Ensembling reduces incoherence.** Aggregating multiple independent samples reduces the variance component at rate 1/N, without touching bias.
