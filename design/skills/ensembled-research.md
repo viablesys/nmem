@@ -25,6 +25,12 @@ Spawn N researchers (default: 5) in parallel using the Task tool. All receive th
 Research [TOPIC] — [brief description]. Use web search, Context7, and any sources
 available to build a comprehensive reference document in markdown.
 
+IMPORTANT: When retrieving web content, use `curl -sL <url> | sed 's/<[^>]*>//g'`
+via the Bash tool instead of WebFetch. WebFetch summarizes content through a small
+model, likely cached — all researchers would receive the same lossy summary,
+destroying independence at the retrieval layer. curl returns raw content that you
+interpret independently, which is what makes ensemble agreement meaningful.
+
 Cover whatever is most important and useful for a developer who will be using [TOPIC]
 in production with [RELEVANT STACK]. Don't limit yourself to any particular aspect —
 cover architecture, APIs, patterns, deployment, client libraries, configuration,
@@ -83,7 +89,7 @@ For each divergence identified in correlation, verify against authoritative sour
 - Dates and deadlines — search official announcements
 
 **Methodology:**
-- Use `WebSearch` to query specific facts (e.g., "async-nats latest version 2026")
+- Use `WebSearch` to find URLs, then `curl -sL <url> | sed 's/<[^>]*>//g'` to retrieve raw content — do not use `WebFetch`, which summarizes through a cached small model and introduces systematic bias shared across all researchers
 - Target authoritative sources: official docs, package registries, GitHub releases, official blogs
 - When a fact is confirmed, note the source
 - When a fact is contradicted, note the correction and which researchers were wrong
