@@ -352,7 +352,7 @@ Same-architecture LLM agents with identical prompts are not independent in the C
 
 This means p_hat estimated from agreement is an **upper bound**, not a direct measurement of accuracy. When all five researchers agree on a wrong fact (because it's wrong in their shared training data), agreement is high but accuracy is zero. The correlation and fact-checking phases exist precisely to catch this failure mode — they are not optional polish but the mechanism that converts unreliable consensus into verified accuracy.
 
-The quality metrics are transparent about this: q_final decomposes into ensemble_acc (theoretical, assumes independence) × calibration (empirical, measures how often "verified" claims survived fact-checking). The calibration term is where reality corrects theory.
+The theoretical fix is diverse model families — running researchers across Claude, GPT, Gemini — so errors are genuinely uncorrelated. In practice, nmem runs on Claude Code's subscription infrastructure, which means all N agents share one model family. This is an accepted trade-off: fixed-cost subscriptions make ensembling economically viable, but constrain all researchers to the same training distribution. The fact-checking phase compensates — it is the only step that introduces signal from outside the model, via web search against authoritative sources. The quality metrics are transparent about the gap: q_final decomposes into ensemble_acc (theoretical, assumes independence) × calibration (empirical, measures how often the fact-checking phase actually corrected the ensemble). The calibration term is where reality corrects theory.
 
 ## Roadmap
 
