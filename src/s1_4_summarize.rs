@@ -77,8 +77,8 @@ where
 /// Gather prompts and observations for the session into a text payload.
 /// Returns None if fewer than 3 observations exist.
 ///
-/// No truncation — all prompts, all observations, full content.
-/// With n_ctx=32768 this covers 98% of sessions untruncated.
+/// User prompts are untruncated (drive intent inference).
+/// Thinking blocks, observations, and content are truncated to fit context.
 pub fn gather_session_payload(conn: &Connection, session_id: &str) -> Result<Option<String>, NmemError> {
     let obs_count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM observations WHERE session_id = ?1",
@@ -92,7 +92,7 @@ pub fn gather_session_payload(conn: &Connection, session_id: &str) -> Result<Opt
 
     let mut out = String::new();
 
-    // Gather all user prompts (chronological, full content)
+    // Gather user prompts (chronological, untruncated — drives intent inference)
     let mut prompt_stmt = conn.prepare(
         "SELECT content FROM prompts
          WHERE session_id = ?1 AND source = 'user'
@@ -110,11 +110,11 @@ pub fn gather_session_payload(conn: &Connection, session_id: &str) -> Result<Opt
         out.push('\n');
     }
 
-    // Gather all thinking blocks (chronological, full content)
+    // Gather thinking blocks (up to 5, chronological, truncated)
     let mut thinking_stmt = conn.prepare(
         "SELECT content FROM prompts
          WHERE session_id = ?1 AND source = 'agent'
-         ORDER BY timestamp ASC",
+         ORDER BY timestamp ASC LIMIT 5",
     )?;
     let thinking: Vec<String> = thinking_stmt
         .query_map(params![session_id], |r| r.get(0))?
@@ -123,17 +123,18 @@ pub fn gather_session_payload(conn: &Connection, session_id: &str) -> Result<Opt
     if !thinking.is_empty() {
         out.push_str("Agent reasoning:\n");
         for t in &thinking {
-            out.push_str(&format!("- {t}\n"));
+            let truncated: String = t.chars().take(200).collect();
+            out.push_str(&format!("- {truncated}\n"));
         }
         out.push('\n');
     }
 
-    // Gather all observations (chronological, full content)
+    // Gather observations (most recent 50, chronological)
     let mut obs_stmt = conn.prepare(
         "SELECT obs_type, file_path, content, phase, scope, locus, novelty, metadata
          FROM observations
          WHERE session_id = ?1
-         ORDER BY timestamp ASC",
+         ORDER BY timestamp ASC LIMIT 50",
     )?;
 
     out.push_str("Actions:\n");
@@ -161,8 +162,7 @@ pub fn gather_session_payload(conn: &Connection, session_id: &str) -> Result<Opt
 }
 
 /// Format a single observation action line for LLM payloads.
-/// Includes classifier stance labels and full failure metadata when present.
-/// No truncation — full content and full error responses.
+/// Includes classifier stance labels and failure metadata when present.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn format_action_line(
     obs_type: &str,
@@ -182,15 +182,17 @@ pub(crate) fn format_action_line(
     if let Some(n) = novelty { tag_parts.push(n); }
     let tag = tag_parts.join("|");
 
-    // Base display: [tag] file_path - content (full, no truncation)
+    // Base display: [tag] file_path - content_preview
     let base = if let Some(fp) = file_path {
-        if content.is_empty() {
+        let preview: String = content.chars().take(60).collect();
+        if preview.is_empty() {
             format!("[{tag}] {fp}")
         } else {
-            format!("[{tag}] {fp} - {content}")
+            format!("[{tag}] {fp} - {preview}")
         }
     } else {
-        format!("[{tag}] {content}")
+        let preview: String = content.chars().take(80).collect();
+        format!("[{tag}] {preview}")
     };
 
     // Append full failure info if present
@@ -198,13 +200,14 @@ pub(crate) fn format_action_line(
         && let Ok(meta) = serde_json::from_str::<serde_json::Value>(ms)
         && meta.get("failed").and_then(|v| v.as_bool()).unwrap_or(false)
     {
-        let error_text = meta.get("response")
+        let error_preview = meta.get("response")
             .and_then(|v| v.as_str())
+            .map(|s| s.chars().take(120).collect::<String>())
             .unwrap_or_default();
-        if error_text.is_empty() {
+        if error_preview.is_empty() {
             return format!("{base} FAILED");
         }
-        return format!("{base} FAILED: {error_text}");
+        return format!("{base} FAILED: {error_preview}");
     }
 
     base
@@ -266,8 +269,8 @@ pub fn summarize_session_with_engine(
         params![summary_json, result.total_ms as i64, session_id],
     )?;
 
-    eprintln!(
-        "nmem: session summarized ({}ms, {} prompt tokens, {} generated tokens)",
+    log::info!(
+        "session summarized ({}ms, {} prompt tokens, {} generated)",
         result.total_ms, result.prompt_tokens, result.generated_tokens
     );
 
