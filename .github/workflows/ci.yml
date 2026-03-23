@@ -70,9 +70,11 @@ jobs:
       - name: Install build deps (container)
         if: matrix.container
         run: |
-          apt-get update && apt-get install -y curl cmake build-essential pkg-config libssl-dev
+          apt-get update && apt-get install -y curl cmake build-essential pkg-config libssl-dev libclang-dev
+          export HOME=/root
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "/root/.cargo/bin" >> "$GITHUB_PATH"
+          echo "CARGO_HOME=/root/.cargo" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
         if: ${{ !matrix.container }}
@@ -80,12 +82,20 @@ jobs:
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
+        if: ${{ !matrix.container }}
         with:
           key: ${{ matrix.artifact }}
 
       - name: Install cmake (Linux, no container)
         if: runner.os == 'Linux' && !matrix.container
         run: sudo apt-get update && sudo apt-get install -y cmake
+
+      - name: Install OpenSSL (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          vcpkg install openssl:x64-windows-static-md
+          echo "OPENSSL_DIR=C:\vcpkg\packages\openssl_x64-windows-static-md" >> $env:GITHUB_ENV
+          echo "OPENSSL_STATIC=1" >> $env:GITHUB_ENV
 
       - name: Build release
         run: cargo build --release --target ${{ matrix.target }} ${{ matrix.features && format('--features {0}', matrix.features) }}
