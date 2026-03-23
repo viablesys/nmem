@@ -100,7 +100,15 @@ jobs:
           echo "OPENSSL_DIR=C:\vcpkg\packages\openssl_x64-windows-static-md" >> $env:GITHUB_ENV
           echo "OPENSSL_STATIC=1" >> $env:GITHUB_ENV
 
+      - name: Configure ROCm linker
+        if: matrix.features == 'rocm'
+        run: |
+          mkdir -p .cargo
+          printf '[target.x86_64-unknown-linux-gnu]\nlinker = "gcc"\n' > .cargo/config.toml
+
       - name: Build release
+        env:
+          CMAKE_POSITION_INDEPENDENT_CODE: ${{ (matrix.features == 'rocm' && 'ON') || '' }}
         run: cargo build --release --target ${{ matrix.target }} ${{ matrix.features && format('--features {0}', matrix.features) }}
 
       - name: Rename binary (Unix)
