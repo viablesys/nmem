@@ -357,7 +357,7 @@ pub fn handle_map(args: &MapArgs) -> Result<(), NmemError> {
     for path in &rs_files {
         match scan_rust_file(path, &cwd) {
             Ok(scan) => scans.push(scan),
-            Err(e) => eprintln!("nmem: skipping {}: {e}", path.display()),
+            Err(e) => log::warn!("skipping {}: {e}", path.display()),
         }
     }
     scans.sort_by(|a, b| a.name.cmp(&b.name));
@@ -562,8 +562,8 @@ pub fn handle_map(args: &MapArgs) -> Result<(), NmemError> {
         .map_err(|e| NmemError::Config(format!("toml serialize: {e}")))?;
     fs::write(out_dir.join("_intelligence.toml"), &intel_toml)?;
 
-    eprintln!(
-        "nmem: mapped {} modules ({} lines, {} edges) → {}",
+    log::info!(
+        "mapped {} modules ({} lines, {} edges) → {}",
         scans.len(),
         total_lines,
         total_edges,

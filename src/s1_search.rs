@@ -34,7 +34,7 @@ pub fn handle_search(db_path: &Path, args: &SearchArgs) -> Result<(), NmemError>
         Some(q) => q,
         None => {
             println!("[]");
-            eprintln!("nmem: 0 results");
+            log::info!("0 results");
             return Ok(());
         }
     };
@@ -208,7 +208,7 @@ fn print_index(
 
     let json = serde_json::to_string(&results)?;
     println!("{json}");
-    eprintln!("nmem: {} results for {:?}", results.len(), query);
+    log::info!("{} results for {:?}", results.len(), query);
     Ok(())
 }
 
@@ -260,7 +260,7 @@ fn print_full(
 
     let json = serde_json::to_string(&results)?;
     println!("{json}");
-    eprintln!("nmem: {} results for {:?}", results.len(), query);
+    log::info!("{} results for {:?}", results.len(), query);
     Ok(())
 }
 
@@ -297,6 +297,6 @@ fn print_ids(
     for id in &ids {
         println!("{id}");
     }
-    eprintln!("nmem: {} results for {:?}", ids.len(), query);
+    log::info!("{} results for {:?}", ids.len(), query);
     Ok(())
 }

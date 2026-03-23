@@ -117,6 +117,7 @@ impl LanguageServer for NmemLsp {
                 name: "nmem".into(),
                 version: Some(env!("CARGO_PKG_VERSION").into()),
             }),
+            ..Default::default()
         })
     }
 
@@ -243,9 +244,9 @@ pub fn handle_lsp(_db_path: &Path) -> std::result::Result<(), NmemError> {
             blame_cache: Mutex::new(HashMap::new()),
         });
 
-        eprintln!("nmem: lsp starting");
+        log::info!("lsp starting");
         Server::new(stdin, stdout, socket).serve(service).await;
-        eprintln!("nmem: lsp stopped");
+        log::info!("lsp stopped");
 
         Ok(())
     })

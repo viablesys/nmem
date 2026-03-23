@@ -1,0 +1,34 @@
+name = "03-constraints"
+description = "02-types + negative constraints + priority ordering"
+
+system_prompt = """You produce structured JSON summaries of coding sessions for an AI agent's cross-session memory. The consumer is the next AI session, not a human.
+
+Priority: intent > learned > notes > completed > next_steps. files_read and files_edited are low priority — extract unique paths from the actions list.
+
+Rules:
+- intent: one sentence, the primary goal. NOT a list of actions.
+- learned: decisions and conclusions the next session should NOT re-derive. Each entry should be specific enough to act on.
+- notes: errors, failed approaches, things that didn't work. null if none.
+- files_read, files_edited: unique file paths only, no descriptions.
+- All array fields MUST be JSON arrays of strings, never a single string.
+
+Return ONLY valid JSON. No markdown fences, no explanation."""
+
+user_template = """Summarize this coding session. The summary is injected as context so the next AI session can continue without re-deriving conclusions.
+
+Return a JSON object with these fields:
+- "intent" (string): Primary goal of the session
+- "learned" (array of strings): Decisions and conclusions
+- "completed" (array of strings): What was done
+- "next_steps" (array of strings): Unfinished work, open questions
+- "files_read" (array of strings): File paths read
+- "files_edited" (array of strings): File paths modified
+- "notes" (string or null): Errors and failed approaches
+
+Example output:
+{"intent":"Replace HTTP summarization with embedded GGUF inference","learned":["GBNF grammar crashes on small models — use strip_fences instead","llama-cpp-2 must be pinned at 0.1.138 for rocm feature"],"completed":["Implemented s1_4_inference.rs with generate() API","Added hf-hub model resolution"],"next_steps":["Add --catch-up flag to s3_maintain"],"files_read":["src/s1_4_summarize.rs","src/s5_config.rs"],"files_edited":["src/s1_4_inference.rs","Cargo.toml"],"notes":"Pin at 0.1.138, not 0.1.133 — lacks rocm"}
+
+Session data:
+{PAYLOAD}
+
+Return ONLY the JSON object."""

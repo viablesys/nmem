@@ -320,7 +320,7 @@ pub fn handle_encrypt(db_path: &Path) -> Result<(), NmemError> {
     }
 
     if is_db_encrypted(db_path) {
-        eprintln!("nmem: database is already encrypted");
+        log::info!("database is already encrypted");
         return Ok(());
     }
 
@@ -335,7 +335,7 @@ pub fn handle_encrypt(db_path: &Path) -> Result<(), NmemError> {
         [],
         |r| r.get(0),
     )?;
-    eprintln!("nmem: encryption verified ({count} tables/indexes accessible)");
+    log::info!("encryption verified ({count} tables/indexes accessible)");
 
     Ok(())
 }

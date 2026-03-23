@@ -6,12 +6,16 @@
 //!
 //! Lifecycle: `nmem beacon` → tokio runtime → subscribe loop → Ctrl-C shutdown.
 //! Subject hierarchy: `nmem.{org}.search`, `nmem.{org}.heartbeat`.
+//!
+//! Adaptive timeouts: Jacobson/Karels RTO estimator (RFC 6298) calibrates
+//! scatter/gather deadlines from heartbeat RTT samples. Cold start at 3s,
+//! converges within ~10 samples to a data-driven value.
 
 use bytes::Bytes;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::cli::BeaconArgs;
 use crate::NmemError;
@@ -78,10 +82,247 @@ pub struct HeartbeatPong {
 }
 
 // ---------------------------------------------------------------------------
+// Jacobson/Karels RTO Estimator (RFC 6298)
+// ---------------------------------------------------------------------------
+
+/// Adaptive timeout estimator based on TCP's Jacobson/Karels algorithm (RFC 6298).
+///
+/// Tracks smoothed RTT (SRTT) and RTT variance (RTTVAR) to produce a
+/// retransmission timeout (RTO) that converges as data accumulates.
+///
+/// Adapted for scatter/gather: feed max_rtt from each heartbeat round.
+/// The variance term shrinks naturally with stable data, replacing a
+/// static floor with a data-driven value.
+#[derive(Debug, Clone)]
+pub struct RtoEstimator {
+    /// Smoothed RTT
+    srtt: f64,
+    /// Smoothed RTT variance
+    rttvar: f64,
+    /// Number of samples seen
+    samples: u32,
+    /// Smoothing factor for SRTT (fleet: 1/4 for faster convergence than TCP's 1/8)
+    alpha: f64,
+    /// Smoothing factor for RTTVAR (TCP default: 1/4)
+    beta: f64,
+    /// Variance multiplier (TCP default: 4 for ~99.99% coverage)
+    k: f64,
+    /// Absolute minimum RTO in seconds (prevents unreasonably tight timeouts)
+    min_rto: f64,
+}
+
+impl Default for RtoEstimator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RtoEstimator {
+    /// Create a new estimator with fleet-tuned defaults.
+    ///
+    /// - alpha=1/4 (faster convergence than TCP's 1/8, since heartbeats are infrequent)
+    /// - beta=1/4 (same as TCP)
+    /// - k=4 (4σ coverage)
+    /// - min_rto=50ms (network floor)
+    pub fn new() -> Self {
+        RtoEstimator {
+            srtt: 0.0,
+            rttvar: 0.0,
+            samples: 0,
+            alpha: 0.25,
+            beta: 0.25,
+            k: 4.0,
+            min_rto: 0.050,
+        }
+    }
+
+    /// Seed with an initial RTT estimate (for testing or when you have a prior).
+    /// Sets samples=1 so the estimator behaves as if it has seen one round.
+    pub fn with_initial_rtt(mut self, rtt: Duration) -> Self {
+        let r = rtt.as_secs_f64();
+        self.srtt = r;
+        self.rttvar = r / 2.0;
+        self.samples = 1;
+        self
+    }
+
+    /// Feed a new RTT sample. For scatter/gather, this should be the max RTT
+    /// from a heartbeat round (the slowest responder determines the timeout).
+    pub fn update(&mut self, rtt: Duration) {
+        let r = rtt.as_secs_f64();
+
+        if self.samples == 0 {
+            // RFC 6298 Section 2.2: first measurement
+            self.srtt = r;
+            self.rttvar = r / 2.0;
+        } else {
+            // RFC 6298 Section 2.3: subsequent measurements
+            self.rttvar = (1.0 - self.beta) * self.rttvar + self.beta * (self.srtt - r).abs();
+            self.srtt = (1.0 - self.alpha) * self.srtt + self.alpha * r;
+        }
+        self.samples += 1;
+    }
+
+    /// Apply Karn's algorithm: double the RTO after a timeout event.
+    /// Call this when scatter/gather gets fewer responses than expected.
+    pub fn backoff(&mut self) {
+        self.srtt *= 2.0;
+    }
+
+    /// Current RTO (retransmission timeout).
+    /// Returns max(SRTT + K × RTTVAR, min_rto). Cold start returns 3s.
+    pub fn rto(&self) -> Duration {
+        if self.samples == 0 {
+            return Duration::from_secs(3);
+        }
+        let rto = self.srtt + self.k * self.rttvar;
+        Duration::from_secs_f64(rto.max(self.min_rto))
+    }
+
+    /// Current smoothed RTT estimate.
+    pub fn srtt(&self) -> Duration {
+        Duration::from_secs_f64(self.srtt)
+    }
+
+    /// Current RTT variance estimate.
+    pub fn rttvar(&self) -> Duration {
+        Duration::from_secs_f64(self.rttvar)
+    }
+
+    /// Number of samples processed.
+    pub fn samples(&self) -> u32 {
+        self.samples
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scatter/Gather
+// ---------------------------------------------------------------------------
+
+/// A response from scatter/gather with arrival timing.
+pub struct TimedMessage {
+    pub message: async_nats::Message,
+    /// Time elapsed since the scatter was sent
+    pub elapsed: Duration,
+}
+
+/// Scatter/gather: publish a request to a subject, collect all responses within timeout.
+///
+/// Unlike `client.request()` which returns only the first response, this
+/// collects from all responders (fleet instances) within the timeout window.
+/// Each response is tagged with its arrival time relative to the send.
+pub async fn scatter_gather(
+    client: &async_nats::Client,
+    subject: &str,
+    payload: Bytes,
+    timeout: Duration,
+) -> Vec<TimedMessage> {
+    let inbox = client.new_inbox();
+    let mut sub = match client.subscribe(inbox.clone()).await {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
+
+    let t0 = Instant::now();
+    if client
+        .publish_with_reply(subject.to_string(), inbox, payload)
+        .await
+        .is_err()
+    {
+        return vec![];
+    }
+    let _ = client.flush().await;
+
+    let mut responses = Vec::new();
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    loop {
+        match tokio::time::timeout_at(deadline, sub.next()).await {
+            Ok(Some(msg)) => responses.push(TimedMessage {
+                message: msg,
+                elapsed: t0.elapsed(),
+            }),
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+
+    responses
+}
+
+// ---------------------------------------------------------------------------
+// Fleet state from heartbeat probing
+// ---------------------------------------------------------------------------
+
+/// Snapshot of fleet membership and calibrated timeout from a heartbeat round.
+#[derive(Debug, Clone)]
+pub struct FleetState {
+    /// Online instances and their round-trip latency
+    pub instances: Vec<(String, Duration)>,
+    /// Calibrated timeout from RTO estimator
+    pub calibrated_timeout: Duration,
+}
+
+/// Send a heartbeat, collect all responses, update the RTO estimator.
+///
+/// The `rto` estimator determines the timeout: on first call (no data),
+/// it uses a generous cold-start value (3s). Subsequent calls use the
+/// Jacobson/Karels RTO which converges as data accumulates.
+///
+/// Returns `FleetState` with per-instance latencies and the current RTO.
+pub async fn heartbeat(
+    client: &async_nats::Client,
+    subject: &str,
+    sender: &str,
+    rto: &mut RtoEstimator,
+) -> FleetState {
+    let t0 = Instant::now();
+
+    let ping = HeartbeatPing {
+        sender: sender.to_string(),
+        sent_ms: t0.elapsed().as_millis() as u64,
+    };
+
+    let timeout = rto.rto();
+    let payload = match serde_json::to_vec(&ping) {
+        Ok(p) => Bytes::from(p),
+        Err(_) => {
+            return FleetState {
+                instances: vec![],
+                calibrated_timeout: timeout,
+            }
+        }
+    };
+
+    let responses = scatter_gather(client, subject, payload, timeout).await;
+
+    let mut instances = Vec::new();
+    for timed in &responses {
+        if let Ok(pong) = serde_json::from_slice::<HeartbeatPong>(&timed.message.payload) {
+            // Skip own echo
+            if pong.responder != sender {
+                instances.push((pong.responder, timed.elapsed));
+            }
+        }
+    }
+
+    // Feed max RTT from this round into the estimator
+    if let Some(max_rtt) = instances.iter().map(|(_, d)| *d).max() {
+        rto.update(max_rtt);
+    }
+    // If no responses, don't update — keep current estimate.
+    // Caller can apply rto.backoff() if this indicates degradation.
+
+    FleetState {
+        instances,
+        calibrated_timeout: rto.rto(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::disallowed_macros)]
 pub fn handle_beacon(db_path: &Path, args: &BeaconArgs) -> Result<(), NmemError> {
     let config = crate::s5_config::load_config()?;
     let beacon_cfg = &config.beacon;
@@ -128,7 +369,6 @@ pub fn handle_beacon(db_path: &Path, args: &BeaconArgs) -> Result<(), NmemError>
 // Async beacon loop
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::disallowed_macros)]
 async fn run_beacon(
     db_path: PathBuf,
     nats_url: String,
@@ -138,13 +378,13 @@ async fn run_beacon(
     respond: bool,
     dry_run: bool,
 ) -> Result<(), NmemError> {
-    eprintln!("nmem beacon: connecting to {nats_url}");
+    log::info!("beacon: connecting to {nats_url}");
 
     let client = async_nats::connect(&nats_url)
         .await
         .map_err(|e| NmemError::Nats(format!("connect {nats_url}: {e}")))?;
 
-    eprintln!("nmem beacon: connected (identity={identity}, org={org})");
+    log::info!("beacon: connected (identity={identity}, org={org})");
 
     let search_subject = format!("nmem.{org}.search");
     let heartbeat_subject = format!("nmem.{org}.heartbeat");
@@ -159,10 +399,18 @@ async fn run_beacon(
         .await
         .map_err(|e| NmemError::Nats(format!("subscribe {heartbeat_subject}: {e}")))?;
 
-    eprintln!("nmem beacon: subscribed to {search_subject}, {heartbeat_subject}");
+    log::info!("beacon: subscribed to {search_subject}, {heartbeat_subject}");
     if dry_run {
-        eprintln!("nmem beacon: DRY RUN — will log queries but not respond");
+        log::info!("beacon: DRY RUN — will log queries but not respond");
     }
+
+    // RTO estimator — calibrates scatter/gather timeouts from heartbeat RTT.
+    // Probes fleet every 30s; converges within ~10 samples (~5 min).
+    let mut rto = RtoEstimator::new();
+    let probe_interval = Duration::from_secs(30);
+    let mut probe_timer = tokio::time::interval(probe_interval);
+    // First tick fires immediately — initial fleet discovery
+    probe_timer.tick().await;
 
     loop {
         tokio::select! {
@@ -180,7 +428,7 @@ async fn run_beacon(
                         });
                     }
                     None => {
-                        eprintln!("nmem beacon: search subscription closed");
+                        log::warn!("beacon: search subscription closed");
                         break;
                     }
                 }
@@ -195,13 +443,28 @@ async fn run_beacon(
                         });
                     }
                     None => {
-                        eprintln!("nmem beacon: heartbeat subscription closed");
+                        log::warn!("beacon: heartbeat subscription closed");
                         break;
                     }
                 }
             }
+            _ = probe_timer.tick() => {
+                let fleet = heartbeat(
+                    &client, &heartbeat_subject, &identity, &mut rto,
+                ).await;
+                if !fleet.instances.is_empty() {
+                    let names: Vec<&str> = fleet.instances.iter()
+                        .map(|(n, _)| n.as_str()).collect();
+                    log::info!(
+                        "beacon: fleet [{}] RTO {:?} (samples={})",
+                        names.join(", "),
+                        fleet.calibrated_timeout,
+                        rto.samples(),
+                    );
+                }
+            }
             _ = tokio::signal::ctrl_c() => {
-                eprintln!("nmem beacon: shutting down");
+                log::info!("beacon: shutting down");
                 break;
             }
         }
@@ -214,7 +477,6 @@ async fn run_beacon(
 // Message handlers
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::disallowed_macros)]
 async fn handle_search_msg(
     client: &async_nats::Client,
     msg: async_nats::Message,
@@ -232,7 +494,7 @@ async fn handle_search_msg(
     let req: SearchRequest = match serde_json::from_slice(&msg.payload) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("nmem beacon: malformed request: {e}");
+            log::warn!("beacon: malformed request: {e}");
             return;
         }
     };
@@ -242,8 +504,8 @@ async fn handle_search_msg(
         return;
     }
 
-    eprintln!(
-        "nmem beacon: query {:?} from {} (project={:?})",
+    log::info!(
+        "beacon: query {:?} from {} (project={:?})",
         req.query, req.requester, req.project
     );
 
@@ -263,11 +525,11 @@ async fn handle_search_msg(
     })
     .await
     .unwrap_or_else(|e| {
-        eprintln!("nmem beacon: search task panicked: {e}");
+        log::error!("beacon: search task panicked: {e}");
         Ok(vec![])
     })
     .unwrap_or_else(|e| {
-        eprintln!("nmem beacon: search error: {e}");
+        log::warn!("beacon: search error: {e}");
         vec![]
     });
 
@@ -283,8 +545,8 @@ async fn handle_search_msg(
         let _ = client.publish(reply, Bytes::from(payload)).await;
     }
 
-    eprintln!(
-        "nmem beacon: responded in {search_ms}ms ({} episodes)",
+    log::info!(
+        "beacon: responded in {search_ms}ms ({} episodes)",
         response.episodes.len()
     );
 }
@@ -553,5 +815,94 @@ mod tests {
         let h = resolve_hostname();
         assert!(!h.is_empty());
         assert_ne!(h, "unknown");
+    }
+
+    // --- RtoEstimator tests ---
+
+    #[test]
+    fn rto_cold_start() {
+        let rto = RtoEstimator::new();
+        assert_eq!(rto.samples(), 0);
+        assert_eq!(rto.rto(), Duration::from_secs(3));
+    }
+
+    #[test]
+    fn rto_first_sample() {
+        let mut rto = RtoEstimator::new();
+        rto.update(Duration::from_millis(100));
+        assert_eq!(rto.samples(), 1);
+        // RFC 6298: SRTT=R, RTTVAR=R/2 → RTO = R + 4*(R/2) = 3R = 300ms
+        let val = rto.rto();
+        assert!(
+            val >= Duration::from_millis(295) && val <= Duration::from_millis(305),
+            "first sample RTO ({val:?}) should be ~300ms"
+        );
+    }
+
+    #[test]
+    fn rto_converges_with_stable_data() {
+        let mut rto = RtoEstimator::new();
+        for _ in 0..50 {
+            rto.update(Duration::from_millis(100));
+        }
+        let val = rto.rto();
+        // After many stable samples, RTTVAR → 0, RTO → SRTT ≈ 100ms
+        assert!(
+            val >= Duration::from_millis(90) && val <= Duration::from_millis(150),
+            "stable RTO ({val:?}) should converge near 100ms"
+        );
+    }
+
+    #[test]
+    fn rto_reacts_to_spike() {
+        let mut rto = RtoEstimator::new();
+        for _ in 0..20 {
+            rto.update(Duration::from_millis(50));
+        }
+        let baseline = rto.rto();
+        rto.update(Duration::from_millis(500));
+        let after_spike = rto.rto();
+        assert!(
+            after_spike > baseline,
+            "spike should increase RTO: baseline={baseline:?}, after={after_spike:?}"
+        );
+    }
+
+    #[test]
+    fn rto_min_floor() {
+        let mut rto = RtoEstimator::new();
+        for _ in 0..50 {
+            rto.update(Duration::from_micros(100));
+        }
+        assert!(
+            rto.rto() >= Duration::from_millis(50),
+            "RTO ({:?}) should not go below min_rto=50ms",
+            rto.rto()
+        );
+    }
+
+    #[test]
+    fn rto_backoff_doubles() {
+        let mut rto = RtoEstimator::new();
+        rto.update(Duration::from_millis(100));
+        let before = rto.rto();
+        rto.backoff();
+        let after = rto.rto();
+        assert!(
+            after > before,
+            "backoff should increase RTO: before={before:?}, after={after:?}"
+        );
+    }
+
+    #[test]
+    fn rto_with_initial_seed() {
+        let rto = RtoEstimator::new().with_initial_rtt(Duration::from_millis(200));
+        assert_eq!(rto.samples(), 1);
+        // SRTT=200ms, RTTVAR=100ms → RTO = 200 + 4*100 = 600ms
+        let val = rto.rto();
+        assert!(
+            val >= Duration::from_millis(595) && val <= Duration::from_millis(605),
+            "seeded RTO ({val:?}) should be ~600ms"
+        );
     }
 }

@@ -390,16 +390,18 @@ fn store_episodes(conn: &Connection, episodes: &[WorkUnitRow]) -> Result<(), Nme
     Ok(())
 }
 
-const EPISODE_SYSTEM_PROMPT: &str =
-    "You produce structured JSON summaries of work episodes within a coding session. The consumer is an AI agent's cross-session memory. Optimize for context reconstruction. Return ONLY valid JSON, no markdown, no explanation.";
+const EPISODE_SYSTEM_PROMPT: &str = "You produce structured JSON summaries of work episodes within a coding session. The consumer is an AI agent's cross-session memory.\n\nPriority: intent > learned > notes > completed.\n\nRules:\n- intent: one sentence, what this episode accomplished. NOT a list of actions.\n- learned: decisions and conclusions specific to this episode. Each entry should be actionable.\n- notes: errors and failed approaches. null if none.\n- All array fields MUST be JSON arrays of strings, never a single string.\n\nReturn ONLY valid JSON. No markdown fences, no explanation.";
 
-const EPISODE_USER_TEMPLATE: &str = r#"Summarize this work episode (one coherent chunk of work within a larger session) for the next AI agent session.
+const EPISODE_USER_TEMPLATE: &str = r#"Summarize this work episode (one coherent chunk of work within a larger session).
 
-Return JSON with these fields:
-- "intent": What was being accomplished in this specific episode
-- "learned": Decisions made, constraints discovered, conclusions reached
-- "completed": What was done in this episode
-- "notes": Errors encountered, failed approaches, deviations from expected patterns
+Return a JSON object with these fields:
+- "intent" (string): Primary goal of this episode
+- "learned" (array of strings): Decisions and conclusions
+- "completed" (array of strings): What was done
+- "notes" (string or null): Errors and failed approaches
+
+Example output:
+{"intent":"Fix ROCm linker errors in llama-cpp-2 build","learned":["Must use gcc linker, not rust-lld","CMAKE_POSITION_INDEPENDENT_CODE=ON required"],"completed":["Updated .cargo/config.toml with linker setting"],"notes":"rust-lld causes relocation R_X86_64_32 errors with HIP static libs"}
 
 Episode context:
 - Hot files: {HOT_FILES}
@@ -416,21 +418,7 @@ fn gather_episode_payload(
     conn: &Connection,
     episode: &WorkUnitRow,
 ) -> Result<Option<String>, NmemError> {
-    // Count user prompts in range
-    let prompt_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM prompts
-         WHERE session_id = ?1 AND source = 'user'
-           AND id >= ?2 AND id <= ?3",
-        params![episode.session_id, episode.first_prompt_id, episode.last_prompt_id],
-        |r| r.get(0),
-    )?;
-
-    // Skip single-prompt episodes (the prompt IS the story)
-    if prompt_count < 2 {
-        return Ok(None);
-    }
-
-    // Skip sparse episodes
+    // Skip sparse episodes — not enough activity to narrate
     if episode.obs_count < 3 {
         return Ok(None);
     }
@@ -454,8 +442,7 @@ fn gather_episode_payload(
     if !prompts.is_empty() {
         out.push_str("User prompts:\n");
         for p in &prompts {
-            let truncated: String = p.chars().take(100).collect();
-            out.push_str(&format!("- {truncated}\n"));
+            out.push_str(&format!("- {p}\n"));
         }
         out.push('\n');
     }
@@ -477,8 +464,7 @@ fn gather_episode_payload(
     if !thinking.is_empty() {
         out.push_str("Agent reasoning:\n");
         for t in &thinking {
-            let truncated: String = t.chars().take(200).collect();
-            out.push_str(&format!("- {truncated}\n"));
+            out.push_str(&format!("- {t}\n"));
         }
         out.push('\n');
     }
@@ -520,11 +506,12 @@ fn gather_episode_payload(
 }
 
 /// Generate narrative for a single episode via direct LLM inference.
+/// Returns (narrative_text, elapsed_ms) on success.
 fn generate_narrative(
     conn: &Connection,
     episode: &WorkUnitRow,
     config: &SummarizationConfig,
-) -> Result<Option<String>, NmemError> {
+) -> Result<Option<(String, u64)>, NmemError> {
     let payload = match gather_episode_payload(conn, episode)? {
         Some(p) => p,
         None => return Ok(None),
@@ -545,7 +532,12 @@ fn generate_narrative(
         &user_content,
     )?;
 
-    Ok(Some(result.text))
+    log::debug!(
+        "narrative inference: {}ms, {} prompt tokens, {} generated",
+        result.total_ms, result.prompt_tokens, result.generated_tokens
+    );
+
+    Ok(Some((result.text, result.total_ms)))
 }
 
 /// Update a work_unit row with narrative summary.
@@ -636,8 +628,8 @@ pub fn backfill_episode_friction(db_path: &std::path::Path) -> Result<(), NmemEr
         [],
     )?;
 
-    eprintln!(
-        "nmem: friction backfill complete — {} episodes, {} observations updated, {} orphans cleared",
+    log::info!(
+        "friction backfill complete — {} episodes, {} observations updated, {} orphans cleared",
         units.len(),
         updated,
         orphaned,
@@ -722,10 +714,90 @@ pub fn backfill_obs_trace(db_path: &std::path::Path) -> Result<(), NmemError> {
         }
     }
 
-    eprintln!(
-        "nmem: obs_trace backfill complete — {} of {} episodes filled",
+    log::info!(
+        "obs_trace backfill complete — {} of {} episodes filled",
         filled,
         units.len(),
+    );
+
+    Ok(())
+}
+
+/// Backfill narrative summaries for episodes that have enough observations
+/// but no summary yet. Requires LM Studio with a loaded model.
+pub fn backfill_narratives(db_path: &std::path::Path) -> Result<(), NmemError> {
+    let config = crate::s5_config::load_config()?;
+    let sum_config = &config.summarization;
+
+    if !sum_config.enabled {
+        log::info!("summarization disabled in config — skipping narrative backfill");
+        return Ok(());
+    }
+
+    let conn = crate::db::open_db(db_path)?;
+
+    // Find episodes with enough obs but no narrative
+    let mut stmt = conn.prepare(
+        "SELECT session_id, started_at, ended_at, intent,
+                first_prompt_id, last_prompt_id, hot_files, phase_signature, obs_count, obs_trace
+         FROM work_units
+         WHERE summary IS NULL AND obs_count >= 3
+         ORDER BY started_at ASC",
+    )?;
+
+    let episodes: Vec<WorkUnitRow> = stmt
+        .query_map([], |r| {
+            Ok(WorkUnitRow {
+                session_id: r.get(0)?,
+                started_at: r.get(1)?,
+                ended_at: r.get(2)?,
+                intent: r.get(3)?,
+                first_prompt_id: r.get(4)?,
+                last_prompt_id: r.get(5)?,
+                hot_files: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                phase_signature: r.get::<_, Option<String>>(7)?.unwrap_or_default(),
+                obs_count: r.get(8)?,
+                obs_trace: r.get(9)?,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+
+    if episodes.is_empty() {
+        log::info!("no episodes need narrative backfill");
+        return Ok(());
+    }
+
+    log::info!("backfilling narratives for {} episodes", episodes.len());
+
+    let mut filled = 0u64;
+    let mut skipped = 0u64;
+    for ep in &episodes {
+        match generate_narrative(&conn, ep, sum_config) {
+            Ok(Some((narrative, elapsed_ms))) => {
+                store_narrative(&conn, &ep.session_id, ep.first_prompt_id, &narrative)?;
+                filled += 1;
+                log::info!(
+                    "[{}/{}] {} obs, {}ms — {}",
+                    filled + skipped,
+                    episodes.len(),
+                    ep.obs_count,
+                    elapsed_ms,
+                    ep.intent.chars().take(60).collect::<String>(),
+                );
+            }
+            Ok(None) => {
+                skipped += 1;
+            }
+            Err(e) => {
+                log::warn!("narrative generation failed: {e}");
+                skipped += 1;
+            }
+        }
+    }
+
+    log::info!(
+        "narrative backfill complete — {} filled, {} skipped of {} total",
+        filled, skipped, episodes.len(),
     );
 
     Ok(())
@@ -753,7 +825,15 @@ pub fn detect_and_store_episodes(
 
     let mut annotated = Vec::with_capacity(episodes.len());
     for ep in &episodes {
-        annotated.push(annotate_episode(conn, ep)?);
+        let wu = annotate_episode(conn, ep)?;
+        // Skip episodes with no observations — just prompts, not work units
+        if wu.obs_count > 0 {
+            annotated.push(wu);
+        }
+    }
+
+    if annotated.is_empty() {
+        return Ok(0);
     }
 
     store_episodes(conn, &annotated)?;
@@ -784,7 +864,14 @@ pub fn detect_and_narrate_episodes(
 
     let mut annotated = Vec::with_capacity(episodes.len());
     for ep in &episodes {
-        annotated.push(annotate_episode(conn, ep)?);
+        let wu = annotate_episode(conn, ep)?;
+        if wu.obs_count > 0 {
+            annotated.push(wu);
+        }
+    }
+
+    if annotated.is_empty() {
+        return Ok(0);
     }
 
     store_episodes(conn, &annotated)?;
@@ -795,13 +882,15 @@ pub fn detect_and_narrate_episodes(
     if config.enabled {
         for ep in &annotated {
             match generate_narrative(conn, ep, config) {
-                Ok(Some(narrative)) => {
+                Ok(Some((narrative, elapsed_ms))) => {
+                    log::info!("episode narrative ({}ms): {}", elapsed_ms,
+                        ep.intent.chars().take(60).collect::<String>());
                     if let Err(e) = store_narrative(conn, &ep.session_id, ep.first_prompt_id, &narrative) {
-                        eprintln!("nmem: episode narrative store failed: {e}");
+                        log::warn!("episode narrative store failed: {e}");
                     }
                 }
                 Ok(None) => {} // Skipped (too sparse)
-                Err(e) => eprintln!("nmem: episode narrative failed (non-fatal): {e}"),
+                Err(e) => log::warn!("episode narrative failed (non-fatal): {e}"),
             }
         }
     }
@@ -1038,7 +1127,7 @@ mod tests {
     }
 
     #[test]
-    fn narrative_skipped_for_single_prompt() {
+    fn narrative_generated_for_single_prompt_with_obs() {
         let conn = setup_db();
         insert_session(&conn, "s1");
 
@@ -1050,7 +1139,7 @@ mod tests {
         let episodes = detect_episodes(&conn, "s1").unwrap();
         let annotated = annotate_episode(&conn, &episodes[0]).unwrap();
         let payload = gather_episode_payload(&conn, &annotated).unwrap();
-        assert!(payload.is_none(), "single-prompt episode should skip narrative");
+        assert!(payload.is_some(), "single-prompt episode with 3+ obs should get narrative");
     }
 
     #[test]
@@ -1495,7 +1584,10 @@ mod tests {
         let conn = setup_db();
         insert_session(&conn, "s1");
 
-        insert_prompt(&conn, "s1", 1000, "fix the authentication bug in the login handler");
+        let pid = insert_prompt(&conn, "s1", 1000, "fix the authentication bug in the login handler");
+        insert_obs_with_prompt(&conn, "s1", pid, 1001, "file_read", Some("src/auth.rs"));
+        insert_obs_with_prompt(&conn, "s1", pid, 1002, "file_edit", Some("src/auth.rs"));
+        insert_obs_with_prompt(&conn, "s1", pid, 1003, "command", None);
 
         let config = SummarizationConfig::default();
         assert!(!config.enabled);
@@ -1512,5 +1604,23 @@ mod tests {
             )
             .unwrap();
         assert!(summary.is_none());
+    }
+
+    #[test]
+    fn zero_obs_episodes_not_stored() {
+        let conn = setup_db();
+        insert_session(&conn, "s1");
+
+        // Two prompts, no observations — should produce zero work units
+        insert_prompt(&conn, "s1", 1000, "i think we should refactor the auth module");
+        insert_prompt(&conn, "s1", 1100, "ok sounds good lets do something completely different");
+
+        let count = detect_and_store_episodes(&conn, "s1").unwrap();
+        assert_eq!(count, 0);
+
+        let stored: i64 = conn
+            .query_row("SELECT COUNT(*) FROM work_units WHERE session_id = 's1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored, 0);
     }
 }

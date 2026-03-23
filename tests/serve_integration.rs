@@ -1368,7 +1368,11 @@ struct SetCwd {
 
 impl SetCwd {
     fn new(path: &std::path::Path) -> Self {
-        let prev = std::env::current_dir().unwrap();
+        // current_dir() can fail if another test's TempDir was cleaned up under us
+        // (tests run in parallel threads sharing a process-wide cwd).
+        // Fall back to /tmp so we have a valid prev to restore on drop.
+        let prev = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
         std::env::set_current_dir(path).unwrap();
         Self { prev }
     }

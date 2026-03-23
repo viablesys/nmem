@@ -53,7 +53,7 @@ pub fn resolve_model(specifier: &str) -> Result<PathBuf, NmemError> {
         ))
     })?;
 
-    eprintln!("nmem: downloading model from HuggingFace ({repo_id}/{filename})...");
+    log::info!("downloading model from HuggingFace ({repo_id}/{filename})...");
 
     let api = hf_hub::api::sync::ApiBuilder::new()
         .with_progress(true)
@@ -64,7 +64,7 @@ pub fn resolve_model(specifier: &str) -> Result<PathBuf, NmemError> {
         .get(filename)
         .map_err(|e| NmemError::Config(format!("hf-hub download: {e}")))?;
 
-    eprintln!("nmem: model cached at {}", local_path.display());
+    log::info!("model cached at {}", local_path.display());
     Ok(local_path)
 }
 

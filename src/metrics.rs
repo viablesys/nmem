@@ -42,7 +42,7 @@ pub fn init_meter_provider(config: &MetricsConfig) -> Option<SdkMeterProvider> {
                 .with_protocol(Protocol::Grpc)
                 .with_timeout(Duration::from_secs(5))
                 .build()
-                .map_err(|e| eprintln!("nmem: metrics grpc exporter: {e}"))
+                .map_err(|e| log::warn!("metrics grpc exporter: {e}"))
                 .ok()?;
             SdkMeterProvider::builder()
                 .with_periodic_exporter(exporter)
@@ -56,7 +56,7 @@ pub fn init_meter_provider(config: &MetricsConfig) -> Option<SdkMeterProvider> {
                 .with_endpoint(&config.endpoint)
                 .with_timeout(Duration::from_secs(5))
                 .build()
-                .map_err(|e| eprintln!("nmem: metrics http exporter: {e}"))
+                .map_err(|e| log::warn!("metrics http exporter: {e}"))
                 .ok()?;
             SdkMeterProvider::builder()
                 .with_periodic_exporter(exporter)

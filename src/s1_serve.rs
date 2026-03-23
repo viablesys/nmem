@@ -1745,7 +1745,7 @@ pub fn handle_serve(db_path: &Path) -> Result<(), NmemError> {
         let config = crate::s5_config::load_config().unwrap_or_default();
         let provider = crate::metrics::init_meter_provider(&config.metrics);
 
-        eprintln!("nmem: serve starting");
+        log::info!("serve starting");
         let service = server
             .serve(stdio())
             .await
@@ -1754,7 +1754,7 @@ pub fn handle_serve(db_path: &Path) -> Result<(), NmemError> {
             .waiting()
             .await
             .map_err(|e| NmemError::Config(format!("mcp: {e}")))?;
-        eprintln!("nmem: serve stopped");
+        log::info!("serve stopped");
 
         if let Some(p) = provider {
             let _ = p.shutdown();

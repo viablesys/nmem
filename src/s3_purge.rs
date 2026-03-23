@@ -290,17 +290,17 @@ pub fn handle_purge(db_path: &Path, args: &PurgeArgs) -> Result<(), NmemError> {
     let total = counts.observations + counts.prompts + counts.sessions;
 
     if total == 0 {
-        eprintln!("nmem: nothing to purge");
+        log::info!("nothing to purge");
         return Ok(());
     }
 
-    eprintln!(
-        "nmem: would purge {} observations, {} prompts, {} sessions",
+    log::info!(
+        "would purge {} observations, {} prompts, {} sessions",
         counts.observations, counts.prompts, counts.sessions
     );
 
     if !args.confirm {
-        eprintln!("nmem: re-run with --confirm to delete");
+        log::info!("re-run with --confirm to delete");
         return Ok(());
     }
 
@@ -341,8 +341,8 @@ pub fn handle_purge(db_path: &Path, args: &PurgeArgs) -> Result<(), NmemError> {
     // Post-deletion maintenance (outside transaction)
     post_purge_maintenance(&conn, obs_deleted)?;
 
-    eprintln!(
-        "nmem: purged {} observations, {} prompts, {} sessions",
+    log::info!(
+        "purged {} observations, {} prompts, {} sessions",
         obs_deleted, prompts_deleted, sessions_deleted
     );
 

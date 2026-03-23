@@ -1,0 +1,20 @@
+[package]
+name = "prompt-lab"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+nmem = { path = "../.." }
+rusqlite = { version = "0.38", features = ["bundled-sqlcipher"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+[features]
+default = []
+cuda = ["nmem/cuda"]
+rocm = ["nmem/rocm"]
+
+[profile.release]
+opt-level = 3
+lto = true

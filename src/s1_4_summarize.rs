@@ -4,20 +4,21 @@ use crate::NmemError;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
-const SYSTEM_PROMPT: &str =
-    "You produce structured JSON summaries of coding sessions for an AI agent's cross-session memory. The consumer is the next AI session, not a human. Optimize for context reconstruction. Return ONLY valid JSON, no markdown, no explanation.";
+const SYSTEM_PROMPT: &str = "You produce structured JSON summaries of coding sessions for an AI agent's cross-session memory. The consumer is the next AI session, not a human.\n\nPriority: intent > learned > notes > completed > next_steps. files_read and files_edited are low priority — extract unique paths from the actions list.\n\nRules:\n- intent: one sentence, the primary goal. NOT a list of actions.\n- learned: decisions and conclusions the next session should NOT re-derive. Each entry should be specific enough to act on.\n- notes: errors, failed approaches, things that didn't work. null if none.\n- files_read, files_edited: unique file paths only, no descriptions.\n- All array fields MUST be JSON arrays of strings, never a single string.\n\nReturn ONLY valid JSON. No markdown fences, no explanation.";
 
-const USER_PROMPT_TEMPLATE: &str = r#"Summarize this coding session for the next AI agent session. The summary will be injected as context so the next session can continue the work without re-deriving conclusions.
+const USER_PROMPT_TEMPLATE: &str = r#"Summarize this coding session. The summary is injected as context so the next AI session can continue without re-deriving conclusions.
 
-Return JSON with these fields:
+Return a JSON object with these fields:
+- "intent" (string): Primary goal of the session
+- "learned" (array of strings): Decisions and conclusions
+- "completed" (array of strings): What was done
+- "next_steps" (array of strings): Unfinished work, open questions
+- "files_read" (array of strings): File paths read
+- "files_edited" (array of strings): File paths modified
+- "notes" (string or null): Errors and failed approaches
 
-- "intent": What was being accomplished. Infer from user prompts, agent reasoning, and action patterns — NOT from this instruction. (e.g. "Decouple LLM engine from LM Studio, generalize for S4")
-- "learned": Decisions made, trade-offs evaluated, constraints discovered, and conclusions reached. These are things the next session should NOT have to figure out again. Extract from agent reasoning blocks.
-- "completed": What was done. Commits, code changes, config changes, tests passed.
-- "next_steps": What logically follows. Unfinished work, open questions, known blockers.
-- "files_read": File paths that were read
-- "files_edited": File paths that were modified
-- "notes": Errors encountered, failed approaches, things that didn't work and why
+Example output:
+{"intent":"Replace HTTP summarization with embedded GGUF inference","learned":["GBNF grammar crashes on small models — use strip_fences instead","llama-cpp-2 must be pinned at 0.1.138 for rocm feature"],"completed":["Implemented s1_4_inference.rs with generate() API","Added hf-hub model resolution"],"next_steps":["Add --catch-up flag to s3_maintain"],"files_read":["src/s1_4_summarize.rs","src/s5_config.rs"],"files_edited":["src/s1_4_inference.rs","Cargo.toml"],"notes":"Pin at 0.1.138, not 0.1.133 — lacks rocm"}
 
 Session data:
 {PAYLOAD}

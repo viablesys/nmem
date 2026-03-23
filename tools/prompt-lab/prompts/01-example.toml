@@ -1,0 +1,24 @@
+name = "01-example"
+description = "Baseline + one-shot example only"
+
+system_prompt = "You produce structured JSON summaries of coding sessions for an AI agent's cross-session memory. The consumer is the next AI session, not a human. Optimize for context reconstruction. Return ONLY valid JSON, no markdown, no explanation."
+
+user_template = """Summarize this coding session for the next AI agent session. The summary will be injected as context so the next session can continue the work without re-deriving conclusions.
+
+Return JSON with these fields:
+
+- "intent": What was being accomplished. Infer from user prompts, agent reasoning, and action patterns — NOT from this instruction. (e.g. "Decouple LLM engine from LM Studio, generalize for S4")
+- "learned": Decisions made, trade-offs evaluated, constraints discovered, and conclusions reached. These are things the next session should NOT have to figure out again. Extract from agent reasoning blocks.
+- "completed": What was done. Commits, code changes, config changes, tests passed.
+- "next_steps": What logically follows. Unfinished work, open questions, known blockers.
+- "files_read": File paths that were read
+- "files_edited": File paths that were modified
+- "notes": Errors encountered, failed approaches, things that didn't work and why
+
+Example output:
+{"intent":"Replace HTTP summarization with embedded GGUF inference","learned":["GBNF grammar crashes on small models — use strip_fences instead","llama-cpp-2 must be pinned at 0.1.138 for rocm feature"],"completed":["Implemented s1_4_inference.rs with generate() API","Added hf-hub model resolution"],"next_steps":["Add --catch-up flag to s3_maintain"],"files_read":["src/s1_4_summarize.rs","src/s5_config.rs"],"files_edited":["src/s1_4_inference.rs","Cargo.toml"],"notes":"Pin at 0.1.138, not 0.1.133 — lacks rocm"}
+
+Session data:
+{PAYLOAD}
+
+Return ONLY the JSON object."""

@@ -122,7 +122,7 @@ fn handle_user_prompt(
     ensure_session(&tx, &payload.session_id, project, ts)?;
 
     // Truncate and filter secrets
-    let truncated: String = prompt.chars().take(500).collect();
+    let truncated: String = prompt.chars().take(2000).collect();
     let (filtered, _redacted) = filter.redact(&truncated);
 
     tx.execute(

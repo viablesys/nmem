@@ -803,8 +803,8 @@ pub fn handle_learn(db_path: &Path, args: &LearnArgs) -> Result<(), NmemError> {
     let intent_count = patterns.iter().filter(|p| p.kind == "repeated_intent").count();
     let unresolved_count = patterns.iter().filter(|p| p.kind == "unresolved_read").count();
 
-    eprintln!(
-        "nmem: {failed_count} failures, {error_count} errors, {intent_count} intents, {unresolved_count} unresolved → {}",
+    log::info!(
+        "{failed_count} failures, {error_count} errors, {intent_count} intents, {unresolved_count} unresolved → {}",
         output.display()
     );
 

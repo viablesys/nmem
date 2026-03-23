@@ -35,7 +35,7 @@ pub fn handle_mark(db_path: &Path, args: &MarkArgs) -> Result<(), NmemError> {
     let (filtered_text, redacted) = filter.redact(&args.text);
 
     if redacted {
-        eprintln!("nmem: redacted potential secret from marker");
+        log::warn!("redacted potential secret from marker");
     }
 
     // Find most recent session for this project, or create one

@@ -4,7 +4,7 @@ use std::path::Path;
 
 pub fn handle_status(db_path: &Path) -> Result<(), NmemError> {
     if !db_path.exists() {
-        eprintln!("nmem: no database at {}", db_path.display());
+        log::info!("no database at {}", db_path.display());
         return Ok(());
     }
 
@@ -40,18 +40,18 @@ pub fn handle_status(db_path: &Path) -> Result<(), NmemError> {
 
     // Print
     match wal_size {
-        Some(ws) => eprintln!("nmem: database — {} (+{} WAL)", fmt_size(db_size), fmt_size(ws)),
-        None => eprintln!("nmem: database — {}", fmt_size(db_size)),
+        Some(ws) => log::info!("database — {} (+{} WAL)", fmt_size(db_size), fmt_size(ws)),
+        None => log::info!("database — {}", fmt_size(db_size)),
     }
 
     if type_breakdown.is_empty() {
-        eprintln!("nmem: observations — {obs_count}");
+        log::info!("observations — {obs_count}");
     } else {
         let parts: Vec<String> = type_breakdown
             .iter()
             .map(|(t, c)| format!("{t}: {c}"))
             .collect();
-        eprintln!("nmem: observations — {obs_count} ({0})", parts.join(", "));
+        log::info!("observations — {obs_count} ({0})", parts.join(", "));
     }
 
     let pinned: i64 = conn.query_row(
@@ -60,20 +60,20 @@ pub fn handle_status(db_path: &Path) -> Result<(), NmemError> {
         |r| r.get(0),
     )?;
     if pinned > 0 {
-        eprintln!("nmem: pinned — {pinned}");
+        log::info!("pinned — {pinned}");
     }
 
-    eprintln!("nmem: prompts — {prompt_count}");
-    eprintln!("nmem: sessions — {session_count}");
+    log::info!("prompts — {prompt_count}");
+    log::info!("sessions — {session_count}");
 
     if let Some((ts, project)) = last_session {
         let date = format_epoch_date(ts);
-        eprintln!("nmem: last session — {date} (project: {project})");
+        log::info!("last session — {date} (project: {project})");
     }
 
     let encrypted = is_db_encrypted(db_path);
-    eprintln!(
-        "nmem: encryption — {}",
+    log::info!(
+        "encryption — {}",
         if encrypted { "enabled" } else { "disabled" }
     );
 

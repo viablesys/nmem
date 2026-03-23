@@ -333,14 +333,14 @@ pub fn generic_backfill(
     )?;
 
     if null_count == 0 {
-        println!("No observations with NULL {column} — nothing to backfill.");
+        log::info!("no observations with NULL {column} — nothing to backfill");
         return Ok(());
     }
 
-    println!("Found {null_count} observations with NULL {column}.");
+    log::info!("found {null_count} observations with NULL {column}");
 
     if args.dry_run {
-        println!("Dry run — no changes made.");
+        log::info!("dry run — no changes made");
         return Ok(());
     }
 
@@ -355,11 +355,11 @@ pub fn generic_backfill(
                 args.cv_accuracy,
                 meta.as_deref(),
             )?;
-            println!("Classifier run #{id} (hash: {hash})");
+            log::info!("classifier run #{id} (hash: {hash})");
             Some(id)
         }
         None => {
-            eprintln!("Warning: no {classifier_name} model loaded, cannot backfill");
+            log::warn!("no {classifier_name} model loaded, cannot backfill");
             return Ok(());
         }
     };
@@ -397,17 +397,17 @@ pub fn generic_backfill(
         tx.commit()?;
 
         if classified % 500 == 0 && classified > 0 {
-            println!("  ...{classified}/{null_count}");
+            log::info!("  ...{classified}/{null_count}");
         }
     }
 
     let counts_str: Vec<String> = counts.iter().map(|(k, v)| format!("{v} {k}")).collect();
-    println!(
-        "Backfilled {classified} observations ({}), {skipped} skipped.",
+    log::info!(
+        "backfilled {classified} observations ({}), {skipped} skipped",
         counts_str.join(", ")
     );
     if let Some(rid) = run_id {
-        println!("All tagged with {run_id_column} = {rid}");
+        log::info!("all tagged with {run_id_column} = {rid}");
     }
     Ok(())
 }

@@ -11,7 +11,7 @@ pub fn handle_pin(db_path: &Path, id: i64) -> Result<(), NmemError> {
     if updated == 0 {
         return Err(NmemError::Config(format!("observation {id} not found")));
     }
-    eprintln!("nmem: pinned observation {id}");
+    log::info!("pinned observation {id}");
     Ok(())
 }
 
@@ -24,6 +24,6 @@ pub fn handle_unpin(db_path: &Path, id: i64) -> Result<(), NmemError> {
     if updated == 0 {
         return Err(NmemError::Config(format!("observation {id} not found")));
     }
-    eprintln!("nmem: unpinned observation {id}");
+    log::info!("unpinned observation {id}");
     Ok(())
 }

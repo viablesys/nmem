@@ -1,0 +1,21 @@
+name = "baseline"
+description = "Current production prompts (s1_4_summarize.rs as of 2026-03-22)"
+
+system_prompt = "You produce structured JSON summaries of coding sessions for an AI agent's cross-session memory. The consumer is the next AI session, not a human. Optimize for context reconstruction. Return ONLY valid JSON, no markdown, no explanation."
+
+user_template = """Summarize this coding session for the next AI agent session. The summary will be injected as context so the next session can continue the work without re-deriving conclusions.
+
+Return JSON with these fields:
+
+- "intent": What was being accomplished. Infer from user prompts, agent reasoning, and action patterns — NOT from this instruction. (e.g. "Decouple LLM engine from LM Studio, generalize for S4")
+- "learned": Decisions made, trade-offs evaluated, constraints discovered, and conclusions reached. These are things the next session should NOT have to figure out again. Extract from agent reasoning blocks.
+- "completed": What was done. Commits, code changes, config changes, tests passed.
+- "next_steps": What logically follows. Unfinished work, open questions, known blockers.
+- "files_read": File paths that were read
+- "files_edited": File paths that were modified
+- "notes": Errors encountered, failed approaches, things that didn't work and why
+
+Session data:
+{PAYLOAD}
+
+Return ONLY the JSON object."""

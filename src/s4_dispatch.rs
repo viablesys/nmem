@@ -277,7 +277,7 @@ pub fn handle_queue(db_path: &Path, args: &QueueArgs) -> Result<(), NmemError> {
     )?;
 
     let task_id = conn.last_insert_rowid();
-    eprintln!("nmem: task {task_id} scheduled for {run_after}");
+    log::info!("task {task_id} scheduled for {run_after}");
     println!("{task_id}");
     Ok(())
 }
@@ -325,7 +325,7 @@ pub fn handle_dispatch(db_path: &Path, args: &DispatchArgs) -> Result<(), NmemEr
             rusqlite::params![tf.prompt, project, cwd, run_after],
         )?;
         let task_id = conn.last_insert_rowid();
-        eprintln!("nmem: queued task {task_id} from {}", file.display());
+        log::info!("queued task {task_id} from {}", file.display());
         drop(conn);
     }
 
@@ -354,7 +354,7 @@ pub fn handle_dispatch(db_path: &Path, args: &DispatchArgs) -> Result<(), NmemEr
                 "UPDATE tasks SET status = 'completed', completed_at = unixepoch('now') WHERE id = ?1",
                 [task.id],
             )?;
-            eprintln!("nmem: task {} reaped (pane gone)", task.id);
+            log::info!("task {} reaped (pane gone)", task.id);
         } else {
             running_count += 1;
         }
@@ -362,8 +362,8 @@ pub fn handle_dispatch(db_path: &Path, args: &DispatchArgs) -> Result<(), NmemEr
 
     // 2. Check capacity
     if running_count >= args.max_concurrent {
-        eprintln!(
-            "nmem: at capacity ({running_count}/{} running)",
+        log::info!(
+            "at capacity ({running_count}/{} running)",
             args.max_concurrent
         );
         return Ok(());
@@ -390,7 +390,7 @@ pub fn handle_dispatch(db_path: &Path, args: &DispatchArgs) -> Result<(), NmemEr
     };
 
     if pending.is_empty() {
-        eprintln!("nmem: no pending tasks");
+        log::info!("no pending tasks");
         return Ok(());
     }
 
@@ -400,8 +400,8 @@ pub fn handle_dispatch(db_path: &Path, args: &DispatchArgs) -> Result<(), NmemEr
         let target = format!("{}:{}", args.tmux_session, window_name);
 
         if args.dry_run {
-            eprintln!(
-                "nmem: [dry-run] would dispatch task {} to {} — {:?}",
+            log::info!(
+                "[dry-run] would dispatch task {} to {} — {:?}",
                 task.id,
                 target,
                 truncate_prompt(&task.prompt, 60)
@@ -454,8 +454,8 @@ pub fn handle_dispatch(db_path: &Path, args: &DispatchArgs) -> Result<(), NmemEr
             rusqlite::params![target, output_path_str.as_ref(), task.id],
         )?;
 
-        eprintln!(
-            "nmem: dispatched task {} to {} — {:?}",
+        log::info!(
+            "dispatched task {} to {} — {:?}",
             task.id,
             target,
             truncate_prompt(&task.prompt, 60)

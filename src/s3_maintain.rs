@@ -20,47 +20,47 @@ pub fn handle_maintain(db_path: &Path, args: &MaintainArgs) -> Result<(), NmemEr
     conn.pragma_update(None, "incremental_vacuum", 0)?;
     let free_after: i64 = conn.pragma_query_value(None, "freelist_count", |r| r.get(0))?;
     let reclaimed = free_before - free_after;
-    eprintln!("nmem: incremental vacuum — reclaimed {reclaimed} pages");
+    log::info!("incremental vacuum — reclaimed {reclaimed} pages");
 
     // WAL checkpoint (TRUNCATE folds WAL into main file, then deletes WAL)
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
-    eprintln!("nmem: WAL checkpoint — ok");
+    log::info!("WAL checkpoint — ok");
 
     // FTS integrity check
     conn.execute_batch(
         "INSERT INTO observations_fts(observations_fts) VALUES('integrity-check')",
     )?;
-    eprintln!("nmem: FTS integrity (observations) — ok");
+    log::info!("FTS integrity (observations) — ok");
 
     conn.execute_batch("INSERT INTO prompts_fts(prompts_fts) VALUES('integrity-check')")?;
-    eprintln!("nmem: FTS integrity (prompts) — ok");
+    log::info!("FTS integrity (prompts) — ok");
 
     // Optional FTS rebuild
     if args.rebuild_fts {
         conn.execute_batch(
             "INSERT INTO observations_fts(observations_fts) VALUES('rebuild')",
         )?;
-        eprintln!("nmem: FTS rebuild (observations) — ok");
+        log::info!("FTS rebuild (observations) — ok");
 
         conn.execute_batch("INSERT INTO prompts_fts(prompts_fts) VALUES('rebuild')")?;
-        eprintln!("nmem: FTS rebuild (prompts) — ok");
+        log::info!("FTS rebuild (prompts) — ok");
     }
 
     // Retention sweep
     if args.sweep {
         let config = load_config().unwrap_or_default();
         if !config.retention.enabled {
-            eprintln!("nmem: retention sweep skipped (not enabled in config)");
+            log::info!("retention sweep skipped (not enabled in config)");
         } else {
             let result = run_sweep(&conn, &config.retention)?;
             if result.deleted > 0 {
                 for (obs_type, count) in &result.by_type {
-                    eprintln!("nmem: sweep — {obs_type}: {count} deleted");
+                    log::info!("sweep — {obs_type}: {count} deleted");
                 }
-                eprintln!("nmem: sweep — {} total deleted, {} orphans cleaned",
+                log::info!("sweep — {} total deleted, {} orphans cleaned",
                     result.deleted, result.orphans_cleaned);
             } else {
-                eprintln!("nmem: sweep — nothing to delete");
+                log::info!("sweep — nothing to delete");
             }
         }
     }
@@ -69,7 +69,7 @@ pub fn handle_maintain(db_path: &Path, args: &MaintainArgs) -> Result<(), NmemEr
     if args.resummarize {
         let config = load_config().unwrap_or_default();
         if !config.summarization.enabled {
-            eprintln!("nmem: resummarize skipped (summarization not enabled)");
+            log::info!("resummarize skipped (summarization not enabled)");
         } else {
             resummarize_all(&conn, &config.summarization)?;
         }
@@ -79,14 +79,14 @@ pub fn handle_maintain(db_path: &Path, args: &MaintainArgs) -> Result<(), NmemEr
     if args.catch_up {
         let config = load_config().unwrap_or_default();
         if !config.summarization.enabled {
-            eprintln!("nmem: catch-up skipped (summarization not enabled)");
+            log::info!("catch-up skipped (summarization not enabled)");
         } else {
             catch_up_unsummarized(&conn, &config.summarization)?;
         }
     }
 
     let size_after = std::fs::metadata(db_path)?.len();
-    eprintln!("nmem: database: {} → {}", fmt_size(size_before), fmt_size(size_after));
+    log::info!("database: {} → {}", fmt_size(size_before), fmt_size(size_after));
 
     Ok(())
 }
@@ -103,7 +103,7 @@ fn resummarize_all(
         .collect::<Result<_, _>>()?;
 
     let total = session_ids.len();
-    eprintln!("nmem: resummarizing {total} sessions...");
+    log::info!("resummarizing {total} sessions...");
 
     let inference_params = crate::s1_4_inference::params_from_config(config)?;
     let engine = crate::s1_4_inference::InferenceEngine::new(inference_params)?;
@@ -114,16 +114,17 @@ fn resummarize_all(
         match crate::s1_4_summarize::summarize_session_with_engine(conn, sid, &engine) {
             Ok(()) => {
                 success += 1;
-                eprint!("\rnmem: [{}/{}] {} ok, {} failed", i + 1, total, success, failed);
+                eprint!("\r[{}/{}] {} ok, {} failed", i + 1, total, success, failed);
             }
             Err(e) => {
                 failed += 1;
-                eprint!("\rnmem: [{}/{}] {} ok, {} failed", i + 1, total, success, failed);
-                eprintln!(" — {sid}: {e}");
+                eprint!("\r[{}/{}] {} ok, {} failed", i + 1, total, success, failed);
+                log::warn!("{sid}: {e}");
             }
         }
     }
-    eprintln!("\nnmem: resummarize complete — {success} ok, {failed} failed");
+    eprintln!();
+    log::info!("resummarize complete — {success} ok, {failed} failed");
 
     Ok(())
 }
@@ -154,7 +155,7 @@ fn catch_up_unsummarized(
         for sid in &ids {
             crate::s1_4_summarize::write_sentinel_summary(conn, sid)?;
         }
-        eprintln!("nmem: catch-up — {sentinel_count} empty sessions given sentinel summaries");
+        log::info!("catch-up — {sentinel_count} empty sessions given sentinel summaries");
     }
 
     // Then: summarize sessions with enough observations
@@ -170,7 +171,7 @@ fn catch_up_unsummarized(
         .collect::<Result<_, _>>()?;
 
     if session_ids.is_empty() && sentinel_count == 0 {
-        eprintln!("nmem: catch-up — no unsummarized sessions");
+        log::info!("catch-up — no unsummarized sessions");
         return Ok(());
     }
 
@@ -179,7 +180,7 @@ fn catch_up_unsummarized(
     }
 
     let total = session_ids.len();
-    eprintln!("nmem: catch-up — {total} sessions to summarize");
+    log::info!("catch-up — {total} sessions to summarize");
 
     let inference_params = crate::s1_4_inference::params_from_config(config)?;
     let engine = crate::s1_4_inference::InferenceEngine::new(inference_params)?;
@@ -190,16 +191,17 @@ fn catch_up_unsummarized(
         match crate::s1_4_summarize::summarize_session_with_engine(conn, sid, &engine) {
             Ok(()) => {
                 success += 1;
-                eprint!("\rnmem: [{}/{}] {} ok, {} failed", i + 1, total, success, failed);
+                eprint!("\r[{}/{}] {} ok, {} failed", i + 1, total, success, failed);
             }
             Err(e) => {
                 failed += 1;
-                eprint!("\rnmem: [{}/{}] {} ok, {} failed", i + 1, total, success, failed);
-                eprintln!(" — {sid}: {e}");
+                eprint!("\r[{}/{}] {} ok, {} failed", i + 1, total, success, failed);
+                log::warn!("{sid}: {e}");
             }
         }
     }
-    eprintln!("\nnmem: catch-up complete — {success} ok, {failed} failed");
+    eprintln!();
+    log::info!("catch-up complete — {success} ok, {failed} failed");
 
     Ok(())
 }
@@ -210,31 +212,31 @@ fn handle_session_maintain(db_path: &Path, session_id: &str) -> Result<(), NmemE
 
     // Detect episodes — non-fatal
     match crate::s4_memory::detect_and_narrate_episodes(&conn, session_id, &config.summarization) {
-        Ok(n) if n > 1 => eprintln!("nmem: {n} episodes detected"),
-        Err(e) => eprintln!("nmem: episode detection failed (non-fatal): {e}"),
+        Ok(n) if n > 1 => log::info!("{n} episodes detected"),
+        Err(e) => log::warn!("episode detection failed (non-fatal): {e}"),
         _ => {}
     }
 
     // Summarize session — non-fatal
     match crate::s1_4_summarize::summarize_session(&conn, session_id, &config.summarization) {
-        Ok(()) => eprintln!("nmem: session summarized"),
-        Err(e) => eprintln!("nmem: summarization failed (non-fatal): {e}"),
+        Ok(()) => log::info!("session summarized"),
+        Err(e) => log::warn!("summarization failed (non-fatal): {e}"),
     }
 
     // Retention sweep — non-fatal
     if config.retention.enabled {
         match run_sweep(&conn, &config.retention) {
             Ok(r) if r.deleted > 0 => {
-                eprintln!("nmem: sweep deleted {} expired observations", r.deleted);
+                log::info!("sweep deleted {} expired observations", r.deleted);
             }
-            Err(e) => eprintln!("nmem: sweep error (non-fatal): {e}"),
+            Err(e) => log::warn!("sweep error (non-fatal): {e}"),
             _ => {}
         }
     }
 
     // WAL checkpoint
     if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)") {
-        eprintln!("nmem: WAL checkpoint failed (non-fatal): {e}");
+        log::warn!("WAL checkpoint failed (non-fatal): {e}");
     }
 
     Ok(())

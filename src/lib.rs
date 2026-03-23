@@ -34,11 +34,10 @@ pub mod s3_maintain;
 pub mod s3_purge;
 pub mod s3_sweep;
 
-// S4 Intelligence — context injection, task dispatch, cross-session patterns, episodic memory, fleet beacon, repo map
+// S4 Intelligence — context injection, task dispatch, cross-session patterns, episodic memory, fleet beacon
 pub mod s4_beacon;
 pub mod s4_context;
 pub mod s4_dispatch;
-pub mod s4_map;
 pub mod s4_memory;
 
 // S5 Policy — config, boundaries, identity
@@ -86,6 +85,8 @@ impl std::fmt::Display for NmemError {
         }
     }
 }
+
+impl std::error::Error for NmemError {}
 
 impl From<rusqlite::Error> for NmemError {
     fn from(e: rusqlite::Error) -> Self {
