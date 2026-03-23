@@ -33,45 +33,82 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: check
     strategy:
+      fail-fast: false
       matrix:
         include:
+          # CPU builds
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact: nmem-linux-x86_64
+            features: ""
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: nmem-macos-arm64
-          - os: macos-15
-            target: x86_64-apple-darwin
-            artifact: nmem-macos-x86_64
+            features: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: nmem-windows-x86_64
+            features: ""
+          # GPU builds (Linux only)
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: nmem-linux-x86_64-cuda
+            features: cuda
+            container: nvidia/cuda:12.8.1-devel-ubuntu24.04
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: nmem-linux-x86_64-rocm
+            features: rocm
+            container: rocm/dev-ubuntu-24.04:6.4-complete
     runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container || '' }}
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install build deps (container)
+        if: matrix.container
+        run: |
+          apt-get update && apt-get install -y curl cmake build-essential pkg-config libssl-dev
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
       - uses: dtolnay/rust-toolchain@stable
+        if: ${{ !matrix.container }}
         with:
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: ${{ matrix.artifact }}
 
-      - name: Install cmake (Linux)
-        if: runner.os == 'Linux'
+      - name: Install cmake (Linux, no container)
+        if: runner.os == 'Linux' && !matrix.container
         run: sudo apt-get update && sudo apt-get install -y cmake
 
       - name: Build release
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} ${{ matrix.features && format('--features {0}', matrix.features) }}
 
-      - name: Rename binary
+      - name: Rename binary (Unix)
+        if: runner.os != 'Windows'
         run: cp target/${{ matrix.target }}/release/nmem ${{ matrix.artifact }}
 
-      - name: Upload release asset
+      - name: Rename binary (Windows)
+        if: runner.os == 'Windows'
+        run: cp target/${{ matrix.target }}/release/nmem.exe ${{ matrix.artifact }}.exe
+
+      - name: Upload release asset (Unix)
+        if: runner.os != 'Windows'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload ${{ github.ref_name }} ${{ matrix.artifact }} --clobber
+
+      - name: Upload release asset (Windows)
+        if: runner.os == 'Windows'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload ${{ github.ref_name }} ${{ matrix.artifact }}.exe --clobber
 
   create-release:
     if: startsWith(github.ref, 'refs/tags/v')
