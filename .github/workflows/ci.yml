@@ -126,13 +126,13 @@ jobs:
         if: runner.os != 'Windows'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload ${{ github.ref_name }} ${{ matrix.artifact }} --clobber
+        run: gh release upload ${{ github.ref_name }} ${{ matrix.artifact }} --clobber --repo ${{ github.repository }}
 
       - name: Upload release asset (Windows)
         if: runner.os == 'Windows'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload ${{ github.ref_name }} ${{ matrix.artifact }}.exe --clobber
+        run: gh release upload ${{ github.ref_name }} ${{ matrix.artifact }}.exe --clobber --repo ${{ github.repository }}
 
   create-release:
     if: startsWith(github.ref, 'refs/tags/v')
