@@ -105,6 +105,7 @@ fn make_relative(cwd: &Path, abs_path: &str) -> String {
 
 impl LanguageServer for NmemLsp {
     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
+        #[allow(clippy::needless_update)]
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
