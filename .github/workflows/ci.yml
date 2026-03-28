@@ -128,6 +128,8 @@ jobs:
           $existing = if ($env:LIB) { ";$env:LIB" } else { "" }
           echo "LIB=$cudaLib$existing" >> $env:GITHUB_ENV
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+          # Use Ninja so CMake finds nvcc without the VS CUDA integration component
+          echo "CMAKE_GENERATOR=Ninja" >> $env:GITHUB_ENV
 
       - name: Set up MSVC dev env (Windows CUDA)
         if: matrix.features == 'cuda' && runner.os == 'Windows'
