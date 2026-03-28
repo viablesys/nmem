@@ -60,6 +60,11 @@ jobs:
             artifact: nmem-linux-x86_64-rocm
             features: rocm
             container: rocm/dev-ubuntu-24.04:6.4-complete
+          # GPU builds (Windows)
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: nmem-windows-x86_64-cuda
+            features: cuda
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container || '' }}
     permissions:
@@ -102,6 +107,27 @@ jobs:
           vcpkg install openssl:x64-windows-static-md
           echo "OPENSSL_DIR=C:\vcpkg\packages\openssl_x64-windows-static-md" >> $env:GITHUB_ENV
           echo "OPENSSL_STATIC=1" >> $env:GITHUB_ENV
+
+      - name: Install LLVM (Windows CUDA)
+        if: matrix.features == 'cuda' && runner.os == 'Windows'
+        run: choco install llvm --no-progress -y
+
+      - name: Install CUDA toolkit (Windows)
+        if: matrix.features == 'cuda' && runner.os == 'Windows'
+        uses: Jimver/cuda-toolkit@v0.1.16
+        with:
+          cuda: '12.4.0'
+          method: 'network'
+          sub-packages: '["nvcc", "cublas", "cublas_dev", "cudart"]'
+
+      - name: Configure CUDA linker env (Windows)
+        if: matrix.features == 'cuda' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $cudaLib = "$env:CUDA_PATH\lib\x64"
+          $existing = if ($env:LIB) { ";$env:LIB" } else { "" }
+          echo "LIB=$cudaLib$existing" >> $env:GITHUB_ENV
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
 
       - name: Configure ROCm linker
         if: matrix.features == 'rocm'

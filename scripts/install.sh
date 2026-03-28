@@ -1,35 +1,95 @@
 #!/bin/sh
 # nmem installer — downloads the correct binary for your platform.
 # Usage: curl -fsSL https://raw.githubusercontent.com/viablesys/nmem/main/scripts/install.sh | sh
+# Options:
+#   --cuda   Install the CUDA-accelerated build (Linux x86_64 or Windows x86_64)
+#   --rocm   Install the ROCm-accelerated build (Linux x86_64 only)
+# Windows (PowerShell): use scripts/install.ps1 instead.
+# Windows (Git Bash / MSYS2 / Cygwin): this script works as-is.
 
 set -e
 
 REPO="viablesys/nmem"
 INSTALL_DIR="$HOME/.local/bin"
+GPU_VARIANT=""
+EXT=""
+
+# Parse flags
+for arg in "$@"; do
+  case "$arg" in
+    --cuda) GPU_VARIANT="cuda" ;;
+    --rocm) GPU_VARIANT="rocm" ;;
+  esac
+done
 
 # Detect OS
 OS="$(uname -s)"
 case "$OS" in
-  Linux)  OS_TAG="linux" ;;
-  Darwin) OS_TAG="macos" ;;
+  Linux)              OS_TAG="linux" ;;
+  Darwin)             OS_TAG="macos" ;;
+  MINGW*|MSYS*|CYGWIN*) OS_TAG="windows"; EXT=".exe" ;;
   *)
     echo "Unsupported OS: $OS" >&2
+    echo "Windows PowerShell users: irm https://raw.githubusercontent.com/${REPO}/main/scripts/install.ps1 | iex" >&2
     exit 1
     ;;
 esac
 
 # Detect architecture
 ARCH="$(uname -m)"
-case "$ARCH" in
-  x86_64|amd64)  ARCH_TAG="x86_64" ;;
-  arm64|aarch64)  ARCH_TAG="arm64" ;;
-  *)
-    echo "Unsupported architecture: $ARCH" >&2
-    exit 1
+case "$OS_TAG" in
+  macos)
+    # Only arm64 (Apple Silicon) binary is distributed.
+    # Runs natively on Apple Silicon; requires Rosetta 2 on Intel Macs.
+    ARCH_TAG="arm64"
+    if [ "$ARCH" = "x86_64" ]; then
+      echo "Note: Intel Mac detected. Using the arm64 binary via Rosetta 2."
+      echo "If Rosetta 2 is not installed: softwareupdate --install-rosetta"
+    fi
+    ;;
+  linux)
+    case "$ARCH" in
+      x86_64|amd64) ARCH_TAG="x86_64" ;;
+      arm64|aarch64)
+        echo "Linux arm64 does not have a prebuilt binary yet." >&2
+        echo "Build from source: https://github.com/${REPO}#building" >&2
+        exit 1
+        ;;
+      *)
+        echo "Unsupported architecture: $ARCH" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  windows)
+    case "$ARCH" in
+      x86_64|amd64) ARCH_TAG="x86_64" ;;
+      *)
+        echo "Unsupported architecture: $ARCH" >&2
+        exit 1
+        ;;
+    esac
     ;;
 esac
 
-TARGET="nmem-${OS_TAG}-${ARCH_TAG}"
+# ROCm is Linux x86_64 only
+if [ "$GPU_VARIANT" = "rocm" ] && [ "$OS_TAG" != "linux" ]; then
+  echo "--rocm is only available for Linux x86_64." >&2
+  exit 1
+fi
+
+# GPU variants require x86_64
+if [ -n "$GPU_VARIANT" ] && [ "$ARCH_TAG" != "x86_64" ]; then
+  echo "--cuda/--rocm are only available for x86_64." >&2
+  exit 1
+fi
+
+# Build target name
+if [ -n "$GPU_VARIANT" ]; then
+  TARGET="nmem-${OS_TAG}-${ARCH_TAG}-${GPU_VARIANT}"
+else
+  TARGET="nmem-${OS_TAG}-${ARCH_TAG}"
+fi
 
 # Get latest release tag
 if command -v curl >/dev/null 2>&1; then
@@ -49,23 +109,23 @@ if [ -z "$TAG" ]; then
   exit 1
 fi
 
-URL="https://github.com/${REPO}/releases/download/${TAG}/${TARGET}"
-echo "Downloading ${TARGET} (${TAG})..."
+URL="https://github.com/${REPO}/releases/download/${TAG}/${TARGET}${EXT}"
+echo "Downloading ${TARGET}${EXT} (${TAG})..."
 
 # Create install directory
 mkdir -p "$INSTALL_DIR"
 
 # Download
 if command -v curl >/dev/null 2>&1; then
-  curl -fsSL -o "${INSTALL_DIR}/nmem" "$URL"
+  curl -fsSL -o "${INSTALL_DIR}/nmem${EXT}" "$URL"
 else
-  wget -qO "${INSTALL_DIR}/nmem" "$URL"
+  wget -qO "${INSTALL_DIR}/nmem${EXT}" "$URL"
 fi
 
-chmod +x "${INSTALL_DIR}/nmem"
+chmod +x "${INSTALL_DIR}/nmem${EXT}"
 
 # Ad-hoc codesign on macOS — required to avoid SIGKILL from Gatekeeper
-if [ "$OS" = "Darwin" ] && command -v codesign >/dev/null 2>&1; then
+if [ "$OS_TAG" = "macos" ] && command -v codesign >/dev/null 2>&1; then
   codesign --force --sign - "${INSTALL_DIR}/nmem" 2>/dev/null || true
 fi
 
@@ -73,7 +133,7 @@ fi
 mkdir -p "$HOME/.nmem"
 
 echo ""
-echo "Installed nmem to ${INSTALL_DIR}/nmem"
+echo "Installed nmem to ${INSTALL_DIR}/nmem${EXT}"
 
 # Check PATH
 case ":$PATH:" in
