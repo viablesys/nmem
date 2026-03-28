@@ -114,7 +114,7 @@ jobs:
 
       - name: Install CUDA toolkit (Windows)
         if: matrix.features == 'cuda' && runner.os == 'Windows'
-        uses: Jimver/cuda-toolkit@v0.1.16
+        uses: Jimver/cuda-toolkit@v0.2.34
         with:
           cuda: '12.4.0'
           method: 'network'
