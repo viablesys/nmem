@@ -129,6 +129,10 @@ jobs:
           echo "LIB=$cudaLib$existing" >> $env:GITHUB_ENV
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
 
+      - name: Set up MSVC dev env (Windows CUDA)
+        if: matrix.features == 'cuda' && runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: Configure ROCm linker
         if: matrix.features == 'rocm'
         run: |
