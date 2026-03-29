@@ -3,7 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ["v*"]
+    tags: ["v*", "metal-dev*"]
   pull_request:
     branches: [main]
 
@@ -29,6 +29,21 @@ jobs:
       - run: cargo clippy -- -D warnings
       - run: cargo test
 
+  check-metal:
+    if: startsWith(github.ref, 'refs/tags/metal-dev')
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: metal-dev
+
+      - run: cargo clippy --features metal -- -D warnings
+      - run: cargo test --features metal
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: check
@@ -45,6 +60,10 @@ jobs:
             target: aarch64-apple-darwin
             artifact: nmem-macos-arm64
             features: ""
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: nmem-macos-arm64-metal
+            features: metal
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: nmem-windows-x86_64

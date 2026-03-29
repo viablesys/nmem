@@ -4,6 +4,7 @@
 # Options:
 #   --cuda   Install the CUDA-accelerated build (Linux x86_64 or Windows x86_64)
 #   --rocm   Install the ROCm-accelerated build (Linux x86_64 only)
+#   --metal  Install the Metal-accelerated build (macOS arm64 only)
 # Windows (PowerShell): use scripts/install.ps1 instead.
 # Windows (Git Bash / MSYS2 / Cygwin): this script works as-is.
 
@@ -19,6 +20,7 @@ for arg in "$@"; do
   case "$arg" in
     --cuda) GPU_VARIANT="cuda" ;;
     --rocm) GPU_VARIANT="rocm" ;;
+    --metal) GPU_VARIANT="metal" ;;
   esac
 done
 
@@ -45,6 +47,8 @@ case "$OS_TAG" in
     if [ "$ARCH" = "x86_64" ]; then
       echo "Note: Intel Mac detected. Using the arm64 binary via Rosetta 2."
       echo "If Rosetta 2 is not installed: softwareupdate --install-rosetta"
+    elif [ "$ARCH" = "arm64" ] && [ -z "$GPU_VARIANT" ]; then
+      echo "Tip: Apple Silicon detected. For Metal GPU acceleration, re-run with --metal"
     fi
     ;;
   linux)
@@ -78,10 +82,18 @@ if [ "$GPU_VARIANT" = "rocm" ] && [ "$OS_TAG" != "linux" ]; then
   exit 1
 fi
 
-# GPU variants require x86_64
-if [ -n "$GPU_VARIANT" ] && [ "$ARCH_TAG" != "x86_64" ]; then
-  echo "--cuda/--rocm are only available for x86_64." >&2
+# Metal is macOS arm64 only
+if [ "$GPU_VARIANT" = "metal" ] && [ "$OS_TAG" != "macos" ]; then
+  echo "--metal is only available for macOS arm64 (Apple Silicon)." >&2
   exit 1
+fi
+
+# CUDA/ROCm require x86_64; Metal requires arm64
+if [ "$GPU_VARIANT" = "cuda" ] || [ "$GPU_VARIANT" = "rocm" ]; then
+  if [ "$ARCH_TAG" != "x86_64" ]; then
+    echo "--cuda/--rocm are only available for x86_64." >&2
+    exit 1
+  fi
 fi
 
 # Build target name

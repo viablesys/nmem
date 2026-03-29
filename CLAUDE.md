@@ -34,6 +34,14 @@ export CUDA_PATH="C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.1"
 
 CI installs CUDA 12.4 with `cublas` + `cublas_dev` sub-packages (see `.github/workflows/ci.yml`). Locally, CUDA 12.1 already has these libs — point `LIB` there instead of installing new components.
 
+**Building with Metal (macOS Apple Silicon):**
+
+```bash
+cargo build --release --features metal
+```
+
+No extra deps — Metal framework ships with macOS. To verify Metal builds in CI without a full release, push a `metal-dev*` tag (e.g., `git tag metal-dev-1 && git push origin metal-dev-1`). This triggers the `check-metal` job in CI.
+
 **`cargo test` fails with exit 127?** Dispatched tmux sessions and some hook contexts don't inherit the user's PATH. Use `~/.cargo/bin/cargo` instead of bare `cargo`. This applies to all Cargo commands in non-interactive shells.
 
 **Clippy loops?** Run `cargo clippy -- -D warnings` after each file you edit, not as a final batch. Fixing 1 lint immediately is cheaper than fixing 5 in a loop at commit time.
