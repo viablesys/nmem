@@ -135,6 +135,8 @@ curl -fsSL https://raw.githubusercontent.com/viablesys/nmem/main/scripts/install
 curl -fsSL https://raw.githubusercontent.com/viablesys/nmem/main/scripts/install.sh | sh -s -- --rocm
 ```
 
+**Windows (Git Bash / MSYS2 / Cygwin):** use the same `install.sh` command as Linux above.
+
 **Windows (PowerShell):**
 ```powershell
 # CPU build
