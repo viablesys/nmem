@@ -122,7 +122,42 @@ Agent-authored observations — conclusions, decisions, research findings, rollb
 
 ## Getting started
 
-### Build
+### Install (prebuilt binary)
+
+**Linux / macOS / Git Bash:**
+```sh
+curl -fsSL https://raw.githubusercontent.com/viablesys/nmem/main/scripts/install.sh | sh
+
+# NVIDIA GPU (Linux x86_64 only)
+curl -fsSL https://raw.githubusercontent.com/viablesys/nmem/main/scripts/install.sh | sh -s -- --cuda
+
+# AMD GPU (Linux x86_64 only)
+curl -fsSL https://raw.githubusercontent.com/viablesys/nmem/main/scripts/install.sh | sh -s -- --rocm
+```
+
+**Windows (PowerShell):**
+```powershell
+# CPU build
+irm https://raw.githubusercontent.com/viablesys/nmem/main/scripts/install.ps1 | iex
+
+# CUDA build
+& { $Cuda = $true; irm https://raw.githubusercontent.com/viablesys/nmem/main/scripts/install.ps1 | iex }
+```
+
+Both scripts install to `~/.local/bin/nmem` and add it to `PATH` if needed.
+
+Or download directly from [GitHub Releases](https://github.com/viablesys/nmem/releases/latest).
+
+### Install via Claude Code plugin
+
+```sh
+claude plugin marketplace add viablesys/claude-plugins
+claude plugin install nmem@viablesys
+```
+
+The plugin installs hooks and MCP configuration automatically.
+
+### Build from source
 
 Requires Rust 1.85+, cmake, C++ compiler (llama.cpp).
 
