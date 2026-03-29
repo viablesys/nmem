@@ -23,7 +23,7 @@ tower-lsp-server = "0.23"
 opentelemetry = { version = "0.30", features = ["metrics"] }
 opentelemetry_sdk = { version = "0.30", features = ["metrics", "rt-tokio"] }
 opentelemetry-otlp = { version = "0.30", features = ["metrics", "grpc-tonic", "http-proto"] }
-llama-cpp-2 = { version = "=0.1.138", default-features = false }
+llama-cpp-2 = { version = "=0.1.140", default-features = false }
 hf-hub = "0.5"
 encoding_rs = "0.8"
 async-nats = "0.46"
