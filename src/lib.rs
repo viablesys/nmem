@@ -119,5 +119,38 @@ pub fn schema_migrations() -> &'static rusqlite_migration::Migrations<'static> {
     &schema::MIGRATIONS
 }
 
+/// Returns the directory containing the nmem binary.
+///
+/// This is the canonical root for all nmem data: DB, key, config, models, logs,
+/// and future artifacts (fleet). All default paths are derived from here, making
+/// nmem self-contained and relocatable without depending on HOME or USERPROFILE.
+pub fn install_dir() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
 // Re-export query functions for backward compatibility
 pub use query::sanitize_fts_query;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn install_dir_is_parent_of_current_exe() {
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(install_dir(), exe.parent().unwrap());
+    }
+
+    #[test]
+    fn install_dir_is_absolute() {
+        assert!(install_dir().is_absolute());
+    }
+
+    #[test]
+    fn install_dir_exists() {
+        assert!(install_dir().is_dir());
+    }
+}

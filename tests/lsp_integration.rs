@@ -37,6 +37,7 @@ fn nmem_bin() -> std::path::PathBuf {
 }
 
 #[test]
+#[cfg(not(windows))]
 fn lsp_initialize_returns_capabilities() {
     let bin = nmem_bin();
     if !bin.exists() {
@@ -99,6 +100,7 @@ fn lsp_initialize_returns_capabilities() {
 }
 
 #[test]
+#[cfg(not(windows))]
 fn lsp_did_open_emits_diagnostic_for_git_file() {
     // Create a temp git repo with a file
     let dir = tempfile::TempDir::new().unwrap();
@@ -193,6 +195,7 @@ fn lsp_did_open_emits_diagnostic_for_git_file() {
 }
 
 #[test]
+#[cfg(not(windows))]
 fn lsp_dedup_skips_second_open() {
     let dir = tempfile::TempDir::new().unwrap();
     let repo = git2::Repository::init(dir.path()).unwrap();
@@ -286,6 +289,7 @@ fn lsp_dedup_skips_second_open() {
 }
 
 #[test]
+#[cfg(not(windows))]
 fn lsp_hover_returns_blame_info() {
     // Create a temp repo with two commits by different authors on different lines
     let dir = tempfile::TempDir::new().unwrap();

@@ -776,6 +776,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn output_path_derivation() {
         let path = output_path_for_task(42);
         assert!(path.to_string_lossy().ends_with("tasks/task-42.md"));

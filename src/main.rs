@@ -6,8 +6,7 @@ use nmem::cli::{Cli, Command};
 use nmem::NmemError;
 
 fn default_db_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    PathBuf::from(home).join(".nmem").join("nmem.db")
+    nmem::install_dir().join("nmem.db")
 }
 
 /// Return the default log level for a command.

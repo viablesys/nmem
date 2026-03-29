@@ -477,10 +477,7 @@ fn spawn_deferred_maintain(session_id: &str, db_path: &Path) {
     cmd.arg("maintain").arg("--session").arg(session_id);
 
     // Pass --db if using a non-default path
-    let default_db = std::path::PathBuf::from(
-        std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()),
-    )
-    .join(".nmem/nmem.db");
+    let default_db = crate::install_dir().join("nmem.db");
     if db_path != default_db {
         cmd.arg("--db").arg(db_path);
     }

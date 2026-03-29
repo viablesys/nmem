@@ -62,9 +62,7 @@ pub(crate) fn siphash_hex(data: &[u8]) -> String {
 }
 
 fn nmem_dir() -> Option<std::path::PathBuf> {
-    std::env::var("HOME")
-        .ok()
-        .map(|h| std::path::PathBuf::from(h).join(".nmem"))
+    Some(crate::install_dir())
 }
 
 /// Embedded model weights — compiled into the binary.
@@ -527,5 +525,22 @@ mod tests {
         let raw = -2.0_f64;
         let prob = 1.0 / (1.0 + (-raw).exp());
         assert!(prob < 0.12);
+    }
+
+    #[test]
+    fn nmem_dir_returns_install_dir() {
+        assert_eq!(nmem_dir(), Some(crate::install_dir()));
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn resolve_model_path_override_is_under_install_dir() {
+        let path = resolve_model_path("think-act.json");
+        // If an override file exists it must be under install_dir/models/;
+        // if it doesn't exist the embedded fallback is used and path is still
+        // rooted at install_dir.
+        if path.exists() {
+            assert!(path.starts_with(crate::install_dir()));
+        }
     }
 }

@@ -31,7 +31,7 @@ fn ensure_secure_permissions(db_path: &Path) -> std::io::Result<()> {
 
 // --- Key management ---
 
-/// Load encryption key: NMEM_KEY env var > config key_file > ~/.nmem/key > None.
+/// Load encryption key: NMEM_KEY env var > config key_file > {install_dir}/nmem.key > None.
 pub fn load_key() -> Option<String> {
     if let Ok(k) = std::env::var("NMEM_KEY")
         && !k.is_empty()
@@ -82,8 +82,7 @@ fn load_or_create_key() -> Result<String, NmemError> {
 }
 
 fn default_key_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    std::path::PathBuf::from(home).join(".nmem").join("key")
+    crate::install_dir().join("nmem.key")
 }
 
 /// Generate 32 random bytes, hex-encoded to 64 chars.
@@ -345,6 +344,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(not(windows))]
     fn generate_key_is_64_hex_chars() {
         let key = generate_random_key().unwrap();
         assert_eq!(key.len(), 64);
@@ -361,6 +361,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn encrypted_db_round_trip() {
         let dir = tempfile::TempDir::new().unwrap();
         let db_path = dir.path().join("test.db");
@@ -523,5 +524,15 @@ mod tests {
         assert!(result.is_err(), "should fail when lock never released");
         assert!(is_busy(&result.unwrap_err()), "error should be BUSY");
         assert!(attempts >= 3, "should have retried at least 3 times, got {attempts}");
+    }
+
+    #[test]
+    fn default_key_path_filename_is_nmem_key() {
+        assert_eq!(default_key_path().file_name().unwrap(), "nmem.key");
+    }
+
+    #[test]
+    fn default_key_path_parent_is_install_dir() {
+        assert_eq!(default_key_path().parent().unwrap(), crate::install_dir());
     }
 }

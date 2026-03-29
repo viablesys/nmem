@@ -4,7 +4,7 @@ use crate::NmemError;
 use regex::Regex;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Debug, Deserialize, Default)]
 pub struct NmemConfig {
@@ -256,8 +256,7 @@ fn config_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("NMEM_CONFIG") {
         return Some(PathBuf::from(p));
     }
-    let home = std::env::var("HOME").ok()?;
-    Some(Path::new(&home).join(".nmem").join("config.toml"))
+    Some(crate::install_dir().join("config.toml"))
 }
 
 fn validate_config(config: &NmemConfig) -> Result<(), NmemError> {
@@ -646,5 +645,21 @@ strategy = "git"
         )
         .unwrap();
         assert_eq!(config.project.strategy, ProjectStrategy::Git);
+    }
+
+    #[test]
+    fn config_path_without_env_is_in_install_dir() {
+        unsafe { std::env::remove_var("NMEM_CONFIG") };
+        let path = config_path().unwrap();
+        assert_eq!(path.file_name().unwrap(), "config.toml");
+        assert_eq!(path.parent().unwrap(), crate::install_dir());
+    }
+
+    #[test]
+    fn config_path_nmem_config_env_overrides_default() {
+        unsafe { std::env::set_var("NMEM_CONFIG", "/custom/nmem.toml") };
+        let path = config_path().unwrap();
+        unsafe { std::env::remove_var("NMEM_CONFIG") };
+        assert_eq!(path, std::path::PathBuf::from("/custom/nmem.toml"));
     }
 }
