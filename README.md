@@ -128,7 +128,7 @@ Agent-authored observations — conclusions, decisions, research findings, rollb
 ```sh
 curl -fsSL https://raw.githubusercontent.com/viablesys/nmem/main/scripts/install.sh | sh
 
-# NVIDIA GPU (Linux x86_64 only)
+# NVIDIA GPU (Linux x86_64 or Windows x86_64)
 curl -fsSL https://raw.githubusercontent.com/viablesys/nmem/main/scripts/install.sh | sh -s -- --cuda
 
 # AMD GPU (Linux x86_64 only)
