@@ -1722,11 +1722,8 @@ impl NmemServer {
 #[tool_handler]
 impl ServerHandler for NmemServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            instructions: Some("nmem: cross-session memory for AI coding agents. Stores records of what the agent did in prior sessions (files read/edited, commands run, searches performed). NOT a general-purpose database — only contains the agent's own past actions and their context.".into()),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            ..Default::default()
-        }
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_instructions("nmem: cross-session memory for AI coding agents. Stores records of what the agent did in prior sessions (files read/edited, commands run, searches performed). NOT a general-purpose database — only contains the agent's own past actions and their context.")
     }
 }
 

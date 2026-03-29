@@ -135,13 +135,46 @@ mkdir -p "$HOME/.nmem"
 echo ""
 echo "Installed nmem to ${INSTALL_DIR}/nmem${EXT}"
 
-# Check PATH
+# Add INSTALL_DIR to PATH in shell profile if not already present
 case ":$PATH:" in
   *":${INSTALL_DIR}:"*) ;;
   *)
     echo ""
-    echo "WARNING: ${INSTALL_DIR} is not in your PATH."
-    echo "Add it with:  export PATH=\"${INSTALL_DIR}:\$PATH\""
+    # Determine which shell profile to update
+    SHELL_NAME="$(basename "${SHELL:-sh}")"
+    case "$SHELL_NAME" in
+      zsh)
+        PROFILES="$HOME/.zshrc"
+        ;;
+      bash)
+        # macOS login shells use .bash_profile; Linux interactive shells use .bashrc
+        if [ "$OS_TAG" = "macos" ]; then
+          PROFILES="$HOME/.bash_profile"
+        else
+          PROFILES="$HOME/.bashrc"
+        fi
+        ;;
+      fish)
+        if command -v fish >/dev/null 2>&1; then
+          fish -c "fish_add_path --universal \"$INSTALL_DIR\"" 2>/dev/null && \
+            echo "Added $INSTALL_DIR to fish universal path. Open a new terminal to use nmem."
+        else
+          echo "WARNING: $INSTALL_DIR is not in your PATH. Add it manually."
+        fi
+        PROFILES=""
+        ;;
+      *)
+        PROFILES="$HOME/.profile"
+        ;;
+    esac
+
+    for RC in $PROFILES; do
+      if ! grep -qF "$INSTALL_DIR" "$RC" 2>/dev/null; then
+        printf '\n# Added by nmem installer\nexport PATH="%s:$PATH"\n' "$INSTALL_DIR" >> "$RC"
+        echo "Added $INSTALL_DIR to PATH in $RC"
+        echo "Open a new terminal (or run: source $RC) for the change to take effect."
+      fi
+    done
     ;;
 esac
 

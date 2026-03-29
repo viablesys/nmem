@@ -24,6 +24,16 @@ cargo clippy -- -D warnings    # run BEFORE committing, not as a batch at the en
 NMEM_DB=/tmp/test.db nmem status   # test against throwaway DB
 ```
 
+**Building with CUDA on Windows (local):** CUDA 12.3 only has the runtime libs — `cublas.lib` is in CUDA 12.1. Set these env vars before building:
+
+```bash
+export LIB="C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.1/lib/x64"
+export CUDA_PATH="C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.1"
+~/.cargo/bin/cargo build --release --features cuda
+```
+
+CI installs CUDA 12.4 with `cublas` + `cublas_dev` sub-packages (see `.github/workflows/ci.yml`). Locally, CUDA 12.1 already has these libs — point `LIB` there instead of installing new components.
+
 **`cargo test` fails with exit 127?** Dispatched tmux sessions and some hook contexts don't inherit the user's PATH. Use `~/.cargo/bin/cargo` instead of bare `cargo`. This applies to all Cargo commands in non-interactive shells.
 
 **Clippy loops?** Run `cargo clippy -- -D warnings` after each file you edit, not as a final batch. Fixing 1 lint immediately is cheaper than fixing 5 in a loop at commit time.
