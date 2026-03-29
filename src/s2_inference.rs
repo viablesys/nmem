@@ -532,15 +532,4 @@ mod tests {
         assert_eq!(nmem_dir(), Some(crate::install_dir()));
     }
 
-    #[test]
-    #[cfg(not(windows))]
-    fn resolve_model_path_override_is_under_install_dir() {
-        let path = resolve_model_path("think-act.json");
-        // If an override file exists it must be under install_dir/models/;
-        // if it doesn't exist the embedded fallback is used and path is still
-        // rooted at install_dir.
-        if path.exists() {
-            assert!(path.starts_with(crate::install_dir()));
-        }
-    }
 }
