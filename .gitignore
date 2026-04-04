@@ -3,3 +3,4 @@ __pycache__/
 target/
 TUTORIAL_PROGRESS.md
 .cargo/
+tmp/
